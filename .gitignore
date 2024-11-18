@@ -2,9 +2,10 @@
 /*.exe
 /*.pdb
 /*.o
-# TODO: add output name here
+crux
 # LLVM IR
 /*.ll
 /*.S
 # Taskfile checksums
 .task
+/.odin-cache
