@@ -9,3 +9,4 @@ crux
 # Taskfile checksums
 .task
 /.odin-cache
+*.spall
