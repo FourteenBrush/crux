@@ -31,7 +31,7 @@ main :: proc() {
     defer os.exit(exitcode)
 
     pool: mem.Dynamic_Arena
-    mem.dynamic_arena_init(&pool, context.allocator, context.allocator, block_size=spall.BUFFER_DEFAULT_SIZE, alignment=64)
+    mem.dynamic_arena_init(&pool, context.allocator, context.allocator, block_size=spall.BUFFER_DEFAULT_SIZE, alignment=size_of(rawptr))
     allocator := mem.dynamic_arena_allocator(&pool)
     defer mem.dynamic_arena_destroy(&pool)
 
@@ -39,6 +39,7 @@ main :: proc() {
     when ODIN_DEBUG {
         tracking_alloc: mem.Tracking_Allocator
         mem.tracking_allocator_init(&tracking_alloc, allocator, allocator)
+        tracking_alloc.bad_free_callback = mem.tracking_allocator_bad_free_callback_add_to_array
         defer mem.tracking_allocator_destroy(&tracking_alloc)
         allocator = mem.tracking_allocator(&tracking_alloc)
 
