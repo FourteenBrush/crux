@@ -31,7 +31,10 @@ main :: proc() {
     defer os.exit(exitcode)
 
     pool: mem.Dynamic_Arena
-    mem.dynamic_arena_init(&pool, context.allocator, context.allocator, block_size=spall.BUFFER_DEFAULT_SIZE, alignment=size_of(rawptr))
+    mem.dynamic_arena_init(
+      &pool, context.allocator, context.allocator,
+      block_size=spall.BUFFER_DEFAULT_SIZE, alignment=runtime.MAP_CACHE_LINE_SIZE,
+    )
     allocator := mem.dynamic_arena_allocator(&pool)
     defer mem.dynamic_arena_destroy(&pool)
 
