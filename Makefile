@@ -4,16 +4,17 @@ PROG = crux
 SRC = src
 SOURCE_FILES = $(call rwildcard,$(SRC)/*.odin)
 TESTS = tests
+COLLECTIONS = -collection:lib=lib
 
 CC = odin
-CFLAGS = -out:$(PROG) -strict-style -vet-semicolon -vet-cast -vet-using-param
+CFLAGS = -out:$(PROG) -strict-style -vet-semicolon -vet-cast -vet-using-param $(COLLECTIONS)
 
 all: release
 
 release: CFLAGS += -vet-unused -o:speed -microarch:native
 release: $(PROG)
 
-debug: CFLAGS += -debug -o:none
+debug: CFLAGS += -debug -o:none -define:TRACY_ENABLE=true
 debug: $(PROG)
 
 test: CFLAGS += -define:ODIN_TEST_LOG_LEVEL=warning -debug
