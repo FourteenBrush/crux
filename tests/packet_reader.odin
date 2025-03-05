@@ -41,10 +41,9 @@ test_packed_read_non_enclosed_block :: proc(t: ^testing.T) {
 
     retrieved50, _ := read_packed(&r, type_of(block50))
     testing.expect_value(t, retrieved50, block50)
-    log.warn(r)
 
     error, ok := read_packed(&r, Data(1)) // something non ZST
-    testing.expectf(t, !ok, "expected next read to fail as buf is empty, len(buf): %d", queue.len(r.read_buf))
+    testing.expectf(t, !ok, "expected next read to fail as buf is empty, len(buf): %d", queue.len(r.buf))
     testing.expect(t, !ok, "expected next read to fail as buf is empty")
     testing.expect_value(t, error, Data(1){})
 }
