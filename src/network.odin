@@ -9,7 +9,7 @@ import "base:intrinsics"
 _ :: mem
 
 SEGMENT_BITS :: 0x07
-CONTINUE_BIT :: 0x08
+CONTINUE_BIT :: 0x80
 
 // Per client buffer, where network calls store their data,
 // may be reallocated to fit a whole packet.
