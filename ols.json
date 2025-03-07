@@ -6,6 +6,9 @@
     "enable_document_symbols": true,
     "enable_fake_methods": true,
     "checker_args": "-debug -strict-style -vet-unused -vet-semicolon -vet-cast -vet-using-param",
+    "profiles": [
+      { "name": "default", "checker_path": ["src", "tests"] }
+    ],
     "collections": [
       { "name": "lib", "path": "lib/" }
     ]
