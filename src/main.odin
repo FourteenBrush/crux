@@ -5,6 +5,7 @@ import "core:log"
 import "core:mem"
 import "core:time"
 import "core:thread"
+import "core:c/libc"
 
 import "base:runtime"
 
@@ -15,6 +16,9 @@ _ :: time
 _ :: runtime
 
 ExitCode :: int
+
+@(private="file")
+g_server_context: runtime.Context
 
 main :: proc() {
     exitcode: ExitCode
@@ -52,6 +56,14 @@ main :: proc() {
         header = header[:len(header) - len("--- ")]
     }
 
+    g_server_context = context
+    libc.signal(libc.SIGINT, proc "c" (_: i32) {
+        // TODO: probably want to have this volatile
+        context = g_server_context
+        log.debug("stopping server")
+        g_running = false
+    })
+
     // ensure from now on, no allocations are done with the default heap allocator
     context.allocator = mem.panic_allocator()
 
@@ -61,7 +73,7 @@ main :: proc() {
     tracy.SetThreadName("main")
 
     // TODO
-    args, ok := parse_cli_args()
+    args, ok := parse_cli_args(allocator)
     log.info(args, ok)
 
     workers: thread.Pool

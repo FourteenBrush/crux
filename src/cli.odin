@@ -14,9 +14,9 @@ cli_init :: proc() {
     flags.register_flag_checker(endpoint_flag_checker)
 }
 
-parse_cli_args :: proc() -> (CliArgs, bool) {
+parse_cli_args :: proc(allocator := context.allocator) -> (CliArgs, bool) {
     args: CliArgs
-    if err := flags.parse(&args, os.args[1:]); err != nil {
+    if err := flags.parse(&args, os.args[1:], allocator=allocator); err != nil {
         log.error("failed to parse command line:", err)
         return args, false
     }

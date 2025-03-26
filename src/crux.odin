@@ -6,12 +6,14 @@ import "core:net"
 import "core:time"
 import "core:sys/linux"
 
+import "lib:tracy"
+
 TARGET_TPS :: 20
 EPOLL_EVENT_BUF_SIZE :: 128
 
 g_running := true
 
-run :: proc(allocator := context.allocator) -> ExitCode {
+run :: proc(allocator: mem.Allocator) -> ExitCode {
     endpoint := net.Endpoint {
         address = net.IP4_Loopback,
         port = 25565,
@@ -40,13 +42,15 @@ run :: proc(allocator := context.allocator) -> ExitCode {
     }
 
     for g_running {
+        defer tracy.FrameMark()
         start := time.tick_now()
 
-        if SCOPED_EVENT("FRAME IMPL") {
+        frame_impl: {
+            tracy.ZoneN("FRAME_IMPL")
             exitcode := accept_connections(server_sock, &conn_man, allocator)
             if exitcode != 0 do return exitcode
 
-            exitcode = process_incoming_packets(&conn_man)
+            exitcode = process_incoming_packets(&conn_man, allocator)
             if exitcode != 0 do return exitcode
         }
         free_all(context.temp_allocator)
@@ -69,12 +73,16 @@ accept_connections :: proc(server_sock: net.TCP_Socket, conn_man: ^ConnectionMan
         // which makes every write one IP packet, implement buffering ourselves,
         client_sock, source, accept_err := net.accept_tcp(server_sock)
         // TODO: close on disconnect
-        if accept_err == net.Accept_Error.Would_Block do break // TODO: sure about this?
-        else if accept_err != nil {
-            return fatal("failed to accept client:", accept_err)
+        if accept_err == net.Accept_Error.Would_Block {
+            // server socket is marked non-blocking, no available connections
+            break
+        } else if accept_err != nil {
+            log.warn("failed to accept client:", accept_err)
+            continue
         }
 
-        if SCOPED_EVENT("ACCEPT CLIENT") {
+        accept_client: {
+            tracy.ZoneN("ACCEPT_CLIENT")
             event := linux.EPoll_Event {
                 events = .IN,
                 data = { fd = linux.Fd(client_sock) },
@@ -88,7 +96,7 @@ accept_connections :: proc(server_sock: net.TCP_Socket, conn_man: ^ConnectionMan
             }
 
             conn_man.client_connections[event.data.fd] = ClientConnection {
-                buf = create_packet_reader(allocator),
+                buf = create_packet_reader(allocator=allocator),
             }
             log.debugf("got a request from %v, client fd=%d", source, linux.Fd(client_sock))
         }
@@ -97,26 +105,36 @@ accept_connections :: proc(server_sock: net.TCP_Socket, conn_man: ^ConnectionMan
     return 0
 }
 
-process_incoming_packets :: proc(conn_man: ^ConnectionManager) -> ExitCode {
+process_incoming_packets :: proc(conn_man: ^ConnectionManager, allocator: mem.Allocator) -> ExitCode {
     events: [EPOLL_EVENT_BUF_SIZE]linux.EPoll_Event
 
-    nready, epoll_err := linux.epoll_wait(conn_man.epoll_fd, &events[0], len(events), 0)
+    nready, epoll_err := linux.epoll_wait(conn_man.epoll_fd, &events[0], len(events), timeout=0)
     if epoll_err != nil {
         return fatal("epoll_wait() failed:", epoll_err)
     }
 
     recv_buf: [1024]u8
     for event in events[:nready] {
-        if event.events != .IN do continue
+        if event.events != .IN {
+            // TODO: handle other events (also implicit error conditions)
+            log.info("unexpected event type", event.events)
+            continue
+        }
 
         client_fd := event.data.fd
         assert(client_fd > 0, "epoll_ctl did not pass fd correctly")
         socket := net.TCP_Socket(client_fd)
         // TODO: read all (remaining) available data when n == len(recv_buf)
-        n, net_err := net.recv_tcp(socket, recv_buf[:])
+        n, recv_err := net.recv_tcp(socket, recv_buf[:])
 
         switch {
-        case net_err != nil: return fatal("error reading from client socket", net_err)
+        case recv_err == net.TCP_Recv_Error.Timeout: // EWOULDBLOCK
+            // we asked for a situation where the socket is available for read() operations,
+            // but there's no data, anyways...
+            // FIXME: could this also indicate an eof?
+            continue
+        case recv_err != nil:
+            return fatal("error reading from client socket", recv_err)
         case n == 0: // TODO: disconnect, keeps looping cuz eof also means ready
             log.info("client disconnected")
             epoll_err = linux.epoll_ctl(conn_man.epoll_fd, .DEL, client_fd, nil)
@@ -133,7 +151,7 @@ process_incoming_packets :: proc(conn_man: ^ConnectionManager) -> ExitCode {
         // push them to packet queue of client
         push_data(reader, recv_buf[:n])
 
-        packet, ok := read_serverbound(reader)
+        packet, ok := read_serverbound(reader, allocator)
         if !ok {
             log.error("failed to read serverbound packet")
             continue
