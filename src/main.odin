@@ -3,6 +3,7 @@ package crux
 import "core:os"
 import "core:log"
 import "core:mem"
+import "core:sync"
 import "core:time"
 import "core:thread"
 import "core:c/libc"
@@ -60,8 +61,8 @@ main :: proc() {
     libc.signal(libc.SIGINT, proc "c" (_: i32) {
         // TODO: probably want to have this volatile
         context = g_server_context
-        log.debug("stopping server")
-        g_running = false
+        log.info("stopping server")
+        sync.atomic_store_explicit(&g_running, false, .Release)
     })
 
     // ensure from now on, no allocations are done with the default heap allocator

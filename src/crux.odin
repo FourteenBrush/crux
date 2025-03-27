@@ -3,6 +3,7 @@ package crux
 import "core:log"
 import "core:mem"
 import "core:net"
+import "core:sync"
 import "core:time"
 import "core:sys/linux"
 
@@ -41,7 +42,7 @@ run :: proc(allocator: mem.Allocator) -> ExitCode {
         client_connections = make(map[linux.Fd]ClientConnection, 16, allocator),
     }
 
-    for g_running {
+    for sync.atomic_load_explicit(&g_running, .Acquire) {
         defer tracy.FrameMark()
         start := time.tick_now()
 
