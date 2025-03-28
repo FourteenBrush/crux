@@ -80,6 +80,7 @@ read_serverbound :: proc(b: ^NetworkBuffer, allocator: mem.Allocator) -> (p: Ser
     if consume_u16_if(b, 0xfe01) or_return {
         // i suppose this wont be ambiguous with a serverbound ping request, which has packet_id 0x01
         // as its length is always a varint + long, which is definitely smaller than 0xfe (254)
+        // TODO: use rest of the packet
         return LegacyServerPingPacket {}, true
     }
     // TODO: do some pos marking in case we dont have enough bytes to read the full packet

@@ -1,29 +1,11 @@
 #+build linux
-package crux
+package reactor
 
 import "core:net"
 import "core:sys/linux"
 
 IOContext :: struct {
     epoll_fd: linux.Fd,
-}
-
-// Event emitted by polling the IOContext.
-// TODO: move to shared stub when we create a package for this
-Event :: struct {
-    // Thc client socket that emitted the event
-    client: net.TCP_Socket,
-    // Multiple flags might be present at the same time, as to batch multiple events
-    flags: EventFlags,
-}
-
-EventFlags :: bit_set[EventFlag]
-
-EventFlag :: enum {
-    In,
-    Out,
-    Err,
-    Hup,
 }
 
 create_io_context :: proc() -> (ctx: IOContext, ok: bool) {
@@ -61,17 +43,17 @@ await_io_events :: proc(ctx: ^IOContext, events_out: ^[$N]Event, timeout: int) -
     for event, i in epoll_events[:nready] {
         flags: EventFlags
         if event.events & .IN == .IN {
-            flags += {.In}
+            flags += {.Readable}
         }
         if event.events & .OUT == .OUT {
-            flags += {.Out}
+            flags += {.Writable}
         }
         if event.events & .ERR == .ERR {
             flags += {.Err}
         }
         // handle abrupt disconnection and read hangup the same way
         if event.events & .HUP == .HUP || event.events & .RDHUP == .RDHUP {
-            flags += {.Hup}
+            flags += {.Hangup}
         }
 
         // map to our even type

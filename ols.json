@@ -10,6 +10,7 @@
       { "name": "default", "checker_path": ["src", "tests"] }
     ],
     "collections": [
+      { "name": "src", "path": "src/" },
       { "name": "lib", "path": "lib/" }
     ]
 }

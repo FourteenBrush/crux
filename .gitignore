@@ -6,6 +6,7 @@ crux
 # LLVM IR
 /*.ll
 /*.S
+build/
 # Taskfile checksums
 .task
 /.odin-cache

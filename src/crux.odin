@@ -6,6 +6,8 @@ import "core:net"
 import "core:sync"
 import "core:time"
 
+import "src:reactor"
+
 import "lib:tracy"
 
 TARGET_TPS :: 20
@@ -31,11 +33,11 @@ run :: proc(allocator: mem.Allocator) -> ExitCode {
         return fatal("failed to set socket to non blocking", net_err)
     }
 
-    io_ctx, ok := create_io_context()
+    io_ctx, ok := reactor.create_io_context()
     if !ok {
         return fatal("failed to create io context")
     }
-    defer destroy_io_context(&io_ctx)
+    defer reactor.destroy_io_context(&io_ctx)
 
     server := Server {
         io_ctx = io_ctx,
@@ -58,7 +60,6 @@ run :: proc(allocator: mem.Allocator) -> ExitCode {
         free_all(context.temp_allocator)
 
         tick_duration := time.tick_since(start)
-        // TODO: bug in odin compiler, doesnt let me use :: here
         target_tick_time :: 1000 / TARGET_TPS * time.Millisecond
         if tick_duration < target_tick_time {
             //log.debug("tick time", tick_duration, "sleeping", target_tick_time - tick_duration)
@@ -93,12 +94,10 @@ accept_connections :: proc(server_sock: net.TCP_Socket, server: ^Server, allocat
                 continue
             }
 
-            if !register_client(&server.io_ctx, client_sock) {
+            if !reactor.register_client(&server.io_ctx, client_sock) {
                 net.close(client_sock)
                 return fatal("failed to register client")
             }
-            // TODO: linux.epoll_ctl(epoll_fd, .DEL, linux.Fd(client_sock), nil) on disconnect
-
             client_conn^ = ClientConnection {
                 buf = create_network_buf(allocator=allocator),
                 state = .Handshake,
@@ -115,15 +114,15 @@ accept_connections :: proc(server_sock: net.TCP_Socket, server: ^Server, allocat
 }
 
 process_incoming_packets :: proc(server: ^Server, allocator: mem.Allocator) -> ExitCode {
-    events: [512]Event
-    nready, ok := await_io_events(&server.io_ctx, &events, timeout=0)
+    events: [512]reactor.Event
+    nready, ok := reactor.await_io_events(&server.io_ctx, &events, timeout=0)
     if !ok {
         return fatal("failed to await io events")
     }
 
     recv_buf: [1024]u8
     for event in events[:nready] {
-        if .In in event.flags {
+        if .Readable in event.flags {
             n, recv_err := net.recv_tcp(event.client, recv_buf[:])
             switch {
             case recv_err == net.TCP_Recv_Error.Timeout: // EWOULDBLOCK
@@ -154,13 +153,13 @@ process_incoming_packets :: proc(server: ^Server, allocator: mem.Allocator) -> E
                     log.info(packet)
                 }
             }
-        } else if .Out in event.flags {
+        } else if .Writable in event.flags {
             // TODO
             log.debug("client socket is available for writing")
         } else if .Err in event.flags {
             log.warn("client socket error")
             handle_client_disconnect(server, event.client)
-        } else if .Hup in event.flags {
+        } else if .Hangup in event.flags {
             log.warn("client socket hangup")
             handle_client_disconnect(server, event.client)
         }
@@ -173,11 +172,11 @@ handle_client_disconnect :: proc(server: ^Server, client_sock: net.TCP_Socket) {
     _, addr := delete_key(&server.client_socks_to_addr, client_sock)
     delete_key(&server.client_connections, addr)
     // FIXME: probably want to handle error
-    unregister_client(&server.io_ctx, client_sock)
+    reactor.unregister_client(&server.io_ctx, client_sock)
 }
 
 Server :: struct {
-    io_ctx: IOContext,
+    io_ctx: reactor.IOContext,
     client_connections: map[net.Address]ClientConnection,
     // TODO: rather stupud way to go indirectly from io ctx associated data
     // to the client data, via client_connections (2 lookups)
