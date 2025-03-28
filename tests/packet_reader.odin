@@ -18,8 +18,8 @@ expect_same_retrieval :: proc(t: ^testing.T, buf: ^crux.NetworkBuffer, data: ^[$
 @(test)
 test_length_and_offset_correctness :: proc(t: ^testing.T) {
     using crux
-    r := create_packet_reader()
-    defer destroy_packet_reader(&r)
+    r := create_network_buffer()
+    defer destroy_network_buf(&r)
 
     data := random_block(50)
     push_data(&r, data[:])
@@ -33,8 +33,8 @@ test_length_and_offset_correctness :: proc(t: ^testing.T) {
 @(test)
 test_packed_reads_zero_offset :: proc(t: ^testing.T) {
     using crux
-    r := create_packet_reader()
-    defer destroy_packet_reader(&r)
+    r := create_network_buffer()
+    defer destroy_network_buf(&r)
 
     data := random_block(50)
     push_data(&r, data[:])
@@ -46,8 +46,8 @@ test_packed_reads_zero_offset :: proc(t: ^testing.T) {
 @(test)
 test_packed_read_non_enclosed_block :: proc(t: ^testing.T) {
     using crux
-    r := create_packet_reader()
-    defer destroy_packet_reader(&r)
+    r := create_network_buffer()
+    defer destroy_network_buf(&r)
 
     b20 := random_block(20)
     b50 := random_block(50)
@@ -69,8 +69,8 @@ test_packed_read_non_enclosed_block :: proc(t: ^testing.T) {
 @(test)
 test_growth :: proc(t: ^testing.T) {
     using crux
-    r := create_packet_reader(cap=50)
-    defer destroy_packet_reader(&r)
+    r := create_network_buffer(cap=50)
+    defer destroy_network_buf(&r)
 
     data := random_block(50)
     push_data(&r, data[:])
@@ -82,8 +82,8 @@ test_growth :: proc(t: ^testing.T) {
 @(test)
 read_on_empty :: proc(t: ^testing.T) {
     using crux
-    r := create_packet_reader()
-    defer destroy_packet_reader(&r)
+    r := create_network_buffer()
+    defer destroy_network_buf(&r)
 
     bytes, ok := read_nbytes(&r, 1)
     testing.expect_value(t, len(bytes), 0)

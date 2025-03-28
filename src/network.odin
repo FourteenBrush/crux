@@ -21,16 +21,18 @@ NetworkBuffer :: struct {
     r_offset: int,
 }
 
-create_packet_reader :: proc(cap := 512, allocator := context.allocator) -> (reader: NetworkBuffer) {
+create_network_buf :: proc(cap := 512, allocator := context.allocator) -> (reader: NetworkBuffer) {
     assert(cap > 0)
     reader.data = make([dynamic]u8, 0, cap, allocator)
     return
 }
 
-destroy_packet_reader :: proc(b: ^NetworkBuffer) {
+destroy_network_buf :: proc(b: ^NetworkBuffer) {
     delete(b.data)
 }
 
+// Pushes data into the buffer, reallocating if necessary.
+// `data` is copied.
 push_data :: proc(b: ^NetworkBuffer, data: []u8) #no_bounds_check {
     space := cap(b.data) - b.len
     nrequired := len(data)
@@ -52,6 +54,7 @@ push_data :: proc(b: ^NetworkBuffer, data: []u8) #no_bounds_check {
 }
 
 // Grows the internal buffer, with at least `additional` bytes
+// FIXME: verify this "at least" is correct
 @(private="file")
 grow :: proc(b: ^NetworkBuffer, additional: int) {
     old_len := b.len
@@ -70,18 +73,29 @@ grow :: proc(b: ^NetworkBuffer, additional: int) {
     }
 }
 
+// TODO: on error: differentiate between simply not enough bytes to read and an invalid formed packet
+// in which the latter should kick the client
 read_serverbound :: proc(b: ^NetworkBuffer, allocator: mem.Allocator) -> (p: ServerboundPacket, ok: bool) {
-    ensure_readable(b^, size_of(VarInt) + size_of(PacketId)) or_return
+    // either a legacy server ping or a minimal packet
+    if consume_u16_if(b, 0xfe01) or_return {
+        // i suppose this wont be ambiguous with a serverbound ping request, which has packet_id 0x01
+        // as its length is always a varint + long, which is definitely smaller than 0xfe (254)
+        return LegacyServerPingPacket {}, true
+    }
+    // TODO: do some pos marking in case we dont have enough bytes to read the full packet
+    
     length := read_var_int(b) or_return
     id := read_var_int(b) or_return
+
     ensure_readable(b^, length) or_return
 
     #partial switch PacketId(id) {
     case .Handshake:
+        // TODO: validation
         protocol_version := read_var_int(b) or_return
         server_addr := read_string(b, allocator) or_return
         server_port := read_u16(b) or_return
-        next_state := NextState(read_var_int(b) or_return)
+        next_state := ClientState(read_var_int(b) or_return)
 
         return HandshakePacket {
             protocol_version = protocol_version,
@@ -160,16 +174,32 @@ read_nbytes :: proc(b: ^NetworkBuffer, #any_int n: int, allocator := context.all
 
 @(require_results)
 ensure_readable :: proc(r: NetworkBuffer, #any_int n: int) -> bool {
-    when ODIN_DEBUG do assert(n >= 0) // FIXME: can we formally assert this is always the case?
+    assert(n >= 0) // FIXME: can we formally assert this is always the case?
     return r.len >= n
 }
 
 @(require_results)
 read_u16 :: proc(b: ^NetworkBuffer) -> (u: u16be, ok: bool) {
     ensure_readable(b^, 2) or_return
-    lsb := unchecked_read_byte(b)
     msb := unchecked_read_byte(b)
-    return u16be(msb << 8 | lsb), true
+    lsb := unchecked_read_byte(b)
+    return u16be(msb) << 8 | u16be(lsb), true
+}
+
+// TODO: those no_bounds_check have as side effect that we can read beyond len(b.data),
+// as we never set b.data.len but use b.len instead
+
+@(require_results)
+consume_u16_if :: proc(b: ^NetworkBuffer, u: u16) -> (match, ok: bool) #no_bounds_check {
+    ensure_readable(b^, 2) or_return
+    msb := b.data[b.r_offset]
+    lsb := b.data[(b.r_offset + 1) % cap(b.data)]
+    if (u16(msb) << 8) | u16(lsb) == u {
+        b.len -= 2
+        b.r_offset = (b.r_offset + 2) % cap(b.data)
+        return true, true
+    }
+    return false, true
 }
 
 @(require_results)

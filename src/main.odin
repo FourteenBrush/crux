@@ -1,3 +1,4 @@
+#+feature dynamic-literals
 package crux
 
 import "core:os"
@@ -52,16 +53,15 @@ main :: proc() {
         }
     }
 
-    log_opts := log.Options {.Level, .Thread_Id, .Terminal_Color}
+    log_opts := log.Options {.Level, .Terminal_Color}
     for &header in log.Level_Headers {
         header = header[:len(header) - len("--- ")]
     }
 
     g_server_context = context
     libc.signal(libc.SIGINT, proc "c" (_: i32) {
-        // TODO: probably want to have this volatile
         context = g_server_context
-        log.info("stopping server")
+        log.info("stopping server") // FIXME: this threadsafe?
         sync.atomic_store_explicit(&g_running, false, .Release)
     })
 
