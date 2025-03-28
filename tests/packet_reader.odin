@@ -6,8 +6,6 @@ import "core:math/rand"
 
 import crux "../src"
 
-// TODO: add tests to read data when nothing is present
-
 @(private)
 expect_same_retrieval :: proc(t: ^testing.T, buf: ^crux.NetworkBuffer, data: ^[$S]u8) {
     retrieved, ok := crux.read_nbytes(buf, len(data))
@@ -18,7 +16,7 @@ expect_same_retrieval :: proc(t: ^testing.T, buf: ^crux.NetworkBuffer, data: ^[$
 @(test)
 test_length_and_offset_correctness :: proc(t: ^testing.T) {
     using crux
-    r := create_network_buffer()
+    r := create_network_buf()
     defer destroy_network_buf(&r)
 
     data := random_block(50)
@@ -33,7 +31,7 @@ test_length_and_offset_correctness :: proc(t: ^testing.T) {
 @(test)
 test_packed_reads_zero_offset :: proc(t: ^testing.T) {
     using crux
-    r := create_network_buffer()
+    r := create_network_buf()
     defer destroy_network_buf(&r)
 
     data := random_block(50)
@@ -46,7 +44,7 @@ test_packed_reads_zero_offset :: proc(t: ^testing.T) {
 @(test)
 test_packed_read_non_enclosed_block :: proc(t: ^testing.T) {
     using crux
-    r := create_network_buffer()
+    r := create_network_buf()
     defer destroy_network_buf(&r)
 
     b20 := random_block(20)
@@ -69,7 +67,7 @@ test_packed_read_non_enclosed_block :: proc(t: ^testing.T) {
 @(test)
 test_growth :: proc(t: ^testing.T) {
     using crux
-    r := create_network_buffer(cap=50)
+    r := create_network_buf(cap=50)
     defer destroy_network_buf(&r)
 
     data := random_block(50)
@@ -82,7 +80,7 @@ test_growth :: proc(t: ^testing.T) {
 @(test)
 read_on_empty :: proc(t: ^testing.T) {
     using crux
-    r := create_network_buffer()
+    r := create_network_buf()
     defer destroy_network_buf(&r)
 
     bytes, ok := read_nbytes(&r, 1)
