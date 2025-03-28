@@ -1,6 +1,5 @@
 package crux
 
-import "core:log"
 import "core:mem"
 
 import "base:intrinsics"
@@ -19,6 +18,12 @@ NetworkBuffer :: struct {
     data: [dynamic]u8,
     len: int,
     r_offset: int,
+}
+
+ReadError :: enum {
+    None      = 0,
+    ShortRead = 1,
+    InvalidData,
 }
 
 create_network_buf :: proc(cap := 512, allocator := context.allocator) -> (reader: NetworkBuffer) {
@@ -73,56 +78,17 @@ grow :: proc(b: ^NetworkBuffer, additional: int) {
     }
 }
 
-// TODO: on error: differentiate between simply not enough bytes to read and an invalid formed packet
-// in which the latter should kick the client
-read_serverbound :: proc(b: ^NetworkBuffer, allocator: mem.Allocator) -> (p: ServerboundPacket, ok: bool) {
-    // either a legacy server ping or a minimal packet
-    if consume_u16_if(b, 0xfe01) or_return {
-        // i suppose this wont be ambiguous with a serverbound ping request, which has packet_id 0x01
-        // as its length is always a varint + long, which is definitely smaller than 0xfe (254)
-        // TODO: use rest of the packet
-        return LegacyServerPingPacket {}, true
-    }
-    // TODO: do some pos marking in case we dont have enough bytes to read the full packet
-    
-    length := read_var_int(b) or_return
-    id := read_var_int(b) or_return
-
-    ensure_readable(b^, length) or_return
-
-    #partial switch PacketId(id) {
-    case .Handshake:
-        // TODO: validation
-        protocol_version := read_var_int(b) or_return
-        server_addr := read_string(b, allocator) or_return
-        server_port := read_u16(b) or_return
-        next_state := ClientState(read_var_int(b) or_return)
-
-        return HandshakePacket {
-            protocol_version = protocol_version,
-            server_addr = server_addr,
-            server_port = server_port,
-            next_state = next_state,
-        }, true
-    case:
-        log.warn("unhandled packet id:", PacketId(id))
-        return p, false
-    }
-}
-
 // FIXME: handle address decoding
 // TODO: add max
 @(require_results)
-read_string :: proc(b: ^NetworkBuffer, allocator: mem.Allocator) -> (s: String, ok: bool) {
+read_string :: proc(b: ^NetworkBuffer, allocator: mem.Allocator) -> (s: String, err: ReadError) {
     length := read_var_int(b) or_return
-    return String {
-        length = length,
-        data = read_nbytes(b, length, allocator) or_return,
-    }, true
+    data := read_nbytes(b, length, allocator) or_return
+    return String { length, data }, .None
 }
 
 @(require_results)
-read_var_int :: proc(b: ^NetworkBuffer) -> (val: VarInt, ok: bool) {
+read_var_int :: proc(b: ^NetworkBuffer) -> (val: VarInt, err: ReadError) {
     pos: u16
 
     for {
@@ -131,13 +97,15 @@ read_var_int :: proc(b: ^NetworkBuffer) -> (val: VarInt, ok: bool) {
         if curr & CONTINUE_BIT == 0 do break
 
         pos += 7
-        if pos >= 32 do return // too big
+        if pos >= 32 {
+            return val, .InvalidData // too big
+        }
     }
-    return val, true
+    return val, .None
 }
 
 @(require_results)
-read_var_long :: proc(b: ^NetworkBuffer) -> (val: VarLong, ok: bool) {
+read_var_long :: proc(b: ^NetworkBuffer) -> (val: VarLong, err: ReadError) {
     pos: u16
 
     for {
@@ -146,13 +114,16 @@ read_var_long :: proc(b: ^NetworkBuffer) -> (val: VarLong, ok: bool) {
         if curr & CONTINUE_BIT == 0 do break
 
         pos += 7
-        if pos >= 64 do return // too big
+        if pos >= 64 {
+            // too big
+            return val, .InvalidData
+        }
     }
-    return val, true
+    return val, .None
 }
 
 @(require_results)
-read_nbytes :: proc(b: ^NetworkBuffer, #any_int n: int, allocator := context.allocator) -> (s: []u8, ok: bool) #no_bounds_check {
+read_nbytes :: proc(b: ^NetworkBuffer, #any_int n: int, allocator := context.allocator) -> (s: []u8, err: ReadError) #no_bounds_check {
     // TODO(urgent): avoid allocation; we cant slice into r.data as this is non-contiguous
     // perhaps we can slice into the network received bytes?
     // when does this even get deallocated?
@@ -170,45 +141,47 @@ read_nbytes :: proc(b: ^NetworkBuffer, #any_int n: int, allocator := context.all
     }
     b.r_offset = (b.r_offset + n) % cap(b.data)
     b.len -= n
-    return s, true
+    return s, .None
 }
 
 @(require_results)
-ensure_readable :: proc(r: NetworkBuffer, #any_int n: int) -> bool {
+ensure_readable :: proc(r: NetworkBuffer, #any_int n: int) -> ReadError {
     assert(n >= 0) // FIXME: can we formally assert this is always the case?
-    return r.len >= n
+    #assert(ReadError(0) == .None)
+    #assert(ReadError(1) == .ShortRead)
+    return ReadError(r.len < n)
 }
 
 @(require_results)
-read_u16 :: proc(b: ^NetworkBuffer) -> (u: u16be, ok: bool) {
+read_u16 :: proc(b: ^NetworkBuffer) -> (u: u16be, err: ReadError) {
     ensure_readable(b^, 2) or_return
     msb := unchecked_read_byte(b)
     lsb := unchecked_read_byte(b)
-    return u16be(msb) << 8 | u16be(lsb), true
+    return u16be(msb) << 8 | u16be(lsb), .None
 }
 
 // TODO: those no_bounds_check have as side effect that we can read beyond len(b.data),
 // as we never set b.data.len but use b.len instead
 
 @(require_results)
-consume_u16_if :: proc(b: ^NetworkBuffer, u: u16) -> (match, ok: bool) #no_bounds_check {
+consume_u16_if :: proc(b: ^NetworkBuffer, u: u16) -> (match: bool, err: ReadError) #no_bounds_check {
     ensure_readable(b^, 2) or_return
     msb := b.data[b.r_offset]
     lsb := b.data[(b.r_offset + 1) % cap(b.data)]
     if (u16(msb) << 8) | u16(lsb) == u {
         b.len -= 2
         b.r_offset = (b.r_offset + 2) % cap(b.data)
-        return true, true
+        return true, .None
     }
-    return false, true
+    return false, .None
 }
 
 @(require_results)
-read_byte :: proc(b: ^NetworkBuffer) -> (u8, bool) #no_bounds_check {
-    if b.len == 0 do return 0, false
+read_byte :: proc(b: ^NetworkBuffer) -> (u8, ReadError) #no_bounds_check {
+    if b.len == 0 do return 0, .ShortRead
     b.len -= 1
     defer b.r_offset = (b.r_offset + 1) % cap(b.data)
-    return b.data[b.r_offset], true
+    return b.data[b.r_offset], .None
 }
 
 @(require_results)

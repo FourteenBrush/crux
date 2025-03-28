@@ -15,6 +15,7 @@ create_io_context :: proc() -> (ctx: IOContext, ok: bool) {
 }
 
 destroy_io_context :: proc(ctx: ^IOContext) {
+    // FIXME: perhaps handle error
     linux.close(ctx.epoll_fd)
 }
 
@@ -32,8 +33,6 @@ unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
     return errno == .NONE
 }
 
-// Params:
-// - events_out: a buffer that is at least EPOLL_EVENT_BUF_SIZE long
 await_io_events :: proc(ctx: ^IOContext, events_out: ^[$N]Event, timeout: int) -> (n: int, ok: bool) {
     epoll_events: [N]linux.EPoll_Event
 

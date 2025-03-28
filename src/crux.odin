@@ -143,8 +143,8 @@ process_incoming_packets :: proc(server: ^Server, allocator: mem.Allocator) -> E
                 // TODO: make worker thread form packet, acquire thread boundary lock and
                 // push them to packet queue of client
                 push_data(&client_conn.buf, recv_buf[:n])
-                packet, ok := read_serverbound(&client_conn.buf, allocator)
-                if !ok {
+                packet, read_err := read_serverbound(&client_conn.buf, allocator)
+                if read_err != .None {
                     // NOTE: server attempts to send a legacy server list ping packet
                     // when normal ping times out (30s)
                     log.error("failed to read serverbound packet")
