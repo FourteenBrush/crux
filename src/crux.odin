@@ -85,11 +85,12 @@ accept_connections :: proc(server_sock: net.TCP_Socket, server: ^Server, allocat
             continue
         }
 
-        register_client_: {
+        register_client: {
             tracy.ZoneN("ACCEPT_CLIENT")
+
             _, client_conn, is_new_client, _ := map_entry(&server.client_connections, source.address)
             if !is_new_client {
-                log.warnf("client %d connected again", source.address)
+                log.warnf("client %d connected again (refusing)", source.address)
                 net.close(client_sock)
                 continue
             }
@@ -99,7 +100,7 @@ accept_connections :: proc(server_sock: net.TCP_Socket, server: ^Server, allocat
                 return fatal("failed to register client")
             }
             client_conn^ = ClientConnection {
-                buf = create_network_buf(allocator=allocator),
+                read_buf = create_network_buf(allocator=allocator),
                 state = .Handshake,
             }
             server.client_socks_to_addr[client_sock] = source.address
@@ -142,11 +143,9 @@ process_incoming_packets :: proc(server: ^Server, allocator: mem.Allocator) -> E
                 client_conn := server.client_connections[client_addr]
                 // TODO: make worker thread form packet, acquire thread boundary lock and
                 // push them to packet queue of client
-                push_data(&client_conn.buf, recv_buf[:n])
-                packet, read_err := read_serverbound(&client_conn.buf, allocator)
+                push_data(&client_conn.read_buf, recv_buf[:n])
+                packet, read_err := read_serverbound(&client_conn.read_buf, allocator)
                 if read_err != .None {
-                    // NOTE: server attempts to send a legacy server list ping packet
-                    // when normal ping times out (30s)
                     log.error("failed to read serverbound packet")
                     continue
                 } else {
@@ -187,7 +186,7 @@ Server :: struct {
 
 ClientConnection :: struct {
     // TODO: only for reading from client; implement write buffering
-    buf: NetworkBuffer,
+    read_buf: NetworkBuffer,
     state: ClientState,
 }
 

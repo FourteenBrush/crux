@@ -1,5 +1,6 @@
 package crux
 
+import "core:log"
 import "core:mem"
 
 import "base:intrinsics"
@@ -19,6 +20,15 @@ NetworkBuffer :: struct {
     len: int,
     r_offset: int,
 }
+
+// NOTE: All reading procs are required to only increment the reading position, when the whole
+// read operation succeeds. For example, when reading a VarInt, it is guaranteed
+// that the reading position is only incremented when the whole VarInt could be read.
+// When an invalid byte is encountered, .InvalidData is returned and the reading position
+// stays at where it was before, same goes for an .ShortRead. (no partial success ever modifies the buf)
+// This to implement recovering of lacking enough bytes to read a whole primitive.
+// (This is basically already guaranteed for all reads that know their size beforehand, unless they
+// encounter invalid data and have to abort)
 
 ReadError :: enum {
     None      = 0,
@@ -104,6 +114,26 @@ read_var_int :: proc(b: ^NetworkBuffer) -> (val: VarInt, err: ReadError) {
     return val, .None
 }
 
+// Outputs:
+// `nbytes`: the number of bytes this VarInt uses (continuation byte included)
+@(require_results)
+peek_var_int :: proc(b: ^NetworkBuffer) -> (val: VarInt, nbytes: int, err: ReadError) {
+    pos: u16
+
+    for {
+        curr := peek_byte(b, pos / 7) or_return
+        val |= auto_cast (curr & SEGMENT_BITS) << pos
+        pos += 7
+
+        if curr & CONTINUE_BIT == 0 do break
+
+        if pos >= 32 {
+            return val, nbytes, .InvalidData // too big
+        }
+    }
+    return val, int(pos / 7), .None
+}
+
 @(require_results)
 read_var_long :: proc(b: ^NetworkBuffer) -> (val: VarLong, err: ReadError) {
     pos: u16
@@ -111,9 +141,10 @@ read_var_long :: proc(b: ^NetworkBuffer) -> (val: VarLong, err: ReadError) {
     for {
         curr := read_byte(b) or_return
         val |= auto_cast (curr & SEGMENT_BITS) << pos
+        pos += 7
+
         if curr & CONTINUE_BIT == 0 do break
 
-        pos += 7
         if pos >= 64 {
             // too big
             return val, .InvalidData
@@ -145,11 +176,17 @@ read_nbytes :: proc(b: ^NetworkBuffer, #any_int n: int, allocator := context.all
 }
 
 @(require_results)
-ensure_readable :: proc(r: NetworkBuffer, #any_int n: int) -> ReadError {
+ensure_readable :: proc(b: NetworkBuffer, #any_int n: int) -> ReadError {
     assert(n >= 0) // FIXME: can we formally assert this is always the case?
     #assert(ReadError(0) == .None)
     #assert(ReadError(1) == .ShortRead)
-    return ReadError(r.len < n)
+    return ReadError(b.len < n)
+}
+
+// Advances `n` bytes
+advance_pos_unchecked :: proc(b: ^NetworkBuffer, n: int) {
+    b.len -= n
+    b.r_offset = (b.r_offset + n) % cap(b.data)
 }
 
 @(require_results)
@@ -164,7 +201,7 @@ read_u16 :: proc(b: ^NetworkBuffer) -> (u: u16be, err: ReadError) {
 // as we never set b.data.len but use b.len instead
 
 @(require_results)
-consume_u16_if :: proc(b: ^NetworkBuffer, u: u16) -> (match: bool, err: ReadError) #no_bounds_check {
+consume_u16 :: proc(b: ^NetworkBuffer, u: u16) -> (match: bool, err: ReadError) #no_bounds_check {
     ensure_readable(b^, 2) or_return
     msb := b.data[b.r_offset]
     lsb := b.data[(b.r_offset + 1) % cap(b.data)]
@@ -182,6 +219,12 @@ read_byte :: proc(b: ^NetworkBuffer) -> (u8, ReadError) #no_bounds_check {
     b.len -= 1
     defer b.r_offset = (b.r_offset + 1) % cap(b.data)
     return b.data[b.r_offset], .None
+}
+
+@(require_results)
+peek_byte :: proc(b: ^NetworkBuffer, #any_int off := 0) -> (u8, ReadError) #no_bounds_check {
+    if b.len <= off do return 0, .ShortRead
+    return b.data[(b.r_offset + off) % cap(b.data)], .None
 }
 
 @(require_results)
