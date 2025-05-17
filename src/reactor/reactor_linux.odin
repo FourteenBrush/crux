@@ -21,7 +21,7 @@ destroy_io_context :: proc(ctx: ^IOContext) {
 
 register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
     event := linux.EPoll_Event {
-        events = .IN,
+        events = {.IN},
         data = { fd = linux.Fd(client) },
     }
     errno := linux.epoll_ctl(ctx.epoll_fd, .ADD, linux.Fd(client), &event)
@@ -41,17 +41,17 @@ await_io_events :: proc(ctx: ^IOContext, events_out: ^[$N]Event, timeout: int) -
 
     for event, i in epoll_events[:nready] {
         flags: EventFlags
-        if event.events & .IN == .IN {
+        if .IN in event.events {
             flags += {.Readable}
         }
-        if event.events & .OUT == .OUT {
+        if .OUT in event.events {
             flags += {.Writable}
         }
-        if event.events & .ERR == .ERR {
+        if .ERR in event.events {
             flags += {.Err}
         }
         // handle abrupt disconnection and read hangup the same way
-        if event.events & .HUP == .HUP || event.events & .RDHUP == .RDHUP {
+        if .HUP in event.events || .RDHUP in event.events {
             flags += {.Hangup}
         }
 
