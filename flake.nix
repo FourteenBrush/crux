@@ -19,7 +19,7 @@
         libGL
       ];
       shellHook = ''
-        export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath[
+        export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [
           # (self.packages.tracy-client)
           pkgs.libGL
         ]}
