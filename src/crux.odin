@@ -50,7 +50,7 @@ run :: proc(allocator: mem.Allocator) -> ExitCode {
         start := time.tick_now()
 
         frame_impl: {
-            tracy.ZoneN("FRAME_IMPL")
+            // tracy.ZoneN("FRAME_IMPL")
             exitcode := accept_connections(server_sock, &server, allocator)
             if exitcode != 0 do return exitcode
 
@@ -86,7 +86,7 @@ accept_connections :: proc(server_sock: net.TCP_Socket, server: ^Server, allocat
         }
 
         register_client: {
-            tracy.ZoneN("ACCEPT_CLIENT")
+            // tracy.ZoneN("ACCEPT_CLIENT")
 
             _, client_conn, is_new_client, _ := map_entry(&server.client_connections, source.address)
             if !is_new_client {
