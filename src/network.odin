@@ -1,6 +1,5 @@
 package crux
 
-import "core:log"
 import "core:mem"
 
 import "base:intrinsics"
@@ -21,14 +20,9 @@ NetworkBuffer :: struct {
     r_offset: int,
 }
 
-// NOTE: All reading procs are required to only increment the reading position, when the whole
-// read operation succeeds. For example, when reading a VarInt, it is guaranteed
-// that the reading position is only incremented when the whole VarInt could be read.
-// When an invalid byte is encountered, .InvalidData is returned and the reading position
-// stays at where it was before, same goes for an .ShortRead. (no partial success ever modifies the buf)
-// This to implement recovering of lacking enough bytes to read a whole primitive.
-// (This is basically already guaranteed for all reads that know their size beforehand, unless they
-// encounter invalid data and have to abort)
+// NOTE: all reading procs act transactional when returning .ShortRead, thus
+// not modifying their inner state when not enough bytes are available.
+// All other errors are considered fatal and will modify the state of the buffer.
 
 ReadError :: enum {
     None      = 0,
@@ -99,16 +93,26 @@ read_string :: proc(b: ^NetworkBuffer, allocator: mem.Allocator) -> (s: String, 
 
 @(require_results)
 read_var_int :: proc(b: ^NetworkBuffer) -> (val: VarInt, err: ReadError) {
+    orig_len := b.len
+    orig_r_offset := b.r_offset
     pos: u16
 
     for {
-        curr := read_byte(b) or_return
+        curr, read_err := read_byte(b)
+        if read_err == .ShortRead {
+            // fine as long as b.data is left untouched
+            b.len = orig_len
+            b.r_offset = orig_r_offset
+            return 0, .ShortRead
+        }
+        read_err or_return
+
         val |= auto_cast (curr & SEGMENT_BITS) << pos
         if curr & CONTINUE_BIT == 0 do break
 
         pos += 7
         if pos >= 32 {
-            return val, .InvalidData // too big
+            return 0, .InvalidData // too big
         }
     }
     return val, .None
@@ -136,10 +140,19 @@ peek_var_int :: proc(b: ^NetworkBuffer) -> (val: VarInt, nbytes: int, err: ReadE
 
 @(require_results)
 read_var_long :: proc(b: ^NetworkBuffer) -> (val: VarLong, err: ReadError) {
+    orig_len := b.len
+    orig_r_offset := b.r_offset
     pos: u16
 
     for {
-        curr := read_byte(b) or_return
+        curr, read_err := read_byte(b)
+        if read_err == .ShortRead {
+
+            // fine as long as b.data is left untouched
+            b.len = orig_len
+            b.r_offset = orig_r_offset
+            return 0, .ShortRead
+        }
         val |= auto_cast (curr & SEGMENT_BITS) << pos
         pos += 7
 
