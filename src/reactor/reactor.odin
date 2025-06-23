@@ -18,6 +18,6 @@ EventFlag :: enum {
     Readable,
     Writable,
     Err,
-    // No distinction is made between hangup and read hangup
+    // Read hangup or abrupt disconnection
     Hangup,
 }

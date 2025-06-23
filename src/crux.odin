@@ -5,6 +5,7 @@ import "core:mem"
 import "core:net"
 import "core:sync"
 import "core:time"
+import "core:encoding/json"
 
 import "src:reactor"
 
@@ -41,8 +42,7 @@ run :: proc(allocator: mem.Allocator) -> ExitCode {
 
     server := Server {
         io_ctx = io_ctx,
-        client_connections = make(map[net.Address]ClientConnection, 16, allocator),
-        client_socks_to_addr = make(map[net.TCP_Socket]net.Address, 16, allocator),
+        client_connections = make(map[net.TCP_Socket]ClientConnection, 16, allocator),
     }
 
     for sync.atomic_load_explicit(&g_running, .Acquire) {
@@ -66,17 +66,15 @@ run :: proc(allocator: mem.Allocator) -> ExitCode {
             time.sleep(target_tick_time - tick_duration)
         }
     }
-    
+
     return 0
 }
 
 accept_connections :: proc(server_sock: net.TCP_Socket, server: ^Server, allocator: mem.Allocator) -> ExitCode {
-    // FIXME: perhaps do some timeframing here
     for {
         // TODO: net.accept sets socket TCP_NODELAY by default (or based on ODIN_NET_TCP_NODELAY_DEFAULT)
         // which makes every write one IP packet, implement buffering ourselves,
-        client_sock, source, accept_err := net.accept_tcp(server_sock)
-        // TODO: close on disconnect
+        client_sock, client_endpoint, accept_err := net.accept_tcp(server_sock)
         if accept_err == net.Accept_Error.Would_Block {
             // server socket is marked non-blocking, no available connections
             break
@@ -88,25 +86,21 @@ accept_connections :: proc(server_sock: net.TCP_Socket, server: ^Server, allocat
         register_client: {
             // tracy.ZoneN("ACCEPT_CLIENT")
 
-            _, client_conn, is_new_client, _ := map_entry(&server.client_connections, source.address)
-            if !is_new_client {
-                log.warnf("client %d connected again (refusing)", source.address)
-                net.close(client_sock)
-                continue
-            }
+            // NOTE: we cannot differentiate between individual sockets or client endpoints being the same client
+            // we shouldn't because we are only at handshaking state, and NAT is a thing,
 
             if !reactor.register_client(&server.io_ctx, client_sock) {
                 net.close(client_sock)
-                return fatal("failed to register client")
+                log.error("failed to register client")
+                continue
             }
-            client_conn^ = ClientConnection {
+            server.client_connections[client_sock] = ClientConnection {
                 read_buf = create_network_buf(allocator=allocator),
                 state = .Handshake,
             }
-            server.client_socks_to_addr[client_sock] = source.address
             log.debugf(
                 "client %s:%d connected (fd %d)",
-                net.address_to_string(source.address, context.temp_allocator), source.port, client_sock,
+                net.address_to_string(client_endpoint.address, context.temp_allocator), client_endpoint.port, client_sock,
             )
         }
     }
@@ -116,7 +110,7 @@ accept_connections :: proc(server_sock: net.TCP_Socket, server: ^Server, allocat
 
 process_incoming_packets :: proc(server: ^Server, allocator: mem.Allocator) -> ExitCode {
     events: [512]reactor.Event
-    nready, ok := reactor.await_io_events(&server.io_ctx, &events, timeout=0)
+    nready, ok := reactor.await_io_events(&server.io_ctx, &events, timeout_ms=5)
     if !ok {
         return fatal("failed to await io events")
     }
@@ -125,63 +119,89 @@ process_incoming_packets :: proc(server: ^Server, allocator: mem.Allocator) -> E
     for event in events[:nready] {
         if .Readable in event.flags {
             n, recv_err := net.recv_tcp(event.client, recv_buf[:])
+            log.info(recv_buf[:n])
             switch {
             case recv_err == net.TCP_Recv_Error.Timeout: // EWOULDBLOCK
                 // why is there no data but the socket is available for read() operations? anyways..
                 continue
             case recv_err != nil:
                 log.warn("error reading from client socket:", recv_err)
-                handle_client_disconnect(server, event.client)
+                disconnect_client(server, event.client)
                 continue
-            case n == 0:
+            case n == 0: // EOF
+                disconnect_client(server, event.client)
                 log.info("client disconnected")
-                handle_client_disconnect(server, event.client)
                 continue
             case:
-                // this is stupid
-                client_addr := server.client_socks_to_addr[event.client]
-                client_conn := server.client_connections[client_addr]
-                // TODO: make worker thread form packet, acquire thread boundary lock and
-                // push them to packet queue of client
+                client_conn := server.client_connections[event.client]
                 push_data(&client_conn.read_buf, recv_buf[:n])
                 packet, read_err := read_serverbound(&client_conn.read_buf, allocator)
                 if read_err != .None {
                     log.error("failed to read serverbound packet")
                     continue
-                } else {
-                    log.info(packet)
+                }
+
+                log.info(packet)
+                // TODO: dispatch packet back to main thread, unless LegacyServerPingPacket (i think)
+                if _, ok := packet.(LegacyServerPingPacket); ok {
+                    log.debugf("kicking client due to LegacyServerPingEvent")
+                    disconnect_client(server, event.client)
+                    continue
+                }
+
+                if handshake, ok := packet.(HandshakePacket); ok && handshake.intent == .Status {
+                    log.infof("client state switched %s -> %s", client_conn.state, handshake.intent)
+                    client_conn.state = .Status
+                } else if _, ok := packet.(StatusRequestPacket); ok {
+                    // send json
+                    status_response := StatusResponsePacket {
+                        versionName = "1.21.5",
+                        versionProtocol = 770,
+                        players = {
+                            max = 100,
+                            online = 1,
+                        },
+                        description = {
+                            text = "Some server",
+                        },
+                        favicon = "data:image/png;base64,<data>",
+                        enforcesSecureChat = false,
+                    }
+                    bytes, m_err := json.marshal(status_response, allocator=context.temp_allocator)
+                    log.info(string(bytes))
+                    assert(m_err == nil)
+                    // n, send_err := net.send(event.client, bytes)
+                    // assert(n == len(bytes) && send_err == nil)
                 }
             }
-        } else if .Writable in event.flags {
-            // TODO
-            log.debug("client socket is available for writing")
-        } else if .Err in event.flags {
+        }
+        if .Writable in event.flags {
+            // TODO: check if data is batched, and perform write
+            // log.debug("client socket is available for writing")
+        }
+        if .Err in event.flags {
             log.warn("client socket error")
-            handle_client_disconnect(server, event.client)
+            disconnect_client(server, event.client)
         } else if .Hangup in event.flags {
             log.warn("client socket hangup")
-            handle_client_disconnect(server, event.client)
+            disconnect_client(server, event.client)
         }
     }
 
     return 0
 }
 
-handle_client_disconnect :: proc(server: ^Server, client_sock: net.TCP_Socket) {
-    _, addr := delete_key(&server.client_socks_to_addr, client_sock)
-    delete_key(&server.client_connections, addr)
+// Unregisters a client from the reactor and shuts down the connection.
+disconnect_client :: proc(server: ^Server, client_sock: net.TCP_Socket) {
+    delete_key(&server.client_connections, client_sock)
     // FIXME: probably want to handle error
     reactor.unregister_client(&server.io_ctx, client_sock)
+    net.close(client_sock)
 }
 
 Server :: struct {
     io_ctx: reactor.IOContext,
-    client_connections: map[net.Address]ClientConnection,
-    // TODO: rather stupud way to go indirectly from io ctx associated data
-    // to the client data, via client_connections (2 lookups)
-    // Perhaps generate some uuid from the start??
-    // is a net.TCP_Socket alone unique if we simply disallow multiple connections from the same address?
-    client_socks_to_addr: map[net.TCP_Socket]net.Address,
+    client_connections: map[net.TCP_Socket]ClientConnection,
 }
 
 ClientConnection :: struct {

@@ -21,7 +21,8 @@ destroy_io_context :: proc(ctx: ^IOContext) {
 
 register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
     event := linux.EPoll_Event {
-        events = {.IN},
+        // NOTE: .HUP and .ERR are implicit
+        events = {.IN, .OUT, .RDHUP},
         data = { fd = linux.Fd(client) },
     }
     errno := linux.epoll_ctl(ctx.epoll_fd, .ADD, linux.Fd(client), &event)
@@ -33,10 +34,11 @@ unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
     return errno == .NONE
 }
 
-await_io_events :: proc(ctx: ^IOContext, events_out: ^[$N]Event, timeout: int) -> (n: int, ok: bool) {
+// TODO: pass slice instead of ptr to array
+await_io_events :: proc(ctx: ^IOContext, events_out: ^[$N]Event, timeout_ms: int) -> (n: int, ok: bool) {
     epoll_events: [N]linux.EPoll_Event
 
-    nready, errno := linux.epoll_wait(ctx.epoll_fd, &epoll_events[0], len(epoll_events), timeout=i32(timeout))
+    nready, errno := linux.epoll_wait(ctx.epoll_fd, &epoll_events[0], len(epoll_events), timeout=i32(timeout_ms))
     if errno != .NONE do return
 
     for event, i in epoll_events[:nready] {
@@ -55,7 +57,6 @@ await_io_events :: proc(ctx: ^IOContext, events_out: ^[$N]Event, timeout: int) -
             flags += {.Hangup}
         }
 
-        // map to our even type
         events_out[i] = Event {
             client = net.TCP_Socket(event.data.fd),
             flags = flags,

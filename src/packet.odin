@@ -3,6 +3,11 @@ package crux
 ServerboundPacket :: union {
     LegacyServerPingPacket,
     HandshakePacket,
+    StatusRequestPacket,
+}
+
+ClientBoundPacket :: union {
+
 }
 
 // 7 least significant bits are used to encode the value,
@@ -22,17 +27,28 @@ PacketId :: enum VarInt {
     Handshake = 0x00,
 }
 
-LegacyServerPingPacket :: struct {}
-
 HandshakePacket :: struct {
     protocol_version: VarInt,
     server_addr: String,
     server_port: u16be,
-    next_state: ClientState,
+    intent: ClientState,
 }
+
+LegacyServerPingPacket :: struct {}
+
+StatusRequestPacket :: struct {}
 
 ConnectionState :: enum VarInt {
     Status = 1,
     Login = 2,
     Transfer = 3,
+}
+
+StatusResponsePacket :: struct {
+    versionName: string `json:"version"`,
+    versionProtocol: uint `json:"protocol"`,
+    players: struct { max: uint, online: uint },
+    description: struct { text: string },
+    favicon: string,
+    enforcesSecureChat: bool,
 }

@@ -1,4 +1,3 @@
-#+feature dynamic-literals
 package crux
 
 import "core:os"

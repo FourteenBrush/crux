@@ -11,16 +11,14 @@ read_serverbound :: proc(b: ^NetworkBuffer, allocator: mem.Allocator) -> (p: Ser
         // when normal ping times out (30s)
         // i suppose this wont be ambiguous with a serverbound ping request, which has packet_id 0x01
         // as its length is always a varint + long, which is definitely smaller than 0xfe (254)
-        // TODO: read rest of the packet
         return LegacyServerPingPacket {}, .None
     }
-    
+
     // early return on short read, no bytes consumed
     length, length_nbytes := peek_var_int(b) or_return
     ensure_readable(b^, length) or_return
 
     advance_pos_unchecked(b, length_nbytes)
-    log.debug(length, b.r_offset, length_nbytes, b.len)
     id := read_var_int(b) or_return
 
     #partial switch PacketId(id) {
@@ -35,13 +33,15 @@ read_serverbound :: proc(b: ^NetworkBuffer, allocator: mem.Allocator) -> (p: Ser
             protocol_version = protocol_version,
             server_addr = server_addr,
             server_port = server_port,
-            next_state = next_state,
+            intent = next_state,
         }, .None
     case:
         log.warn("unhandled packet id:", PacketId(id))
         return p, .InvalidData
     }
 }
+
+// TODO: enum lookups with fast path indicated by intrinsics.type_enum_is_contiguous
 
 read_protocol_version :: proc(b: ^NetworkBuffer) -> (p: ProtocolVersion, err: ReadError) {
     val := read_var_int(b) or_return
@@ -55,4 +55,8 @@ read_client_state :: proc(b: ^NetworkBuffer, min: ClientState) -> (c: ClientStat
         return c, .InvalidData
     }
     return ClientState(val), .None
+}
+
+enqueue_packet :: proc(b: ^NetworkBuffer) -> (ok: bool) {
+    return true
 }
