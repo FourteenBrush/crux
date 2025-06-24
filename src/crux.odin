@@ -9,7 +9,7 @@ import "core:thread"
 
 import "src:reactor"
 
-import "lib:tracy"
+// import "lib:tracy"
 
 // Inputs:
 // - `execution_permit`: an atomic bool indicating whether to continue running
@@ -50,7 +50,7 @@ run :: proc(threadsafe_alloc: mem.Allocator, execution_permit: ^bool) -> bool {
     context = orig_context
 
     for sync.atomic_load_explicit(execution_permit, .Acquire) {
-        defer tracy.FrameMark()
+        // defer tracy.FrameMark()
         start := time.tick_now()
 
         // work...

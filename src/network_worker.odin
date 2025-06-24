@@ -10,12 +10,12 @@ import "core:encoding/json"
 
 import "src:reactor"
 
-import "lib:tracy"
+// import "lib:tracy"
 
 TARGET_TPS :: 20
 
 // Worker thread responsable for network related things like performing
-// IO on client sockets, serializing, deserializing and transmitting packets.
+// IO on client sockets, (de)serializing and transmission of packets.
 
 // All members are explicitly owned by this thread, unless specified otherwise.
 _NetworkWorkerState :: struct {
@@ -55,7 +55,7 @@ _network_worker_proc :: proc(state: _NetworkWorkerState) {
             if tick_duration < target_tick_time {
                 time.sleep(target_tick_time - tick_duration)
             }
-            tracy.FrameMark()
+            // tracy.FrameMark()
             free_all(context.temp_allocator)
         }
 

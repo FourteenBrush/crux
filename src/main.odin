@@ -9,7 +9,7 @@ import "core:c/libc"
 
 import "base:runtime"
 
-import "lib:tracy"
+// import "lib:tracy"
 
 _ :: mem
 _ :: time
@@ -68,7 +68,7 @@ main :: proc() {
     context.logger = log.create_console_logger(.Debug when ODIN_DEBUG else .Warning, log_opts, allocator=allocator)
     defer log.destroy_console_logger(context.logger, allocator=allocator)
 
-    tracy.SetThreadName("main")
+    // tracy.SetThreadName("main")
 
     // TODO
     args, ok := parse_cli_args(allocator)
