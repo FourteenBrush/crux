@@ -5,7 +5,6 @@ import "core:log"
 import "core:mem"
 import "core:sync"
 import "core:time"
-import "core:thread"
 import "core:c/libc"
 
 import "base:runtime"
@@ -16,15 +15,15 @@ _ :: mem
 _ :: time
 _ :: runtime
 
-ExitCode :: int
-
 @(private="file")
 g_server_context: runtime.Context
+@(private="file")
+g_continue_running := true
 
 main :: proc() {
-    exitcode: ExitCode
+    exit_success: bool
     // NOTE: must be put before all other deferred statements
-    defer os.exit(exitcode)
+    defer os.exit(0 if exit_success else 1)
 
     pool: mem.Dynamic_Arena
     mem.dynamic_arena_init(
@@ -60,11 +59,10 @@ main :: proc() {
     g_server_context = context
     libc.signal(libc.SIGINT, proc "c" (_: i32) {
         context = g_server_context
-        log.info("stopping server") // FIXME: this threadsafe?
-        sync.atomic_store_explicit(&g_running, false, .Release)
+        sync.atomic_store_explicit(&g_continue_running, false, .Release)
     })
 
-    // ensure from now on, no allocations are done with the default heap allocator
+    // ensure all allocators are explicitly used
     context.allocator = mem.panic_allocator()
 
     context.logger = log.create_console_logger(.Debug when ODIN_DEBUG else .Warning, log_opts, allocator=allocator)
@@ -74,20 +72,14 @@ main :: proc() {
 
     // TODO
     args, ok := parse_cli_args(allocator)
-    log.info(args, ok)
 
-    workers: thread.Pool
-    thread.pool_init(&workers, runtime.default_allocator(), os.processor_core_count() / 2)
-    defer thread.pool_destroy(&workers)
-    log.debug("created workers thread pool")
-
-    exitcode = run(allocator)
+    exit_success = run(allocator, execution_permit=&g_continue_running)
 }
 
 // Logs a fatal condition, which we cannot recover from.
-// This proc always returns 1, for the sake of `return fatal("aa")`
+// This proc always returns false, for the sake of `return fatal("aa")`
 @(require_results)
-fatal :: proc(args: ..any, loc := #caller_location) -> ExitCode {
+fatal :: proc(args: ..any, loc := #caller_location) -> bool {
     log.fatal(..args, location=loc)
-    return 1
+    return false
 }

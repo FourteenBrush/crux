@@ -5,59 +5,56 @@ import "core:mem"
 import "core:net"
 import "core:sync"
 import "core:time"
-import "core:encoding/json"
+import "core:thread"
 
 import "src:reactor"
 
 import "lib:tracy"
 
-TARGET_TPS :: 20
-
-// FIXME: fix scope
-@(private)
-g_running := true
-
-run :: proc(allocator: mem.Allocator) -> ExitCode {
+// Inputs:
+// - `execution_permit`: an atomic bool indicating whether to continue running
+run :: proc(threadsafe_alloc: mem.Allocator, execution_permit: ^bool) -> bool {
     endpoint := net.Endpoint {
         address = net.IP4_Loopback,
         port = 25565,
     }
 
-    server_sock, net_err := net.listen_tcp(endpoint)
-    if net_err != nil {
-        return fatal("failed to create server socket:", net_err)
-    }
+    server_sock := _setup_server_socket(endpoint) or_return
     defer net.close(server_sock)
 
-    net_err = net.set_blocking(server_sock, false)
-    if net_err != nil {
-        return fatal("failed to set socket to non blocking", net_err)
-    }
-
-    io_ctx, ok := reactor.create_io_context()
-    if !ok {
-        return fatal("failed to create io context")
-    }
+    io_ctx := _setup_io_context(server_sock) or_return
     defer reactor.destroy_io_context(&io_ctx)
 
-    server := Server {
-        io_ctx = io_ctx,
-        client_connections = make(map[net.TCP_Socket]ClientConnection, 16, allocator),
+    client_connections := make(map[net.TCP_Socket]ClientConnection, 16, threadsafe_alloc)
+    defer delete(client_connections)
+    client_connections_mtx: sync.Atomic_Mutex
+
+    // spawn network worker, the ownership of members is documented on this type itself
+    net_worker_state := _NetworkWorkerState {
+       io_ctx = io_ctx,
+       server_sock = server_sock,
+       threadsafe_alloc = threadsafe_alloc,
+       execution_permit = execution_permit,
+       client_connections_guarded_ = &client_connections,
+       client_connections_mtx = client_connections_mtx,
     }
 
-    for sync.atomic_load_explicit(&g_running, .Acquire) {
+    // FIXME
+    orig_context := context
+    context.allocator = threadsafe_alloc
+    // NOTE: self_cleanup=true detaches the thread, making us unable to join
+    net_worker_thread := thread.create_and_start_with_poly_data(net_worker_state, _network_worker_proc, init_context=context, self_cleanup=false)
+    if net_worker_thread == nil {
+        return fatal("failed to start worker thread")
+    }
+    context = orig_context
+
+    for sync.atomic_load_explicit(execution_permit, .Acquire) {
         defer tracy.FrameMark()
         start := time.tick_now()
 
-        frame_impl: {
-            // tracy.ZoneN("FRAME_IMPL")
-            exitcode := accept_connections(server_sock, &server, allocator)
-            if exitcode != 0 do return exitcode
-
-            exitcode = process_incoming_packets(&server, allocator)
-            if exitcode != 0 do return exitcode
-        }
-        free_all(context.temp_allocator)
+        // work...
+        // free_all(context.temp_allocator)
 
         tick_duration := time.tick_since(start)
         target_tick_time :: 1000 / TARGET_TPS * time.Millisecond
@@ -67,140 +64,46 @@ run :: proc(allocator: mem.Allocator) -> ExitCode {
         }
     }
 
-    return 0
+    log.info("shutting down server...")
+    thread.join(net_worker_thread)
+    thread.destroy(net_worker_thread)
+
+    return true
 }
 
-accept_connections :: proc(server_sock: net.TCP_Socket, server: ^Server, allocator: mem.Allocator) -> ExitCode {
-    for {
-        // TODO: net.accept sets socket TCP_NODELAY by default (or based on ODIN_NET_TCP_NODELAY_DEFAULT)
-        // which makes every write one IP packet, implement buffering ourselves,
-        client_sock, client_endpoint, accept_err := net.accept_tcp(server_sock)
-        if accept_err == net.Accept_Error.Would_Block {
-            // server socket is marked non-blocking, no available connections
-            break
-        } else if accept_err != nil {
-            log.warn("failed to accept client:", accept_err)
-            continue
-        }
-
-        register_client: {
-            // tracy.ZoneN("ACCEPT_CLIENT")
-
-            // NOTE: we cannot differentiate between individual sockets or client endpoints being the same client
-            // we shouldn't because we are only at handshaking state, and NAT is a thing,
-
-            if !reactor.register_client(&server.io_ctx, client_sock) {
-                net.close(client_sock)
-                log.error("failed to register client")
-                continue
-            }
-            server.client_connections[client_sock] = ClientConnection {
-                read_buf = create_network_buf(allocator=allocator),
-                state = .Handshake,
-            }
-            log.debugf(
-                "client %s:%d connected (fd %d)",
-                net.address_to_string(client_endpoint.address, context.temp_allocator), client_endpoint.port, client_sock,
-            )
-        }
+_setup_server_socket :: proc(endpoint: net.Endpoint) -> (net.TCP_Socket, bool) {
+    sock, net_err := net.listen_tcp(endpoint, backlog=1000)
+    if net_err != nil {
+        log.errorf("failed to create server socket: %s", net_err)
+        return sock, false
     }
 
-    return 0
+    net_err = net.set_blocking(sock, false)
+    if net_err != nil {
+        log.errorf("failed to set socket to non blocking: %s", net_err)
+        return sock, false
+    }
+    return sock, true
 }
 
-process_incoming_packets :: proc(server: ^Server, allocator: mem.Allocator) -> ExitCode {
-    events: [512]reactor.Event
-    nready, ok := reactor.await_io_events(&server.io_ctx, &events, timeout_ms=5)
-    if !ok {
-        return fatal("failed to await io events")
+_setup_io_context :: proc(server_sock: net.TCP_Socket) -> (reactor.IOContext, bool) {
+    io_ctx, ctx_ok := reactor.create_io_context()
+    if !ctx_ok {
+        log.error("failed to create io context")
+        return io_ctx, false
     }
 
-    recv_buf: [1024]u8
-    for event in events[:nready] {
-        if .Readable in event.flags {
-            n, recv_err := net.recv_tcp(event.client, recv_buf[:])
-            log.info(recv_buf[:n])
-            switch {
-            case recv_err == net.TCP_Recv_Error.Timeout: // EWOULDBLOCK
-                // why is there no data but the socket is available for read() operations? anyways..
-                continue
-            case recv_err != nil:
-                log.warn("error reading from client socket:", recv_err)
-                disconnect_client(server, event.client)
-                continue
-            case n == 0: // EOF
-                disconnect_client(server, event.client)
-                log.info("client disconnected")
-                continue
-            case:
-                client_conn := server.client_connections[event.client]
-                push_data(&client_conn.read_buf, recv_buf[:n])
-                packet, read_err := read_serverbound(&client_conn.read_buf, allocator)
-                if read_err != .None {
-                    log.error("failed to read serverbound packet")
-                    continue
-                }
-
-                log.info(packet)
-                // TODO: dispatch packet back to main thread, unless LegacyServerPingPacket (i think)
-                if _, ok := packet.(LegacyServerPingPacket); ok {
-                    log.debugf("kicking client due to LegacyServerPingEvent")
-                    disconnect_client(server, event.client)
-                    continue
-                }
-
-                if handshake, ok := packet.(HandshakePacket); ok && handshake.intent == .Status {
-                    log.infof("client state switched %s -> %s", client_conn.state, handshake.intent)
-                    client_conn.state = .Status
-                } else if _, ok := packet.(StatusRequestPacket); ok {
-                    // send json
-                    status_response := StatusResponsePacket {
-                        versionName = "1.21.5",
-                        versionProtocol = 770,
-                        players = {
-                            max = 100,
-                            online = 1,
-                        },
-                        description = {
-                            text = "Some server",
-                        },
-                        favicon = "data:image/png;base64,<data>",
-                        enforcesSecureChat = false,
-                    }
-                    bytes, m_err := json.marshal(status_response, allocator=context.temp_allocator)
-                    log.info(string(bytes))
-                    assert(m_err == nil)
-                    // n, send_err := net.send(event.client, bytes)
-                    // assert(n == len(bytes) && send_err == nil)
-                }
-            }
-        }
-        if .Writable in event.flags {
-            // TODO: check if data is batched, and perform write
-            // log.debug("client socket is available for writing")
-        }
-        if .Err in event.flags {
-            log.warn("client socket error")
-            disconnect_client(server, event.client)
-        } else if .Hangup in event.flags {
-            log.warn("client socket hangup")
-            disconnect_client(server, event.client)
-        }
+    // register server sock to io waitset, so we can simply receive events
+    // indicating new clients want to connect, instead of manually calling accept() and such
+    register_server_ok := reactor.register_client(&io_ctx, server_sock)
+    if !register_server_ok {
+        log.error("failed to register server socket to io context")
+        return io_ctx, false
     }
-
-    return 0
-}
-
-// Unregisters a client from the reactor and shuts down the connection.
-disconnect_client :: proc(server: ^Server, client_sock: net.TCP_Socket) {
-    delete_key(&server.client_connections, client_sock)
-    // FIXME: probably want to handle error
-    reactor.unregister_client(&server.io_ctx, client_sock)
-    net.close(client_sock)
+    return io_ctx, true
 }
 
 Server :: struct {
-    io_ctx: reactor.IOContext,
     client_connections: map[net.TCP_Socket]ClientConnection,
 }
 

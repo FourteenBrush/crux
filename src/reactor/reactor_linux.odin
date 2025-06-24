@@ -35,6 +35,9 @@ unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 }
 
 // TODO: pass slice instead of ptr to array
+// TODO: timeout: 0 handle returned bool correctly
+// Inputs:
+// - `timeout_ms`: the waiting timeout in ms, -1 waits indefinitely, 0 means return immediately
 await_io_events :: proc(ctx: ^IOContext, events_out: ^[$N]Event, timeout_ms: int) -> (n: int, ok: bool) {
     epoll_events: [N]linux.EPoll_Event
 
