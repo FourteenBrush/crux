@@ -98,6 +98,7 @@ _setup_io_context :: proc(server_sock: net.TCP_Socket) -> (reactor.IOContext, bo
     register_server_ok := reactor.register_client(&io_ctx, server_sock)
     if !register_server_ok {
         log.error("failed to register server socket to io context")
+        reactor.destroy_io_context(&io_ctx)
         return io_ctx, false
     }
     return io_ctx, true
