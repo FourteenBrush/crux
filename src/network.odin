@@ -186,12 +186,13 @@ read_nbytes :: proc(b: ^NetworkBuffer, #any_int n: int, allocator := context.all
     // TODO: avoid allocation; we cant slice into r.data as this is non-contiguous
     // perhaps we can slice into the network received bytes?
     // when does this even get deallocated?
-    // FIXME: when n is zero, return early?
+    // TODO: when n is zero, return early?
     ensure_readable(b^, n) or_return
     dest = make([]u8, n, allocator)
 
     // bytes copyable from read offset to boundary (array end or length)
-    n_nowrap := min(cap(b.data) - b.r_offset, len(b.data))
+    // FIXME: can this be done with less branches?
+    n_nowrap := min(n, cap(b.data) - b.r_offset, len(b.data))
     intrinsics.mem_copy_non_overlapping(raw_data(dest), raw_data(b.data[b.r_offset:]), n_nowrap)
 
     if n > n_nowrap {
