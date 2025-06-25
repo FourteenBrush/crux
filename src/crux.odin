@@ -108,8 +108,8 @@ Server :: struct {
 }
 
 ClientConnection :: struct {
-    // TODO: only for reading from client; implement write buffering
-    read_buf: NetworkBuffer,
+    socket: net.TCP_Socket,
+    net_buf: NetworkBuffer,
     state: ClientState,
 }
 

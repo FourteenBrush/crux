@@ -90,16 +90,8 @@ _network_worker_proc :: proc(state: _NetworkWorkerState) {
                     client_conn := state.client_connections_guarded_[event.client]
                     sync.atomic_mutex_unlock(&state.client_connections_mtx)
 
-                    push_data(&client_conn.read_buf, recv_buf[:n])
-                    packet, read_err := read_serverbound(&client_conn.read_buf, allocator)
-                    if read_err != .None {
-                        log.debug("failed to read serverbound packet")
-                        continue
-                    }
-
-                    log.info(packet)
-                    // TODO: dispatch packet back to main thread, unless LegacyServerPingPacket (i think)
-                    _handle_packet(&state, packet, &client_conn, event.client)
+                    push_data(&client_conn.net_buf, recv_buf[:n])
+                    _drain_serverbound_packets(&state, &client_conn, packet_alloc=allocator)
                 }
             }
             if .Writable in event.flags {
@@ -136,7 +128,8 @@ _accept_client :: proc(state: ^_NetworkWorkerState, allocator: mem.Allocator) ->
     {
         sync.atomic_mutex_guard(&state.client_connections_mtx)
         state.client_connections_guarded_[client_sock] = ClientConnection {
-            read_buf = create_network_buf(allocator=allocator),
+            socket = client_sock,
+            net_buf = create_network_buf(allocator=allocator),
             state = .Handshake,
         }
     }
@@ -158,12 +151,30 @@ _disconnect_client :: proc(state: ^_NetworkWorkerState, client_sock: net.TCP_Soc
     net.close(client_sock)
 }
 
+_drain_serverbound_packets :: proc(state: ^_NetworkWorkerState, client_conn: ^ClientConnection, packet_alloc: mem.Allocator) {
+    loop: for {
+        packet, err := read_serverbound(&client_conn.net_buf, allocator=packet_alloc)
+        switch err {
+        case .ShortRead:
+            log.debug("short read on packet:")
+            dump_network_buffer(client_conn.net_buf)
+            break loop
+        case .InvalidData:
+            log.debug("client sent malformed packet, kicking")
+            _disconnect_client(state, client_conn.socket)
+            break loop
+        case .None:
+            dump_network_buffer(client_conn.net_buf)
+            _handle_packet(state, packet, client_conn)
+        }
+    }
+}
 
 // FIXME: store sock in client conn struct?
-_handle_packet :: proc(state: ^_NetworkWorkerState, packet: ServerboundPacket, client_conn: ^ClientConnection, client_sock: net.TCP_Socket) {
-    if _, ok := packet.(LegacyServerPingPacket); ok {
+_handle_packet :: proc(state: ^_NetworkWorkerState, packet: ServerboundPacket, client_conn: ^ClientConnection) {
+    if _, ok := packet.(LegacyServerListPingPacket); ok {
         log.debugf("kicking client due to LegacyServerPingEvent")
-        _disconnect_client(state, client_sock)
+        _disconnect_client(state, client_conn.socket)
         return
     }
 
