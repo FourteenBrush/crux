@@ -91,6 +91,7 @@ grow :: proc(b: ^NetworkBuffer, additional: int) {
 @(require_results)
 read_string :: proc(b: ^NetworkBuffer, allocator: mem.Allocator) -> (s: String, err: ReadError) {
     length := read_var_int(b) or_return
+    assert(length > 0, "read_string: zero length; TODO: properly handle this")
     data := read_nbytes(b, length, allocator) or_return
     return String { length, data }, .None
 }
@@ -265,6 +266,7 @@ peek_byte :: proc(b: ^NetworkBuffer, #any_int off := 0) -> (u8, ReadError) #no_b
 
 @(require_results)
 unchecked_read_byte :: proc(b: ^NetworkBuffer) -> u8 #no_bounds_check {
+    (cast(^mem.Raw_Dynamic_Array)&b.data).len -= 1
     defer b.r_offset = (b.r_offset + 1) % cap(b.data)
     return b.data[b.r_offset]
 }
