@@ -1,13 +1,13 @@
 package crux
 
 ServerboundPacket :: union {
-    LegacyServerPingPacket,
+    LegacyServerListPingPacket,
     HandshakePacket,
     StatusRequestPacket,
 }
 
 ClientBoundPacket :: union {
-
+    StatusResponsePacket,
 }
 
 // 7 least significant bits are used to encode the value,
@@ -23,18 +23,31 @@ String :: struct {
     data: []u8 `fmt:"s"`,
 }
 
+Utf16String :: distinct []u8
+
 PacketId :: enum VarInt {
     Handshake = 0x00,
+    StatusRequest = 0x00,
 }
 
 HandshakePacket :: struct {
-    protocol_version: VarInt,
+    protocol_version: ProtocolVersion,
     server_addr: String,
     server_port: u16be,
     intent: ClientState,
 }
 
-LegacyServerPingPacket :: struct {}
+LegacyServerListPingPacket :: struct {
+    v1_6_extension: Maybe(LegacyServerListPingV1_6Extension),
+}
+
+LegacyServerListPingV1_6Extension :: struct {
+    plugin_msg_packet_id: u8,
+    channel: Utf16String,
+    protocol_version: u8,
+    hostname: Utf16String,
+    port: i32be,
+}
 
 StatusRequestPacket :: struct {}
 
@@ -45,10 +58,10 @@ ConnectionState :: enum VarInt {
 }
 
 StatusResponsePacket :: struct {
-    versionName: string `json:"version"`,
-    versionProtocol: uint `json:"protocol"`,
+    version_name: string `json:"version"`,
+    version_protocol: uint `json:"protocol"`,
     players: struct { max: uint, online: uint },
     description: struct { text: string },
     favicon: string,
-    enforcesSecureChat: bool,
+    enforces_secure_chat: bool `json:"enforcesSecureChat"`,
 }

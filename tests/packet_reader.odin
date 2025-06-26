@@ -8,7 +8,7 @@ import crux "../src"
 
 @(private)
 expect_same_retrieval :: proc(t: ^testing.T, buf: ^crux.NetworkBuffer, data: ^[$S]u8) {
-    retrieved, err := crux.read_nbytes(buf, len(data))
+    retrieved, err := crux.buf_read_nbytes(buf, len(data))
     defer if err == nil do delete(retrieved)
     testing.expect_value(t, err, crux.ReadError.None)
     testing.expectf(t, slice.equal(data[:], retrieved), "expected data to be equal: %v and %v differ", data, retrieved)
@@ -21,7 +21,7 @@ test_length_and_offset_correctness :: proc(t: ^testing.T) {
     defer destroy_network_buf(&r)
 
     data := random_block(50)
-    push_data(&r, data[:])
+    buf_push_data(&r, data[:])
 
     testing.expect(t, r.len == len(data))
     testing.expect(t, r.r_offset == 0)
@@ -36,7 +36,7 @@ test_packed_reads_zero_offset :: proc(t: ^testing.T) {
     defer destroy_network_buf(&r)
 
     data := random_block(50)
-    push_data(&r, data[:])
+    buf_push_data(&r, data[:])
 
     expect_same_retrieval(t, &r, &data)
 }
@@ -56,11 +56,11 @@ test_packed_read_non_enclosed_block :: proc(t: ^testing.T) {
     // b20 := random_block(20)
     // b50 := random_block(50)
 
-    push_data(&r, b20[:])
-    push_data(&r, b50[:])
+    buf_push_data(&r, b20[:])
+    buf_push_data(&r, b50[:])
 
-    _, _ = read_nbytes(&r, 20) // alloc
-    b2, _ := read_nbytes(&r, 20) // alloc
+    _, _ = buf_read_nbytes(&r, 20) // alloc
+    b2, _ := buf_read_nbytes(&r, 20) // alloc
     // delete(b)
     delete(b2)
 
@@ -80,7 +80,7 @@ test_growth :: proc(t: ^testing.T) {
     defer destroy_network_buf(&r)
 
     data := random_block(50)
-    push_data(&r, data[:])
+    buf_push_data(&r, data[:])
     testing.expect(t, r.len == len(data))
     testing.expect(t, r.r_offset == 0)
     testing.expect(t, cap(r.data) == 50)
@@ -92,7 +92,7 @@ read_on_empty :: proc(t: ^testing.T) {
     r := create_network_buf()
     defer destroy_network_buf(&r)
 
-    bytes, err := read_nbytes(&r, 1, context.temp_allocator)
+    bytes, err := buf_read_nbytes(&r, 1, context.temp_allocator)
     testing.expect_value(t, len(bytes), 0)
     testing.expect(t, err == .ShortRead, "expected read to fail as buf is empty")
 }
@@ -158,12 +158,12 @@ read_var_ints :: proc(t: ^testing.T) {
         buf := create_network_buf()
         defer destroy_network_buf(&buf)
 
-        push_data(&buf, test.bytes)
+        buf_push_data(&buf, test.bytes)
 
         initial_off := buf.r_offset
         initial_len := buf.len
 
-        value, err := read_var_int(&buf)
+        value, err := buf_read_var_int(&buf)
 
         testing.expectf(
             t, err == test.error, "test case %d: difference in expected error (expected %s != %s)",

@@ -22,7 +22,7 @@ NetworkBuffer :: struct {
 }
 
 /// Dumps a NetworkBuffer to stdout.
-dump_network_buffer :: proc(b: NetworkBuffer) #no_bounds_check {
+buf_dump :: proc(b: NetworkBuffer) #no_bounds_check {
     length := len(b.data)
     fmt.printfln("NetworkBuffer{{len=%d, r_offset=%d, data=%2x}}",
         length, b.r_offset, b.data[b.r_offset:][:length],
@@ -47,11 +47,11 @@ destroy_network_buf :: proc(b: ^NetworkBuffer) {
 
 // Pushes data into the buffer, reallocating if necessary.
 // `data` is copied.
-push_data :: proc(b: ^NetworkBuffer, data: []u8) #no_bounds_check {
+buf_push_data :: proc(b: ^NetworkBuffer, data: []u8) #no_bounds_check {
     space := cap(b.data) - len(b.data)
     nrequired := len(data)
     if space < nrequired {
-        grow(b, additional=nrequired)
+        _grow(b, additional=nrequired)
     }
 
     alloc_sz := cap(b.data)
@@ -70,7 +70,7 @@ push_data :: proc(b: ^NetworkBuffer, data: []u8) #no_bounds_check {
 // Grows the internal buffer, with at least `additional` bytes
 // FIXME: verify this "at least" is correct
 @(private="file")
-grow :: proc(b: ^NetworkBuffer, additional: int) {
+_grow :: proc(b: ^NetworkBuffer, additional: int) {
     old_len := len(b.data)
     when ODIN_DEBUG do assert(old_len > 0)
     new_cap := max(old_len * 2, old_len + additional)
@@ -89,32 +89,32 @@ grow :: proc(b: ^NetworkBuffer, additional: int) {
 // FIXME: handle address decoding
 // TODO: add max
 @(require_results)
-read_string :: proc(b: ^NetworkBuffer, allocator: mem.Allocator) -> (s: String, err: ReadError) {
-    length := read_var_int(b) or_return
+buf_read_string :: proc(b: ^NetworkBuffer, allocator: mem.Allocator) -> (s: String, err: ReadError) {
+    length := buf_read_var_int(b) or_return
     assert(length > 0, "read_string: zero length; TODO: properly handle this")
-    data := read_nbytes(b, length, allocator) or_return
+    data := buf_read_nbytes(b, length, allocator) or_return
     return String { length, data }, .None
 }
 
 // TODO: what even happens on short reads on primitives, we are probably supposed to handle this
 
 @(require_results)
-read_int :: proc(b: ^NetworkBuffer) -> (val: i32be, err: ReadError) {
-    ensure_readable(b^, 4) or_return
+buf_read_int :: proc(b: ^NetworkBuffer) -> (val: i32be, err: ReadError) {
+    buf_ensure_readable(b^, 4) or_return
     #unroll for _ in 0..=3 {
-        val = (val << 8) | cast(i32be) unchecked_read_byte(b)
+        val = (val << 8) | cast(i32be) buf_unchecked_read_byte(b)
     }
     return
 }
 
 @(require_results)
-read_var_int :: proc(b: ^NetworkBuffer) -> (val: VarInt, err: ReadError) {
+buf_read_var_int :: proc(b: ^NetworkBuffer) -> (val: VarInt, err: ReadError) {
     len_mark := len(b.data)
     r_offset_mark := b.r_offset
     pos: u16
 
     for {
-        curr, read_err := read_byte(b)
+        curr, read_err := buf_read_byte(b)
         if read_err == .ShortRead {
             // fine as long as b.data is left untouched
             (cast(^mem.Raw_Dynamic_Array)&b.data).len = len_mark
@@ -137,11 +137,11 @@ read_var_int :: proc(b: ^NetworkBuffer) -> (val: VarInt, err: ReadError) {
 // Outputs:
 // `nbytes`: the number of bytes this VarInt uses (continuation byte included)
 @(require_results)
-peek_var_int :: proc(b: ^NetworkBuffer) -> (val: VarInt, nbytes: int, err: ReadError) {
+buf_peek_var_int :: proc(b: ^NetworkBuffer) -> (val: VarInt, nbytes: int, err: ReadError) {
     pos: u16
 
     for {
-        curr := peek_byte(b, pos / 7) or_return
+        curr := buf_peek_byte(b, pos / 7) or_return
         val |= auto_cast (curr & SEGMENT_BITS) << pos
         pos += 7
 
@@ -155,13 +155,13 @@ peek_var_int :: proc(b: ^NetworkBuffer) -> (val: VarInt, nbytes: int, err: ReadE
 }
 
 @(require_results)
-read_var_long :: proc(b: ^NetworkBuffer) -> (val: VarLong, err: ReadError) {
+buf_read_var_long :: proc(b: ^NetworkBuffer) -> (val: VarLong, err: ReadError) {
     len_mark := len(b.data)
     r_offset_mark := b.r_offset
     pos: u16
 
     for {
-        curr, read_err := read_byte(b)
+        curr, read_err := buf_read_byte(b)
         if read_err == .ShortRead {
 
             // fine as long as b.data is left untouched
@@ -183,12 +183,12 @@ read_var_long :: proc(b: ^NetworkBuffer) -> (val: VarLong, err: ReadError) {
 }
 
 @(require_results)
-read_nbytes :: proc(b: ^NetworkBuffer, #any_int n: int, allocator := context.allocator) -> (dest: []u8, err: ReadError) #no_bounds_check {
+buf_read_nbytes :: proc(b: ^NetworkBuffer, #any_int n: int, allocator := context.allocator) -> (dest: []u8, err: ReadError) #no_bounds_check {
     // TODO: avoid allocation; we cant slice into r.data as this is non-contiguous
     // perhaps we can slice into the network received bytes?
     // when does this even get deallocated?
     // TODO: when n is zero, return early?
-    ensure_readable(b^, n) or_return
+    buf_ensure_readable(b^, n) or_return
     dest = make([]u8, n, allocator)
 
     // bytes copyable from read offset to boundary (array end or length)
@@ -205,8 +205,9 @@ read_nbytes :: proc(b: ^NetworkBuffer, #any_int n: int, allocator := context.all
     return dest, .None
 }
 
+// Checks whether `n` bytes are readable, returns .ShortRead if not.
 @(require_results)
-ensure_readable :: proc(b: NetworkBuffer, #any_int n: int) -> ReadError {
+buf_ensure_readable :: proc(b: NetworkBuffer, #any_int n: int) -> ReadError {
     assert(n >= 0) // FIXME: can we formally assert this is always the case?
     #assert(ReadError(0) == .None)
     #assert(ReadError(1) == .ShortRead)
@@ -214,22 +215,22 @@ ensure_readable :: proc(b: NetworkBuffer, #any_int n: int) -> ReadError {
 }
 
 // Advances `n` bytes
-advance_pos_unchecked :: proc(b: ^NetworkBuffer, n: int) {
+buf_advance_pos_unchecked :: proc(b: ^NetworkBuffer, n: int) {
     (cast(^mem.Raw_Dynamic_Array)&b.data).len -= n
     b.r_offset = (b.r_offset + n) % cap(b.data)
 }
 
 @(require_results)
-read_u16 :: proc(b: ^NetworkBuffer) -> (u: u16be, err: ReadError) {
-    ensure_readable(b^, 2) or_return
-    msb := unchecked_read_byte(b)
-    lsb := unchecked_read_byte(b)
+buf_read_u16 :: proc(b: ^NetworkBuffer) -> (u: u16be, err: ReadError) {
+    buf_ensure_readable(b^, 2) or_return
+    msb := buf_unchecked_read_byte(b)
+    lsb := buf_unchecked_read_byte(b)
     return u16be(msb) << 8 | u16be(lsb), .None
 }
 
 @(require_results)
-consume_u16 :: proc(b: ^NetworkBuffer, u: u16) -> (match: bool, err: ReadError) #no_bounds_check {
-    ensure_readable(b^, 2) or_return
+buf_consume_u16 :: proc(b: ^NetworkBuffer, u: u16) -> (match: bool, err: ReadError) #no_bounds_check {
+    buf_ensure_readable(b^, 2) or_return
     msb := b.data[b.r_offset]
     lsb := b.data[(b.r_offset + 1) % cap(b.data)]
     if (u16(msb) << 8) | u16(lsb) == u {
@@ -241,8 +242,8 @@ consume_u16 :: proc(b: ^NetworkBuffer, u: u16) -> (match: bool, err: ReadError) 
 }
 
 @(require_results)
-consume_byte :: proc(b: ^NetworkBuffer, expected: u8) -> (match: bool, err: ReadError) #no_bounds_check {
-    ensure_readable(b^, 1) or_return
+buf_consume_byte :: proc(b: ^NetworkBuffer, expected: u8) -> (match: bool, err: ReadError) #no_bounds_check {
+    buf_ensure_readable(b^, 1) or_return
     if b.data[b.r_offset] == expected {
         b.r_offset = (b.r_offset + 1) % cap(b.data)
         return true, .None
@@ -251,7 +252,7 @@ consume_byte :: proc(b: ^NetworkBuffer, expected: u8) -> (match: bool, err: Read
 }
 
 @(require_results)
-read_byte :: proc(b: ^NetworkBuffer) -> (u8, ReadError) #no_bounds_check {
+buf_read_byte :: proc(b: ^NetworkBuffer) -> (u8, ReadError) #no_bounds_check {
     if len(b.data) == 0 do return 0, .ShortRead
     (cast(^mem.Raw_Dynamic_Array)&b.data).len -= 1
     defer b.r_offset = (b.r_offset + 1) % cap(b.data)
@@ -259,13 +260,13 @@ read_byte :: proc(b: ^NetworkBuffer) -> (u8, ReadError) #no_bounds_check {
 }
 
 @(require_results)
-peek_byte :: proc(b: ^NetworkBuffer, #any_int off := 0) -> (u8, ReadError) #no_bounds_check {
+buf_peek_byte :: proc(b: ^NetworkBuffer, #any_int off := 0) -> (u8, ReadError) #no_bounds_check {
     if len(b.data) <= off do return 0, .ShortRead
     return b.data[(b.r_offset + off) % cap(b.data)], .None
 }
 
 @(require_results)
-unchecked_read_byte :: proc(b: ^NetworkBuffer) -> u8 #no_bounds_check {
+buf_unchecked_read_byte :: proc(b: ^NetworkBuffer) -> u8 #no_bounds_check {
     (cast(^mem.Raw_Dynamic_Array)&b.data).len -= 1
     defer b.r_offset = (b.r_offset + 1) % cap(b.data)
     return b.data[b.r_offset]

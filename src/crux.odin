@@ -1,5 +1,6 @@
 package crux
 
+import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:net"
@@ -28,6 +29,15 @@ run :: proc(threadsafe_alloc: mem.Allocator, execution_permit: ^bool) -> bool {
     client_connections := make(map[net.TCP_Socket]ClientConnection, 16, threadsafe_alloc)
     defer delete(client_connections)
     client_connections_mtx: sync.Atomic_Mutex
+
+    defer if fmt._user_formatters == nil {
+        delete(fmt._user_formatters^)
+    }
+    if fmt._user_formatters == nil {
+        formatters := make(map[typeid]fmt.User_Formatter, allocator=threadsafe_alloc)
+        fmt.set_user_formatters(&formatters)
+    }
+    _register_user_formatters(allocator=threadsafe_alloc)
 
     // spawn network worker, the ownership of members is documented on this type itself
     net_worker_state := _NetworkWorkerState {
@@ -104,13 +114,20 @@ _setup_io_context :: proc(server_sock: net.TCP_Socket) -> (reactor.IOContext, bo
     return io_ctx, true
 }
 
-Server :: struct {
-    client_connections: map[net.TCP_Socket]ClientConnection,
+_register_user_formatters :: proc(allocator: mem.Allocator) {
+    context.allocator = allocator
+    fmt.register_user_formatter(Utf16String, proc(fi: ^fmt.Info, arg: any, verb: rune) -> bool {
+        str := (^Utf16String)(arg.data)^
+        // TODO: only correctly formatted on some terminals
+        fmt.wprintf(fi.writer, "%s", cast([]u8) str)
+        return true
+    })
 }
 
 ClientConnection :: struct {
     socket: net.TCP_Socket,
-    net_buf: NetworkBuffer,
+    rx_buf: NetworkBuffer,
+    tx_buf: NetworkBuffer,
     state: ClientState,
 }
 
