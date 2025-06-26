@@ -2,6 +2,7 @@ package crux
 
 // Lets not even care about pre-netty age
 ProtocolVersion :: enum VarInt {
+    V1_21_6  = 771,
     V1_21_5  = 770,
     V1_21_5_rc2  = 1073742067,
     V1_21_5_rc1  = 1073742066,
@@ -344,4 +345,3 @@ ProtocolVersion :: enum VarInt {
     V13w41b      = 0,
     V13w41a      = 0,
 }
-
