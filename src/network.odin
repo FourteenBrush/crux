@@ -21,20 +21,6 @@ NetworkBuffer :: struct {
     r_offset: int,
 }
 
-/// Dumps a NetworkBuffer to stdout.
-buf_dump :: proc(buf: NetworkBuffer) #no_bounds_check {
-    length := len(buf.data)
-    fmt.printfln("NetworkBuffer{{len=%d, r_offset=%d, data=%2x}}",
-        length, buf.r_offset, buf.data[buf.r_offset:][:length],
-    )
-}
-
-ReadError :: enum {
-    None      = 0,
-    ShortRead = 1,
-    InvalidData,
-}
-
 create_network_buf :: proc(cap := 512, allocator := context.allocator) -> (buf: NetworkBuffer) {
     assert(cap > 0)
     buf.data = make([dynamic]u8, 0, cap, allocator)
@@ -45,9 +31,46 @@ destroy_network_buf :: proc(buf: ^NetworkBuffer) {
     delete(buf.data)
 }
 
+ReadError :: enum {
+    None      = 0,
+    ShortRead = 1,
+    InvalidData,
+}
+
+/// Dumps a NetworkBuffer to stdout, for debugging purposes.
+buf_dump :: proc(buf: NetworkBuffer) #no_bounds_check {
+    length := len(buf.data)
+    fmt.printfln("NetworkBuffer{{len=%d, r_offset=%d, data=%2x}}",
+        length, buf.r_offset, buf.data[buf.r_offset:][:length],
+    )
+}
+
+buf_has_data :: proc(buf: NetworkBuffer) -> bool {
+    return len(buf.data) > 0
+}
+
+buf_transfer_contents :: proc(buf: ^NetworkBuffer, outb: []u8) {
+
+}
+
+// Checks whether `n` bytes are readable, returns .ShortRead if not.
+@(require_results)
+buf_ensure_readable :: proc(buf: NetworkBuffer, #any_int n: int) -> ReadError {
+    assert(n >= 0) // FIXME: can we formally assert this is always the case?
+    #assert(ReadError(0) == .None)
+    #assert(ReadError(1) == .ShortRead)
+    return ReadError(len(buf.data) < n)
+}
+
+// Advances `n` bytes
+buf_advance_pos_unchecked :: proc(buf: ^NetworkBuffer, n: int) {
+    (cast(^mem.Raw_Dynamic_Array)&buf.data).len -= n
+    buf.r_offset = (buf.r_offset + n) % cap(buf.data)
+}
+
 // Pushes data into the buffer, reallocating if necessary.
 // `data` is copied.
-buf_push_data :: proc(buf: ^NetworkBuffer, data: []u8) #no_bounds_check {
+buf_write_bytes :: proc(buf: ^NetworkBuffer, data: []u8) #no_bounds_check {
     space := cap(buf.data) - len(buf.data)
     nrequired := len(data)
     if space < nrequired {
@@ -67,7 +90,26 @@ buf_push_data :: proc(buf: ^NetworkBuffer, data: []u8) #no_bounds_check {
     (cast(^mem.Raw_Dynamic_Array)&buf.data).len += nrequired
 }
 
-buf_push_bytes :: proc(buf: ^NetworkBuffer) {}
+buf_write_var_int :: proc(buf: ^NetworkBuffer, val: VarInt) {
+    val := val
+    for {
+        if val & ~VarInt(SEGMENT_BITS) == 0 {
+            buf_write_byte(buf, u8(val))
+            return
+        }
+        buf_write_byte(buf, u8(val & SEGMENT_BITS) | CONTINUE_BIT)
+        val >>= 7
+    }
+}
+
+buf_write_byte :: proc(buf: ^NetworkBuffer, b: u8) {
+    space := cap(buf.data) - len(buf.data)
+    if space == 0 {
+        _grow(buf, additional=1) // FIXME: idk
+    }
+    buf.data[buf.r_offset + len(buf.data)] = b
+    (cast(^mem.Raw_Dynamic_Array)&buf.data).len += 1
+}
 
 // Grows the internal buffer, with at least `additional` bytes
 // FIXME: verify this "at least" is correct
@@ -90,12 +132,14 @@ _grow :: proc(buf: ^NetworkBuffer, additional: int) {
 
 // FIXME: handle address decoding
 // TODO: add max
+// // FIXME: get rid of allocation, let client handle this
 @(require_results)
 buf_read_string :: proc(buf: ^NetworkBuffer, allocator: mem.Allocator) -> (s: String, err: ReadError) {
     length := buf_read_var_int(buf) or_return
     assert(length > 0, "read_string: zero length; TODO: properly handle this")
-    data := buf_read_nbytes(buf, length, allocator) or_return
-    return String { length, data }, .None
+    outb := make([]u8, length, allocator)
+    buf_read_nbytes(buf, outb) or_return
+    return String { length, outb }, .None
 }
 
 // TODO: what even happens on short reads on primitives, we are probably supposed to handle this
@@ -104,6 +148,7 @@ buf_read_string :: proc(buf: ^NetworkBuffer, allocator: mem.Allocator) -> (s: St
 buf_read_int :: proc(buf: ^NetworkBuffer) -> (val: i32be, err: ReadError) {
     buf_ensure_readable(buf^, 4) or_return
     #unroll for _ in 0..=3 {
+        // FIXME: optimize to single memcpy
         val = (val << 8) | cast(i32be) buf_unchecked_read_byte(buf)
     }
     return
@@ -184,42 +229,29 @@ buf_read_var_long :: proc(buf: ^NetworkBuffer) -> (val: VarLong, err: ReadError)
     return val, .None
 }
 
+// Copies up to `len(outb)` bytes from this buffer into `outb`.
+// Internal state is updated to reflect the consumed bytes.
 @(require_results)
-buf_read_nbytes :: proc(buf: ^NetworkBuffer, #any_int n: int, allocator := context.allocator) -> (dest: []u8, err: ReadError) #no_bounds_check {
+buf_read_nbytes :: proc(buf: ^NetworkBuffer, outb: []u8) -> ReadError #no_bounds_check {
     // TODO: avoid allocation; we cant slice into r.data as this is non-contiguous
     // perhaps we can slice into the network received bytes?
     // when does this even get deallocated?
     // TODO: when n is zero, return early?
+    n := len(outb)
     buf_ensure_readable(buf^, n) or_return
-    dest = make([]u8, n, allocator)
 
     // bytes copyable from read offset to boundary (array end or length)
     // FIXME: can this be done with less branches?
     n_nowrap := min(n, cap(buf.data) - buf.r_offset, len(buf.data))
-    intrinsics.mem_copy_non_overlapping(raw_data(dest), raw_data(buf.data[buf.r_offset:]), n_nowrap)
+    intrinsics.mem_copy_non_overlapping(raw_data(outb), raw_data(buf.data[buf.r_offset:]), n_nowrap)
 
     if n > n_nowrap {
-        intrinsics.mem_copy_non_overlapping(raw_data(dest[n_nowrap:]), raw_data(dest), n - n_nowrap)
+        intrinsics.mem_copy_non_overlapping(raw_data(outb[n_nowrap:]), raw_data(outb), n - n_nowrap)
     }
 
     buf.r_offset = (buf.r_offset + n) % cap(buf.data)
     (cast(^mem.Raw_Dynamic_Array)&buf.data).len -= n
-    return dest, .None
-}
-
-// Checks whether `n` bytes are readable, returns .ShortRead if not.
-@(require_results)
-buf_ensure_readable :: proc(buf: NetworkBuffer, #any_int n: int) -> ReadError {
-    assert(n >= 0) // FIXME: can we formally assert this is always the case?
-    #assert(ReadError(0) == .None)
-    #assert(ReadError(1) == .ShortRead)
-    return ReadError(len(buf.data) < n)
-}
-
-// Advances `n` bytes
-buf_advance_pos_unchecked :: proc(buf: ^NetworkBuffer, n: int) {
-    (cast(^mem.Raw_Dynamic_Array)&buf.data).len -= n
-    buf.r_offset = (buf.r_offset + n) % cap(buf.data)
+    return .None
 }
 
 @(require_results)

@@ -9,7 +9,7 @@ read_serverbound :: proc(b: ^NetworkBuffer, allocator: mem.Allocator) -> (p: Ser
         // when normal ping times out (30s), additionally older clients send this, which
         // we are supposed to handle
         // TODO: directly kick after FE 01 FA
-        return read_legacy_server_list_ping(b)
+        return read_legacy_server_list_ping(b, allocator=allocator)
     }
 
     // early return on short read, no bytes consumed
@@ -44,7 +44,7 @@ read_serverbound :: proc(b: ^NetworkBuffer, allocator: mem.Allocator) -> (p: Ser
 }
 
 // Reads a legacy server list ping packet, the initial byte 0xfe has already been read.
-read_legacy_server_list_ping :: proc(buf: ^NetworkBuffer) -> (p: LegacyServerListPingPacket, err: ReadError) {
+read_legacy_server_list_ping :: proc(buf: ^NetworkBuffer, allocator: mem.Allocator) -> (p: LegacyServerListPingPacket, err: ReadError) {
     // on 1.4 - 1.5 the client sends an additional 0x01
     // on 1.6, more additional data is sent
 
@@ -53,11 +53,13 @@ read_legacy_server_list_ping :: proc(buf: ^NetworkBuffer) -> (p: LegacyServerLis
         plugin_msg_packet_id := buf_read_byte(buf) or_return
 
         channel_codeunits_len := buf_read_u16(buf) or_return
-        channel_bytes := buf_read_nbytes(buf, channel_codeunits_len * 2) or_return
+        channel_bytes := make([]u8, channel_codeunits_len * 2, allocator)
+        buf_read_nbytes(buf, channel_bytes) or_return
         _remaining_len := buf_read_u16(buf) or_return
         protocol_version := buf_read_byte(buf) or_return
         hostname_codeunits_len := buf_read_u16(buf) or_return
-        hostname_bytes := buf_read_nbytes(buf, hostname_codeunits_len * 2) or_return
+        hostname_bytes := make([]u8, hostname_codeunits_len * 2, allocator)
+        buf_read_nbytes(buf, hostname_bytes) or_return
         port := buf_read_int(buf) or_return
 
         p.v1_6_extension = LegacyServerListPingV1_6Extension {

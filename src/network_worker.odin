@@ -108,13 +108,14 @@ _network_worker_proc :: proc(state: _NetworkWorkerState) {
                     client_conn := state.client_connections_guarded_[event.client]
                     sync.atomic_mutex_unlock(&state.client_connections_mtx)
 
-                    buf_push_data(&client_conn.rx_buf, recv_buf[:n])
+                    buf_write_bytes(&client_conn.rx_buf, recv_buf[:n])
                     _drain_serverbound_packets(&state, &client_conn, packet_alloc=allocator)
                 }
             }
             if .Writable in event.flags {
                 // TODO: check if data is batched, and perform write
                 // log.debug("client socket is available for writing")
+
             }
             if .Err in event.flags {
                 log.warn("client socket error")
@@ -197,7 +198,7 @@ _drain_serverbound_packets :: proc(state: ^_NetworkWorkerState, client_conn: ^Cl
     }
 }
 
-// FIXME: store sock in client conn struct?
+// FIXME: move packet processing to main thread
 _handle_packet :: proc(state: ^_NetworkWorkerState, packet: ServerboundPacket, client_conn: ^ClientConnection) {
     log.info(packet)
 
