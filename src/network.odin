@@ -7,6 +7,7 @@ import "base:intrinsics"
 
 SEGMENT_BITS :: 0x7F
 CONTINUE_BIT :: 0x80
+MAX_STRING_LENGTH :: 32767
 
 // Ringbuffer used for storing per client network data, may be dynamically reallocated.
 // Not thread-safe.
@@ -134,6 +135,9 @@ _grow :: proc(buf: ^NetworkBuffer) {
 @(require_results)
 buf_read_string :: proc(buf: ^NetworkBuffer, allocator: mem.Allocator) -> (s: String, err: ReadError) {
     length := buf_read_var_int(buf) or_return
+    if length > MAX_STRING_LENGTH {
+        return s, .InvalidData
+    }
     assert(length > 0, "read_string: zero length; TODO: properly handle this")
     outb := make([]u8, length, allocator)
     buf_read_nbytes(buf, outb) or_return
