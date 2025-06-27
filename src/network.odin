@@ -45,12 +45,10 @@ buf_dump :: proc(buf: NetworkBuffer) #no_bounds_check {
     )
 }
 
-buf_has_data :: proc(buf: NetworkBuffer) -> bool {
-    return len(buf.data) > 0
-}
-
-buf_transfer_contents :: proc(buf: ^NetworkBuffer, outb: []u8) {
-
+// Returns the number of total bytes in this buffer.
+@(require_results)
+buf_remaining :: proc(buf: NetworkBuffer) -> int {
+    return len(buf.data)
 }
 
 // Checks whether `n` bytes are readable, returns .ShortRead if not.
@@ -74,7 +72,7 @@ buf_write_bytes :: proc(buf: ^NetworkBuffer, data: []u8) #no_bounds_check {
     space := cap(buf.data) - len(buf.data)
     nrequired := len(data)
     if space < nrequired {
-        _grow(buf, additional=nrequired)
+        _grow(buf)
     }
 
     alloc_sz := cap(buf.data)
@@ -105,7 +103,7 @@ buf_write_var_int :: proc(buf: ^NetworkBuffer, val: VarInt) {
 buf_write_byte :: proc(buf: ^NetworkBuffer, b: u8) {
     space := cap(buf.data) - len(buf.data)
     if space == 0 {
-        _grow(buf, additional=1) // FIXME: idk
+        _grow(buf)
     }
     buf.data[buf.r_offset + len(buf.data)] = b
     (cast(^mem.Raw_Dynamic_Array)&buf.data).len += 1
@@ -114,10 +112,10 @@ buf_write_byte :: proc(buf: ^NetworkBuffer, b: u8) {
 // Grows the internal buffer, with at least `additional` bytes
 // FIXME: verify this "at least" is correct
 @(private="file")
-_grow :: proc(buf: ^NetworkBuffer, additional: int) {
+_grow :: proc(buf: ^NetworkBuffer) {
     old_len := len(buf.data)
     when ODIN_DEBUG do assert(old_len > 0)
-    new_cap := max(old_len * 2, old_len + additional)
+    new_cap := old_len * 2
 
     reserve(&buf.data, new_cap)
     // ensure wrapped around data is correctly positioned at the end of the new allocation
@@ -125,7 +123,7 @@ _grow :: proc(buf: ^NetworkBuffer, additional: int) {
     //  -----W-----R----- -----
     if buf.r_offset + len(buf.data) > old_len {
         to_copy := old_len - buf.r_offset
-        copy(buf.data[new_cap-to_copy:], buf.data[buf.r_offset:][:to_copy])
+        intrinsics.mem_copy_non_overlapping(raw_data(buf.data[new_cap-to_copy:]), raw_data(buf.data[buf.r_offset:]), to_copy)
         buf.r_offset += new_cap - old_len
     }
 }
@@ -229,13 +227,10 @@ buf_read_var_long :: proc(buf: ^NetworkBuffer) -> (val: VarLong, err: ReadError)
     return val, .None
 }
 
-// Copies up to `len(outb)` bytes from this buffer into `outb`.
-// Internal state is updated to reflect the consumed bytes.
+// Copies `len(outb)` bytes from this buffer into `outb`. `ReadError.ShortRead` is returned
+// when not enough bytes are available, the internal state is updated to reflect the consumed bytes.
 @(require_results)
 buf_read_nbytes :: proc(buf: ^NetworkBuffer, outb: []u8) -> ReadError #no_bounds_check {
-    // TODO: avoid allocation; we cant slice into r.data as this is non-contiguous
-    // perhaps we can slice into the network received bytes?
-    // when does this even get deallocated?
     // TODO: when n is zero, return early?
     n := len(outb)
     buf_ensure_readable(buf^, n) or_return
