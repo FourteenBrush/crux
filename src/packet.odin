@@ -15,14 +15,6 @@ ClientBoundPacket :: union {
 VarInt :: distinct i32le
 VarLong :: distinct i64le
 
-// FIXME: use an odin string, why bother storing len as a VarInt?
-// only reason i could think of is packing it for transmission, but we generally already mess up
-// with either an []u8 or [^]u8
-String :: struct {
-    length: VarInt,
-    data: []u8 `fmt:"s"`,
-}
-
 Utf16String :: distinct []u8
 
 PacketId :: enum VarInt {
@@ -32,7 +24,7 @@ PacketId :: enum VarInt {
 
 HandshakePacket :: struct {
     protocol_version: ProtocolVersion,
-    server_addr: String,
+    server_addr: string,
     server_port: u16be,
     intent: ClientState,
 }

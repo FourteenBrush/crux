@@ -116,7 +116,6 @@ buf_write_byte :: proc(buf: ^NetworkBuffer, b: u8) {
 @(private="file")
 _grow :: proc(buf: ^NetworkBuffer) {
     old_len := len(buf.data)
-    when ODIN_DEBUG do assert(old_len > 0)
     new_cap := old_len * 2
 
     reserve(&buf.data, new_cap)
@@ -133,14 +132,29 @@ _grow :: proc(buf: ^NetworkBuffer) {
 // FIXME: handle address decoding
 // // FIXME: get rid of allocation, let client handle this
 @(require_results)
-buf_read_string :: proc(buf: ^NetworkBuffer, allocator: mem.Allocator) -> (s: String, err: ReadError) {
+buf_read_string :: proc(buf: ^NetworkBuffer, allocator: mem.Allocator) -> (s: string, err: ReadError) {
     length := buf_read_var_int(buf) or_return
     if length < MIN_STRING_LENGTH || length > MAX_STRING_LENGTH {
         return s, .InvalidData
     }
     outb := make([]u8, length, allocator)
     buf_read_nbytes(buf, outb) or_return
-    return String { length, outb }, .None
+    return string(outb), .None
+}
+
+// We accept a backing type, because sometimes an enum has only a few variants, where the transmission
+// type has a far bigger range, and we want to store the enum as the smallest possible type to save space.
+buf_read_enum :: proc(buf: ^NetworkBuffer, $E: typeid, $Backing: typeid) -> (E, ReadError)
+where
+    intrinsics.type_is_enum(E), intrinsics.type_is_numeric(Backing) {
+    outb: [size_of(Backing)]u8
+    buf_read_nbytes(buf, outb) or_return
+    e := transmute(E) outb
+    // FIXME: add fast path with type_is_contiguous clause
+    for constant in E do if constant == e {
+        return e, .None
+    }
+    return e, .InvalidData
 }
 
 // TODO: what even happens on short reads on primitives, we are probably supposed to handle this
