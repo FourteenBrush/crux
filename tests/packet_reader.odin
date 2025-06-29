@@ -8,107 +8,98 @@ import crux "../src"
 
 @(private)
 expect_same_retrieval :: proc(t: ^testing.T, buf: ^crux.NetworkBuffer, data: ^[$S]u8) {
-    retrieved, err := crux.buf_read_nbytes(buf, len(data))
-    defer if err == nil do delete(retrieved)
+    temp: [S]u8
+    err := crux.buf_read_nbytes(buf, temp[:])
     testing.expect_value(t, err, crux.ReadError.None)
-    testing.expectf(t, slice.equal(data[:], retrieved), "expected data to be equal: %v and %v differ", data, retrieved)
+    testing.expectf(t, slice.equal(data[:], temp[:]), "expected data to be equal: %v and %v differ", data, temp[:])
 }
 
-// @(test)
+@(test)
 test_length_and_offset_correctness :: proc(t: ^testing.T) {
     using crux
-    r := create_network_buf()
-    defer destroy_network_buf(&r)
+    buf := create_network_buf(allocator=context.allocator)
+    defer destroy_network_buf(buf)
 
     data := random_block(50)
-    buf_push_data(&r, data[:])
+    buf_write_bytes(&buf, data[:])
 
-    testing.expect(t, r.len == len(data))
-    testing.expect(t, r.r_offset == 0)
+    testing.expect(t, buf_remaining(buf) == len(data))
+    testing.expect(t, buf.r_offset == 0)
 
-    expect_same_retrieval(t, &r, &data)
+    expect_same_retrieval(t, &buf, &data)
 }
 
-// @(test)
+@(test)
 test_packed_reads_zero_offset :: proc(t: ^testing.T) {
     using crux
-    r := create_network_buf()
-    defer destroy_network_buf(&r)
+    buf := create_network_buf(allocator=context.allocator)
+    defer destroy_network_buf(buf)
 
     data := random_block(50)
-    buf_push_data(&r, data[:])
+    buf_write_bytes(&buf, data[:])
 
-    expect_same_retrieval(t, &r, &data)
+    expect_same_retrieval(t, &buf, &data)
 }
 
 // write 20 bytes, then 50, read the 20 back out and assure next read returns 50, subsequent reads fail
 @(test)
 test_packed_read_non_enclosed_block :: proc(t: ^testing.T) {
     using crux
-    r := create_network_buf()
-    // defer destroy_network_buf(&r)
+    buf := create_network_buf(allocator=context.allocator)
+    defer destroy_network_buf(buf)
 
-    b20: [20]u8
-    b50: [50]u8
-    // somehow needed or wont segfault
-    _ = rand.read(b20[:])
-    _ = rand.read(b20[:])
-    // b20 := random_block(20)
-    // b50 := random_block(50)
+    b20 := random_block(20)
+    b50 := random_block(50)
 
-    buf_push_data(&r, b20[:])
-    buf_push_data(&r, b50[:])
+    buf_write_bytes(&buf, b20[:])
+    buf_write_bytes(&buf, b50[:])
 
-    _, _ = buf_read_nbytes(&r, 20) // alloc
-    b2, _ := buf_read_nbytes(&r, 20) // alloc
-    // delete(b)
-    delete(b2)
+    expect_same_retrieval(t, &buf, &b20)
+    expect_same_retrieval(t, &buf, &b50)
 
-    // expect_same_retrieval(t, &r, &b20)
-    // expect_same_retrieval(t, &r, &b50)
-
-    // bytes, err := read_nbytes(&r, 1, context.temp_allocator)
-    // log.warn(bytes == nil)
-    // testing.expect_value(t, len(bytes), 0)
-    // testing.expect(t, err == .ShortRead, "expected next read to fail as buf is empty")
+    err := buf_read_nbytes(&buf, {0})
+    testing.expect(t, err == .ShortRead, "expected next read to fail as buf is empty")
 }
 
 // @(test)
 test_growth :: proc(t: ^testing.T) {
     using crux
-    r := create_network_buf(cap=50)
-    defer destroy_network_buf(&r)
+    buf := create_network_buf(cap=5, allocator=context.allocator)
+    defer destroy_network_buf(buf)
 
     data := random_block(50)
-    buf_push_data(&r, data[:])
-    testing.expect(t, r.len == len(data))
-    testing.expect(t, r.r_offset == 0)
-    testing.expect(t, cap(r.data) == 50)
+    buf_write_bytes(&buf, data[:])
+
+    testing.expect(t, buf_remaining(buf) == len(data))
+    testing.expect(t, buf.r_offset == 0)
+    testing.expect(t, cap(buf.data) == 50)
 }
 
-// @(test)
+@(test)
 read_on_empty :: proc(t: ^testing.T) {
     using crux
-    r := create_network_buf()
-    defer destroy_network_buf(&r)
+    buf := create_network_buf(allocator=context.allocator)
+    defer destroy_network_buf(buf)
 
-    bytes, err := buf_read_nbytes(&r, 1, context.temp_allocator)
-    testing.expect_value(t, len(bytes), 0)
+    err := buf_read_nbytes(&buf, {0})
     testing.expect(t, err == .ShortRead, "expected read to fail as buf is empty")
 }
 
-// @(private)
+@(private)
 random_block :: proc($Size: int) -> (b: [Size]u8) {
     _ = rand.read(b[:])
     return
 }
 
-// @(test)
+@(test)
 read_var_ints :: proc(t: ^testing.T) {
     using crux
     test_cases := []TestCase {
         {bytes = {0x00}, expected = VarInt(0)},
+        {bytes = {0x00, 0x00, 0x00}, expected = VarInt(0)},
         {bytes = {0x01}, expected = VarInt(1)},
+        // unnecessarily long encoding
+        {bytes = {0x81, 0x00}, expected = VarInt(1)},
         {bytes = {0x02}, expected = VarInt(2)},
         {bytes = {0x7F}, expected = VarInt(127)},
         {bytes = {0x80, 0x01}, expected = VarInt(128)},
@@ -155,13 +146,13 @@ read_var_ints :: proc(t: ^testing.T) {
     }
 
     for test, i in test_cases {
-        buf := create_network_buf()
-        defer destroy_network_buf(&buf)
+        buf := create_network_buf(allocator=context.allocator)
+        defer destroy_network_buf(buf)
 
-        buf_push_data(&buf, test.bytes)
+        buf_write_bytes(&buf, test.bytes)
 
         initial_off := buf.r_offset
-        initial_len := buf.len
+        initial_len := buf_remaining(buf)
 
         value, err := buf_read_var_int(&buf)
 
@@ -177,8 +168,8 @@ read_var_ints :: proc(t: ^testing.T) {
                 i, initial_off, buf.r_offset,
             )
             testing.expectf(
-                t, buf.len == initial_len, "test case %d: length not rolled back (expected %d != %d)",
-                i, initial_len, buf.len,
+                t, buf_remaining(buf) == initial_len, "test case %d: length not rolled back (expected %d != %d)",
+                i, initial_len, buf_remaining(buf),
             )
             continue
         }
