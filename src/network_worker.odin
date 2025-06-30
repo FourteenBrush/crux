@@ -7,7 +7,6 @@ import "core:net"
 import "core:sync"
 import "base:runtime"
 import "core:sys/posix"
-import "core:encoding/json"
 
 import "src:reactor"
 
@@ -113,9 +112,28 @@ _network_worker_proc :: proc(state: _NetworkWorkerState) {
                 }
             }
             if .Writable in event.flags {
-                // TODO: check if data is batched, and perform write
-                // log.debug("client socket is available for writing")
+                // TODO: might want to do this a little more efficiently, as Writable events are
+                // continuously spammed, can we make only this flag level triggered?
 
+                // additionally, cant we store a stable ref to the client connection in the event,
+                // instead of storing the socket, and still having to acquire a lock to obtain the conn?
+                sync.atomic_mutex_lock(&state.client_connections_mtx)
+                client_conn := state.client_connections_guarded_[event.client]
+                sync.atomic_mutex_unlock(&state.client_connections_mtx)
+
+                if buffered := buf_remaining(client_conn.tx_buf); buffered > 0 {
+                    outb := make([]u8, buffered, context.temp_allocator)
+                    read_err := buf_read_nbytes(&client_conn.tx_buf, outb)
+                    assert(read_err == .None, "invariant, bytes suddenly not available anymore?")
+                    _, send_err := net.send_tcp(event.client, outb)
+                    switch {
+                    case send_err == .Would_Block: continue
+                    case send_err != nil:
+                        log.warn("error writing to client socket:", send_err)
+                        _disconnect_client(&state, client_conn.socket)
+                        continue
+                    }
+                }
             }
             if .Err in event.flags {
                 log.warn("client socket error")
@@ -151,8 +169,7 @@ _accept_client :: proc(state: ^_NetworkWorkerState, allocator: mem.Allocator) ->
         return false
     }
 
-    {
-        sync.atomic_mutex_guard(&state.client_connections_mtx)
+    if sync.atomic_mutex_guard(&state.client_connections_mtx) {
         state.client_connections_guarded_[client_sock] = ClientConnection {
             socket = client_sock,
             rx_buf = create_network_buf(allocator=allocator),
@@ -171,8 +188,7 @@ _accept_client :: proc(state: ^_NetworkWorkerState, allocator: mem.Allocator) ->
 _disconnect_client :: proc(state: ^_NetworkWorkerState, client_sock: net.TCP_Socket) {
     // FIXME: probably want to handle error
     reactor.unregister_client(&state.io_ctx, client_sock)
-    {
-        sync.atomic_mutex_guard(&state.client_connections_mtx)
+    if sync.atomic_mutex_guard(&state.client_connections_mtx) {
         delete_key(state.client_connections_guarded_, client_sock)
     }
     net.close(client_sock)
@@ -229,12 +245,6 @@ _handle_packet :: proc(state: ^_NetworkWorkerState, packet: ServerboundPacket, c
             favicon = "data:image/png;base64,<data>",
             enforces_secure_chat = false,
         }
-        bytes, m_err := json.marshal(status_response, allocator=context.temp_allocator)
-        // log.info(string(bytes))
-        assert(m_err == nil)
-        log.info(client_conn.socket)
-        n, send_err := net.send(client_conn.socket, bytes)
-        // assert(n == len(bytes) && send_err == nil)
-        log.info(n, send_err)
+        _ = enqueue_packet(client_conn, status_response, allocator=state.threadsafe_alloc)
     }
 }
