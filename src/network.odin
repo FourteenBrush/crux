@@ -55,7 +55,6 @@ buf_remaining :: proc(buf: NetworkBuffer) -> int {
 // Checks whether `n` bytes are readable, returns .ShortRead if not.
 @(require_results)
 buf_ensure_readable :: proc(buf: NetworkBuffer, #any_int n: int) -> ReadError {
-    assert(n >= 0) // FIXME: can we formally assert this is always the case?
     #assert(ReadError(0) == .None)
     #assert(ReadError(1) == .ShortRead)
     return ReadError(len(buf.data) < n)
