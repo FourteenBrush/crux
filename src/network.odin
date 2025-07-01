@@ -121,27 +121,36 @@ buf_write_var_int :: proc(buf: ^NetworkBuffer, val: VarInt) {
 buf_write_byte :: proc(buf: ^NetworkBuffer, b: u8) {
     space := cap(buf.data) - len(buf.data)
     if space == 0 {
-        _grow(buf)
+        _buf_reserve(buf)
     }
     buf.data[buf.r_offset + len(buf.data)] = b
     (cast(^mem.Raw_Dynamic_Array)&buf.data).len += 1
 }
 
-// Grows the internal buffer, with at least `additional` bytes
-// FIXME: verify this "at least" is correct
+// FIXME: inline?
 @(private="file")
-_grow :: proc(buf: ^NetworkBuffer) {
-    old_len := len(buf.data)
-    new_cap := old_len * 2
+_buf_reserve :: proc(buf: ^NetworkBuffer) {
+    _buf_reserve_exact(buf, max(16, len(buf.data) * 2))
+}
+
+@(private="file")
+_buf_reserve_exact :: proc(buf: ^NetworkBuffer, new_cap: int) #no_bounds_check {
+    old_cap := cap(buf.data)
 
     reserve(&buf.data, new_cap)
     // ensure wrapped around data is correctly positioned at the end of the new allocation
-    // | \\\ |     | /// | /// | ...new allocation | -> move block 3 and 4
+    // | \\\ |     | /// | /// | ...new allocation | -> move block 3 and 4 to the end
     //  -----W-----R----- -----
-    if buf.r_offset + len(buf.data) > old_len {
-        to_copy := old_len - buf.r_offset
-        intrinsics.mem_copy_non_overlapping(raw_data(buf.data[new_cap-to_copy:]), raw_data(buf.data[buf.r_offset:]), to_copy)
-        buf.r_offset += new_cap - old_len
+    if buf.r_offset + len(buf.data) > old_cap {
+        to_copy := old_cap - buf.r_offset
+        intrinsics.mem_copy_non_overlapping(&buf.data[new_cap - to_copy], &buf.data[buf.r_offset], to_copy)
+        buf.r_offset = new_cap - to_copy
+
+        when ODIN_DEBUG {
+            // fill unused chunk in the middle with markers for easier debugging
+            w_offset := (buf.r_offset + len(buf.data)) % new_cap
+            mem.set(&buf.data[w_offset], 255, buf.r_offset - w_offset)
+        }
     }
 }
 
