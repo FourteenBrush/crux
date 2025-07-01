@@ -22,9 +22,6 @@ test: CFLAGS += -define:ODIN_TEST_LOG_LEVEL=warning -define:ODIN_TEST_FANCY=fals
 test: $(SOURCE_FILES)
 	$(CC) test $(TESTS) $(CFLAGS)
 
-testbin: CFLAGS += -build-mode:test
-testbin: debug
-
 $(PROG): $(SOURCE_FILES)
 	mkdir $(BUILD_DIR) -p
 	$(CC) build $(SRC) $(CFLAGS)
