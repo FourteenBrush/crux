@@ -61,7 +61,7 @@ test_packed_read_non_enclosed_block :: proc(t: ^testing.T) {
     testing.expect(t, err == .ShortRead, "expected next read to fail as buf is empty")
 }
 
-// @(test)
+@(test)
 test_growth :: proc(t: ^testing.T) {
     using crux
     buf := create_network_buf(cap=5, allocator=context.allocator)
@@ -76,6 +76,32 @@ test_growth :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_growth_wrapping :: proc(t: ^testing.T) #no_bounds_check {
+    using crux
+    // |  5  |     |  4  |   3 |
+    // | \\\ |     | /// | /// | ...new allocation | -> move block 3 and 4 to the right
+    //  -----W-----R----- -----
+    initial_data: [3]u8 = { 4, 3, 5 }
+    buf := create_network_buf(cap=4, allocator=context.allocator)
+    defer destroy_network_buf(buf)
+
+    // create initial situation
+    buf.r_offset = 2
+    buf_write_bytes(&buf, initial_data[:])
+    testing.expect_value(t, buf.r_offset, 2)
+    testing.expect(t, slice.equal(buf.data[:4], []u8{ 5, 0, 4, 3 }))
+
+    // write more bytes and verify the correct layout
+    incoming: [50]u8 = 12
+    buf_write_bytes(&buf, incoming[:])
+
+    testing.expect(t, len(buf.data) == 3 + 50, "no proper resize")
+    // test beginning, ending contents (5, 12, 12, 12, 12, 12, ..., 4, 3)
+    testing.expect_value(t, slice.prefix_length(buf.data[:], []u8{ 5, 12, 12, /* .. */ }), 3)
+    testing.expect_value(t, suffix_length(buf.data[len(buf.data) - 5 /* last 5 */:], []u8 { 12, 12, 12, 4, 3 }), 5)
+}
+
+@(test)
 read_on_empty :: proc(t: ^testing.T) {
     using crux
     buf := create_network_buf(allocator=context.allocator)
@@ -83,6 +109,15 @@ read_on_empty :: proc(t: ^testing.T) {
 
     err := buf_read_nbytes(&buf, {0})
     testing.expect(t, err == .ShortRead, "expected read to fail as buf is empty")
+}
+
+@(private)
+suffix_length :: proc(a, b: $T/[]$E) -> (n: int) {
+    l := min(len(a), len(b))
+    for i := l - 1; i >= 0 && a[i] == b[i]; i -= 1 {
+        n += 1
+    }
+    return
 }
 
 @(private)
@@ -186,4 +221,11 @@ TestCase :: struct {
     bytes: []u8,
     expected: crux.VarInt,
     error: crux.ReadError,
+}
+
+@(test)
+test_prepend_var_int_empty :: proc(t: ^testing.T) {
+    using crux
+    buf: NetworkBuffer
+
 }
