@@ -39,11 +39,10 @@ ReadError :: enum {
     InvalidData,
 }
 
-/// Dumps a NetworkBuffer to stdout, for debugging purposes.
+// Dumps a NetworkBuffer to stdout, for debugging purposes.
 buf_dump :: proc(buf: NetworkBuffer) #no_bounds_check {
-    length := len(buf.data)
-    fmt.printfln("NetworkBuffer{{len=%d, r_offset=%d, data=%2x}}",
-        length, buf.r_offset, buf.data[buf.r_offset:][:length],
+    fmt.printfln("NetworkBuffer{{len=%d, r_offset=%d, data=%2d}}",
+        len(buf.data), buf.r_offset, buf.data[:len(buf.data)],
     )
 }
 
@@ -68,24 +67,41 @@ buf_advance_pos_unchecked :: proc(buf: ^NetworkBuffer, n: int) {
     buf.r_offset = (buf.r_offset + n) % cap(buf.data)
 }
 
-// Pushes data into the buffer, reallocating if necessary.
+// Inserts a VarInt right before the current reading position, making this the first
+// item to be read.
+buf_prepend_var_int :: proc(buf: ^NetworkBuffer, val: VarInt) #no_bounds_check {
+    val := val
+    for {
+        buf.r_offset = (buf.r_offset - 1 + cap(buf.data)) % cap(buf.data)
+        (cast(^mem.Raw_Dynamic_Array)&buf.data).len += 1
+
+        if val & ~VarInt(SEGMENT_BITS) == 0 {
+            buf.data[buf.r_offset] = u8(val)
+            return
+        }
+        buf.data[buf.r_offset] = u8(val & SEGMENT_BITS | CONTINUE_BIT)
+        val >>= 7
+    }
+}
+
+// Pushes data into the buffer, resizing if necessary.
 // `data` is copied.
 buf_write_bytes :: proc(buf: ^NetworkBuffer, data: []u8) #no_bounds_check {
     space := cap(buf.data) - len(buf.data)
     nrequired := len(data)
     if space < nrequired {
-        _grow(buf)
+        _buf_reserve_exact(buf, len(buf.data) + nrequired)
     }
 
     alloc_sz := cap(buf.data)
-    insert_from := (buf.r_offset + len(buf.data)) % alloc_sz // always rightmost write
-    if insert_from + nrequired > alloc_sz {
-        n_nowrap := alloc_sz - insert_from
+    w_offset := (buf.r_offset + len(buf.data)) % alloc_sz // always rightmost write
+    if w_offset + nrequired > alloc_sz {
+        n_nowrap := alloc_sz - w_offset
         // limit copy to amount of items that fits without wrapping, and perform another copy
-        intrinsics.mem_copy_non_overlapping(raw_data(buf.data[insert_from:]), raw_data(data), n_nowrap)
+        intrinsics.mem_copy_non_overlapping(raw_data(buf.data[w_offset:]), raw_data(data), n_nowrap)
         intrinsics.mem_copy_non_overlapping(raw_data(buf.data), raw_data(data[n_nowrap:]), nrequired - n_nowrap)
     } else {
-        intrinsics.mem_copy_non_overlapping(raw_data(buf.data[insert_from:]), raw_data(data), nrequired)
+        intrinsics.mem_copy_non_overlapping(raw_data(buf.data[w_offset:]), raw_data(data), nrequired)
     }
     (cast(^mem.Raw_Dynamic_Array)&buf.data).len += nrequired
 }
