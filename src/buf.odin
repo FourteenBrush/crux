@@ -5,6 +5,8 @@ import "core:mem"
 
 import "base:intrinsics"
 
+MAX_VAR_INT :: int(max(VarInt))
+
 SEGMENT_BITS :: 0x7F
 CONTINUE_BIT :: 0x80
 MIN_STRING_LENGTH :: 1
@@ -23,13 +25,13 @@ NetworkBuffer :: struct {
     r_offset: int,
 }
 
-create_network_buf :: proc(cap := 512, allocator := context.allocator) -> (buf: NetworkBuffer) {
+create_network_buf :: proc(cap := 512, allocator: mem.Allocator) -> (buf: NetworkBuffer) {
     assert(cap > 0)
     buf.data = make([dynamic]u8, 0, cap, allocator)
     return
 }
 
-destroy_network_buf :: proc(buf: ^NetworkBuffer) {
+destroy_network_buf :: proc(buf: NetworkBuffer) {
     delete(buf.data)
 }
 
@@ -39,11 +41,27 @@ ReadError :: enum {
     InvalidData,
 }
 
+WriteError :: enum {
+    None,
+    // BufWriteMark provided has become stale or is not valid at all.
+    InvalidMark,
+}
+
+// An insertion position into a NetworkBuffer, this mark is only valid if it points
+// to a position in the data chunk formed between the read and write offset.
+BufWriteMark :: distinct int
+
 // Dumps a NetworkBuffer to stdout, for debugging purposes.
-buf_dump :: proc(buf: NetworkBuffer) #no_bounds_check {
-    fmt.printfln("NetworkBuffer{{len=%d, r_offset=%d, data=%2d}}",
-        len(buf.data), buf.r_offset, buf.data[:len(buf.data)],
+buf_dump :: proc(buf: NetworkBuffer) {
+    fmt.printfln("NetworkBuffer{{len=%d, r_offset=%d, data=%2x (hex)}}",
+        len(buf.data), buf.r_offset, buf.data[:],
     )
+}
+
+// Creates a `BufWriteMark`, a position referring to the current writing offset.
+// This can be used for later writes at a certain offset.
+buf_emit_write_mark :: proc(buf: NetworkBuffer) -> BufWriteMark {
+    return BufWriteMark((buf.r_offset + len(buf.data)) % cap(buf.data))
 }
 
 // Returns the number of total bytes in this buffer.
@@ -66,23 +84,6 @@ buf_advance_pos_unchecked :: proc(buf: ^NetworkBuffer, n: int) {
     buf.r_offset = (buf.r_offset + n) % cap(buf.data)
 }
 
-// Inserts a VarInt right before the current reading position, making this the first
-// item to be read.
-buf_prepend_var_int :: proc(buf: ^NetworkBuffer, val: VarInt) #no_bounds_check {
-    val := val
-    for {
-        buf.r_offset = (buf.r_offset - 1 + cap(buf.data)) % cap(buf.data)
-        (cast(^mem.Raw_Dynamic_Array)&buf.data).len += 1
-
-        if val & ~VarInt(SEGMENT_BITS) == 0 {
-            buf.data[buf.r_offset] = u8(val)
-            return
-        }
-        buf.data[buf.r_offset] = u8(val & SEGMENT_BITS | CONTINUE_BIT)
-        val >>= 7
-    }
-}
-
 // Pushes data into the buffer, resizing if necessary.
 // `data` is copied.
 buf_write_bytes :: proc(buf: ^NetworkBuffer, data: []u8) #no_bounds_check {
@@ -97,27 +98,111 @@ buf_write_bytes :: proc(buf: ^NetworkBuffer, data: []u8) #no_bounds_check {
     if w_offset + nrequired > alloc_sz {
         n_nowrap := alloc_sz - w_offset
         // limit copy to amount of items that fits without wrapping, and perform another copy
-        intrinsics.mem_copy_non_overlapping(raw_data(buf.data[w_offset:]), raw_data(data), n_nowrap)
+        intrinsics.mem_copy_non_overlapping(&buf.data[w_offset], raw_data(data), n_nowrap)
         intrinsics.mem_copy_non_overlapping(raw_data(buf.data), raw_data(data[n_nowrap:]), nrequired - n_nowrap)
     } else {
-        intrinsics.mem_copy_non_overlapping(raw_data(buf.data[w_offset:]), raw_data(data), nrequired)
+        intrinsics.mem_copy_non_overlapping(&buf.data[w_offset], raw_data(data), nrequired)
     }
     (cast(^mem.Raw_Dynamic_Array)&buf.data).len += nrequired
 }
 
 buf_write_var_int :: proc(buf: ^NetworkBuffer, val: VarInt) {
-    val := val
+    // to prevent sign extension on negative numbers
+    val := u32le(val)
+    #assert(size_of(u32le) == size_of(VarInt))
     for {
-        if val & ~VarInt(SEGMENT_BITS) == 0 {
+        if val & ~u32le(SEGMENT_BITS) == 0 {
             buf_write_byte(buf, u8(val))
             return
         }
         buf_write_byte(buf, u8(val & SEGMENT_BITS) | CONTINUE_BIT)
         val >>= 7
     }
+    unreachable()
 }
 
-buf_write_byte :: proc(buf: ^NetworkBuffer, b: u8) {
+buf_write_var_int_at :: proc(buf: ^NetworkBuffer, mark: BufWriteMark, val: VarInt) -> WriteError #no_bounds_check {
+    mark_idx := int(mark) // index into raw data
+    // wrapped meaning, both sides of the data array are being used to store data, with an
+    // eventual empty chunk between those sides
+    wrapped := buf.r_offset + len(buf.data) > cap(buf.data)
+    w_offset := (buf.r_offset + len(buf.data)) % cap(buf.data)
+    
+    // ensure we are not creating "holes" by writing outside the data chunk formed between the read and write offset.
+    // examples of invalid mark positions:
+    // |     | /// | /// |     |
+    // M-----R-----|-----W-----|
+    //
+    // | /// | /// |     |     |
+    // |-----|-----|-----M-----|
+    // TODO: add guard for wrapped structure
+    if !wrapped && (mark_idx > w_offset || mark_idx < buf.r_offset) {
+        return .InvalidMark
+    }
+    
+    // if wrapped && (uint())
+
+    vbuf, vlen := _buf_prepare_var_int(val)
+    space := cap(buf.data) - len(buf.data)
+    if space < vlen {
+        _buf_reserve_exact(buf, len(buf.data) + vlen)
+    }
+
+    // |     | /// | /// |     |
+    // |-----R-----M-----W-----|
+    // (move data between mark and write offset to make VarInt fit)
+    if wrapped {
+        panic("yet to be implemented")
+    } else {
+        // W >= M for all cases
+        move_len := w_offset - mark_idx // >= 0
+        
+        if move_len > 0 {
+            // amount of bytes that can be positioned behind the newly inserted vbuf (can be pos/neg/zero) (<= move_len)
+            // when negative, this tells the number of bytes that needs to wrap around
+            trailing_unused := cap(buf.data) - mark_idx - vlen
+            trailing_move_len := min(move_len, trailing_unused) // any real number
+            
+            if trailing_unused > 0 {
+                intrinsics.mem_copy(&buf.data[mark_idx + vlen], &buf.data[mark_idx], trailing_move_len)
+            }
+            
+            // if trailing_move_len == move_len -> everything was moved
+            // if trailing_move_len < move_len  -> more bytes need to be moved to the front
+            // if trailing_move_len <= 0        -> move abs(trailing_move_len) to front
+            if trailing_move_len < move_len {
+                trailing_move_abs := abs(trailing_move_len)
+                leading_move_len := move_len - trailing_move_abs
+                insert_at := (mark_idx + vlen) % cap(buf.data)
+                intrinsics.mem_copy_non_overlapping(&buf.data[insert_at], &buf.data[mark_idx + trailing_move_abs], leading_move_len)
+            }
+        }
+    }
+
+    for b, i in vbuf[:vlen] {
+        offset := (mark_idx + i) % cap(buf.data)
+        buf.data[offset] = b
+    }
+
+    (cast(^mem.Raw_Dynamic_Array)&buf.data).len += vlen
+    return .None
+}
+
+@(private)
+_buf_prepare_var_int :: proc(val: VarInt) -> (buf: [5]u8, n: int) {
+    val := cast(u32le) val
+    for _, i in buf {
+        if val & ~u32le(SEGMENT_BITS) == 0 {
+            buf[i] = u8(val)
+            return buf, i + 1
+        }
+        buf[i] = u8(val & SEGMENT_BITS | CONTINUE_BIT)
+        val >>= 7
+    }
+    unreachable()
+}
+
+buf_write_byte :: proc(buf: ^NetworkBuffer, b: u8) #no_bounds_check {
     space := cap(buf.data) - len(buf.data)
     if space == 0 {
         _buf_reserve(buf)
@@ -132,6 +217,7 @@ _buf_reserve :: proc(buf: ^NetworkBuffer) {
     _buf_reserve_exact(buf, max(16, len(buf.data) * 2))
 }
 
+// TODO: get rid of this and use a * 2 growth strategy
 @(private="file")
 _buf_reserve_exact :: proc(buf: ^NetworkBuffer, new_cap: int) #no_bounds_check {
     old_cap := cap(buf.data)
@@ -139,13 +225,13 @@ _buf_reserve_exact :: proc(buf: ^NetworkBuffer, new_cap: int) #no_bounds_check {
     reserve(&buf.data, new_cap)
     // ensure wrapped around data is correctly positioned at the end of the new allocation
     // | \\\ |     | /// | /// | ...new allocation | -> move block 3 and 4 to the end
-    //  -----W-----R----- -----
+    // |-----W-----R-----|-----|
     if buf.r_offset + len(buf.data) > old_cap {
         to_copy := old_cap - buf.r_offset
         intrinsics.mem_copy_non_overlapping(&buf.data[new_cap - to_copy], &buf.data[buf.r_offset], to_copy)
         buf.r_offset = new_cap - to_copy
 
-        when ODIN_DEBUG {
+        when ODIN_DEBUG && !ODIN_TEST {
             // fill unused chunk in the middle with markers for easier debugging
             w_offset := (buf.r_offset + len(buf.data)) % new_cap
             mem.set(&buf.data[w_offset], 255, buf.r_offset - w_offset)
@@ -154,7 +240,6 @@ _buf_reserve_exact :: proc(buf: ^NetworkBuffer, new_cap: int) #no_bounds_check {
 }
 
 // FIXME: handle address decoding
-// // FIXME: get rid of allocation, let client handle this
 @(require_results)
 buf_read_string :: proc(buf: ^NetworkBuffer, allocator: mem.Allocator) -> (s: string, err: ReadError) {
     length := buf_read_var_int(buf) or_return
@@ -167,7 +252,7 @@ buf_read_string :: proc(buf: ^NetworkBuffer, allocator: mem.Allocator) -> (s: st
 }
 
 // We accept a backing type, because sometimes an enum has only a few variants, where the transmission
-// type has a far bigger range, and we want to store the enum as the smallest possible type to save space.
+// type has a far bigger range, and we want to store the enum as the smallest possible type in order to save space.
 buf_read_enum :: proc(buf: ^NetworkBuffer, $E: typeid, $Backing: typeid) -> (E, ReadError)
 where
     intrinsics.type_is_enum(E), intrinsics.type_is_numeric(Backing) {
@@ -202,14 +287,13 @@ buf_read_var_int :: proc(buf: ^NetworkBuffer) -> (val: VarInt, err: ReadError) {
     for {
         curr, read_err := buf_read_byte(buf)
         if read_err == .ShortRead {
-            // fine as long as b.data is left untouched
             (cast(^mem.Raw_Dynamic_Array)&buf.data).len = len_mark
             buf.r_offset = r_offset_mark
             return 0, .ShortRead
         }
         read_err or_return
 
-        val |= auto_cast (curr & SEGMENT_BITS) << pos
+        val |= VarInt(curr & SEGMENT_BITS) << pos
         if curr & CONTINUE_BIT == 0 do break
 
         pos += 7
@@ -228,7 +312,7 @@ buf_peek_var_int :: proc(buf: ^NetworkBuffer) -> (val: VarInt, nbytes: int, err:
 
     for {
         curr := buf_peek_byte(buf, pos / 7) or_return
-        val |= auto_cast (curr & SEGMENT_BITS) << pos
+        val |= VarInt(curr & SEGMENT_BITS) << pos
         pos += 7
 
         if curr & CONTINUE_BIT == 0 do break
@@ -249,13 +333,11 @@ buf_read_var_long :: proc(buf: ^NetworkBuffer) -> (val: VarLong, err: ReadError)
     for {
         curr, read_err := buf_read_byte(buf)
         if read_err == .ShortRead {
-
-            // fine as long as b.data is left untouched
             (cast(^mem.Raw_Dynamic_Array)&buf.data).len = len_mark
             buf.r_offset = r_offset_mark
             return 0, .ShortRead
         }
-        val |= auto_cast (curr & SEGMENT_BITS) << pos
+        val |= VarLong(curr & SEGMENT_BITS) << pos
         pos += 7
 
         if curr & CONTINUE_BIT == 0 do break
@@ -279,10 +361,10 @@ buf_read_nbytes :: proc(buf: ^NetworkBuffer, outb: []u8) -> ReadError #no_bounds
     // bytes copyable from read offset to boundary (array end or length)
     // FIXME: can this be done with less branches?
     n_nowrap := min(n, cap(buf.data) - buf.r_offset, len(buf.data))
-    intrinsics.mem_copy_non_overlapping(raw_data(outb), raw_data(buf.data[buf.r_offset:]), n_nowrap)
+    intrinsics.mem_copy_non_overlapping(raw_data(outb), &buf.data[buf.r_offset], n_nowrap)
 
     if n > n_nowrap {
-        intrinsics.mem_copy_non_overlapping(raw_data(outb[n_nowrap:]), raw_data(outb), n - n_nowrap)
+        intrinsics.mem_copy_non_overlapping(&outb[n_nowrap], raw_data(outb), n - n_nowrap)
     }
 
     buf.r_offset = (buf.r_offset + n) % cap(buf.data)
