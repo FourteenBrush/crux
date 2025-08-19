@@ -115,7 +115,7 @@ buf_write_var_int :: proc(buf: ^NetworkBuffer, val: VarInt) {
             buf_write_byte(buf, u8(val))
             return
         }
-        buf_write_byte(buf, u8(val & SEGMENT_BITS) | CONTINUE_BIT)
+        buf_write_byte(buf, u8(val) & SEGMENT_BITS | CONTINUE_BIT)
         val >>= 7
     }
     unreachable()
