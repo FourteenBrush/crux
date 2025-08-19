@@ -18,7 +18,7 @@ release: $(PROG)
 debug: CFLAGS += -debug -o:none -define:TRACY_ENABLE=true
 debug: $(PROG)
 
-test: CFLAGS += -define:ODIN_TEST_LOG_LEVEL=warning -define:ODIN_TEST_FANCY=false -debug -keep-executable
+test: CFLAGS += -define:ODIN_TEST_LOG_LEVEL=warning -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_SHORT_LOGS=true -debug -keep-executable
 test: $(SOURCE_FILES)
 	$(CC) test $(TESTS) $(CFLAGS)
 
