@@ -1,5 +1,6 @@
 package crux
 
+import "core:sys/posix"
 import "core:os"
 import "core:log"
 import "core:mem"
@@ -21,6 +22,7 @@ g_server_context: runtime.Context
 g_continue_running := true
 
 main :: proc() {
+
     exit_success: bool
     // NOTE: must be put before all other deferred statements
     defer os.exit(0 if exit_success else 1)
@@ -57,7 +59,7 @@ main :: proc() {
     }
 
     g_server_context = context
-    libc.signal(libc.SIGINT, proc "c" (_: i32) {
+    posix.signal(.SIGINT, proc "c" (_: posix.Signal) {
         context = g_server_context
         sync.atomic_store_explicit(&g_continue_running, false, .Release)
     })
