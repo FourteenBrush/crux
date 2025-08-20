@@ -230,12 +230,6 @@ _buf_reserve_exact :: proc(buf: ^NetworkBuffer, new_cap: int) #no_bounds_check {
         to_copy := old_cap - buf.r_offset
         intrinsics.mem_copy_non_overlapping(&buf.data[new_cap - to_copy], &buf.data[buf.r_offset], to_copy)
         buf.r_offset = new_cap - to_copy
-
-        when ODIN_DEBUG && !ODIN_TEST {
-            // fill unused chunk in the middle with markers for easier debugging
-            w_offset := (buf.r_offset + len(buf.data)) % new_cap
-            mem.set(&buf.data[w_offset], 255, buf.r_offset - w_offset)
-        }
     }
 }
 
