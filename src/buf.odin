@@ -253,11 +253,18 @@ where
     outb: [size_of(Backing)]u8
     buf_read_nbytes(buf, outb) or_return
     e := transmute(E) outb
-    // FIXME: add fast path with type_is_contiguous clause
-    for constant in E do if constant == e {
+    
+    when intrinsics.type_enum_is_contiguous(E) {
+        if e < min(E) || e > max(E) {
+            return e, .InvalidData
+        }
         return e, .None
+    } else {
+        for constant in E do if constant == e {
+            return e, .None
+        }
+        return e, .InvalidData
     }
-    return e, .InvalidData
 }
 
 // TODO: what even happens on short reads on primitives, we are probably supposed to handle this
