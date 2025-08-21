@@ -26,9 +26,8 @@ run :: proc(threadsafe_alloc: mem.Allocator, execution_permit: ^bool) -> bool {
     io_ctx := _setup_io_context(server_sock) or_return
     defer reactor.destroy_io_context(&io_ctx)
 
-    client_connections := make(map[net.TCP_Socket]ClientConnection, 16, threadsafe_alloc)
+    client_connections := make(map[net.TCP_Socket]ClientConnection, 4, threadsafe_alloc)
     defer delete(client_connections)
-    client_connections_mtx: sync.Atomic_Mutex
 
     defer if fmt._user_formatters == nil {
         delete(fmt._user_formatters^)
@@ -46,7 +45,7 @@ run :: proc(threadsafe_alloc: mem.Allocator, execution_permit: ^bool) -> bool {
        threadsafe_alloc = threadsafe_alloc,
        execution_permit = execution_permit,
        client_connections_guarded_ = &client_connections,
-       client_connections_mtx = client_connections_mtx,
+       client_connections_mtx = {}, // unlocked
     }
 
     // FIXME
@@ -90,7 +89,7 @@ _setup_server_socket :: proc(endpoint: net.Endpoint) -> (net.TCP_Socket, bool) {
 
     net_err = net.set_blocking(sock, false)
     if net_err != nil {
-        log.errorf("failed to set socket to non blocking: %s", net_err)
+        log.errorf("failed to set server socket to non blocking: %s", net_err)
         return sock, false
     }
     return sock, true
@@ -136,4 +135,12 @@ ClientState :: enum VarInt {
     Status    = 1,
     Login     = 2,
     Transfer  = 3,
+}
+
+// Logs a fatal condition, which we cannot recover from.
+// This proc always returns false, for the sake of `return fatal("aa")`
+@(require_results, private)
+fatal :: proc(args: ..any, loc := #caller_location) -> bool {
+    log.fatal(..args, location=loc)
+    return false
 }

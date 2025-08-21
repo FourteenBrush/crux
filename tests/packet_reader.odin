@@ -54,7 +54,7 @@ packed_read_non_enclosed_block :: proc(t: ^testing.T) {
     expect_same_retrieval(t, &buf, &b20)
     expect_same_retrieval(t, &buf, &b50)
 
-    err := buf_read_nbytes(&buf, {0})
+    err := buf_read_bytes(&buf, {0})
     testing.expect(t, err == .ShortRead, "expected next read to fail as buf is empty")
 }
 
@@ -98,7 +98,7 @@ read_on_empty :: proc(t: ^testing.T) {
     using crux
     buf := scoped_create_network_buf()
 
-    err := buf_read_nbytes(&buf, {0})
+    err := buf_read_bytes(&buf, {0})
     testing.expect(t, err == .ShortRead, "expected read to fail as buf is empty")
 }
 
@@ -357,7 +357,7 @@ expect_read_result :: proc(t: ^testing.T, res: $R, err: crux.ReadError, expected
 expect_same_retrieval :: proc(t: ^testing.T, buf: ^crux.NetworkBuffer, data: ^[$S]u8) {
     using crux
     temp: [S]u8
-    err := buf_read_nbytes(buf, temp[:])
+    err := buf_read_bytes(buf, temp[:])
     testing.expect_value(t, err, ReadError.None)
     testing.expectf(t, slice.equal(data[:], temp[:]), "expected data to be equal: %v and %v differ", data, temp[:])
 }

@@ -37,8 +37,11 @@ read_serverbound :: proc(b: ^NetworkBuffer, allocator: mem.Allocator) -> (p: Ser
             server_port = server_port,
             intent = next_state,
         }, .None
+    case .PingRequest:
+        payload := buf_read_long(b) or_return
+        return PingRequest { payload }, .None
     case:
-        log.warn("unhandled packet id:", PacketId(id))
+        log.warn("unhandled packet id:", PacketId(id), "kicking with .InvalidData")
         return p, .InvalidData
     }
 }
@@ -54,12 +57,12 @@ read_legacy_server_list_ping :: proc(buf: ^NetworkBuffer, allocator: mem.Allocat
 
         channel_codeunits_len := buf_read_u16(buf) or_return
         channel_bytes := make([]u8, channel_codeunits_len * 2, allocator)
-        buf_read_nbytes(buf, channel_bytes) or_return
+        buf_read_bytes(buf, channel_bytes) or_return
         _remaining_len := buf_read_u16(buf) or_return
         protocol_version := buf_read_byte(buf) or_return
         hostname_codeunits_len := buf_read_u16(buf) or_return
         hostname_bytes := make([]u8, hostname_codeunits_len * 2, allocator)
-        buf_read_nbytes(buf, hostname_bytes) or_return
+        buf_read_bytes(buf, hostname_bytes) or_return
         port := buf_read_int(buf) or_return
 
         p.v1_6_extension = LegacyServerListPingV1_6Extension {

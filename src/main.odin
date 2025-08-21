@@ -1,12 +1,11 @@
 package crux
 
-import "core:sys/posix"
 import "core:os"
 import "core:log"
 import "core:mem"
 import "core:sync"
 import "core:time"
-import "core:c/libc"
+import "core:sys/posix"
 
 import "base:runtime"
 
@@ -22,7 +21,6 @@ g_server_context: runtime.Context
 g_continue_running := true
 
 main :: proc() {
-
     exit_success: bool
     // NOTE: must be put before all other deferred statements
     defer os.exit(0 if exit_success else 1)
@@ -54,8 +52,13 @@ main :: proc() {
     }
 
     log_opts := log.Options {.Level, .Terminal_Color}
-    for &header in log.Level_Headers {
-        header = header[:len(header) - len("--- ")]
+    // remove "---" and spacing inside []
+    log.Level_Headers = {
+         0..<10 = "[DEBUG]",
+    	10..<20 = "[INFO] ",
+    	20..<30 = "[WARN] ",
+    	30..<40 = "[ERROR]",
+    	40..<50 = "[FATAL]",
     }
 
     g_server_context = context
@@ -76,12 +79,4 @@ main :: proc() {
     args, ok := parse_cli_args(allocator)
 
     exit_success = run(allocator, execution_permit=&g_continue_running)
-}
-
-// Logs a fatal condition, which we cannot recover from.
-// This proc always returns false, for the sake of `return fatal("aa")`
-@(require_results)
-fatal :: proc(args: ..any, loc := #caller_location) -> bool {
-    log.fatal(..args, location=loc)
-    return false
 }

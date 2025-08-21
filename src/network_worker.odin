@@ -1,5 +1,6 @@
 package crux
 
+import "core:math/rand"
 import "core:time"
 import "core:log"
 import "core:mem"
@@ -123,10 +124,11 @@ _network_worker_proc :: proc(state: _NetworkWorkerState) {
 
                 if buffered := buf_remaining(client_conn.tx_buf); buffered > 0 {
                     outb := make([]u8, buffered, context.temp_allocator)
-                    read_err := buf_read_nbytes(&client_conn.tx_buf, outb)
+                    read_err := buf_read_bytes(&client_conn.tx_buf, outb)
                     assert(read_err == .None, "invariant, bytes suddenly not available anymore?")
                     _, send_err := net.send_tcp(event.client, outb)
                     switch {
+                    // TODO: rollback, kernel buf is full?
                     case send_err == .Would_Block: continue
                     case send_err != nil:
                         log.warn("error writing to client socket:", send_err)
@@ -192,6 +194,7 @@ _disconnect_client :: proc(state: ^_NetworkWorkerState, client_sock: net.TCP_Soc
         delete_key(state.client_connections_guarded_, client_sock)
     }
     net.close(client_sock)
+    log.warn("closed client conn")
 }
 
 _drain_serverbound_packets :: proc(state: ^_NetworkWorkerState, client_conn: ^ClientConnection, packet_alloc: mem.Allocator) {
@@ -230,21 +233,31 @@ _handle_packet :: proc(state: ^_NetworkWorkerState, packet: ServerboundPacket, c
         log.debugf("kicking client due to LegacyServerPingEvent")
         _disconnect_client(state, client_conn.socket)
         return
+        
     case StatusRequestPacket:
-        // send json
         status_response := StatusResponsePacket {
-            version_name = "1.21.5",
-            version_protocol = 770,
+            version = {
+                name = "1.21.6",
+                protocol = .V1_21_6,
+            },
             players = {
                 max = 100,
-                online = 1,
+                online = cast(uint)rand.int_max(10),
             },
             description = {
                 text = "Some server",
             },
-            favicon = "data:image/png;base64,<data>",
-            enforces_secure_chat = false,
+            // favicon = "data:image/png;base64,<data>",
+            // enforces_secure_chat = false,
         }
         _ = enqueue_packet(client_conn, status_response, allocator=state.threadsafe_alloc)
+    case PingRequest:
+        response := PongResponse {
+            payload = packet.payload,
+        }
+        _ = enqueue_packet(client_conn, response, allocator=state.threadsafe_alloc)
+        // TODO: this  relies on the fact enqueue_packet send them directly, we would be closing before
+        // the packets were send otherwise
+        _disconnect_client(state, client_conn.socket)
     }
 }

@@ -1,5 +1,6 @@
 package crux
 
+import "core:log"
 import "core:fmt"
 import "core:mem"
 
@@ -43,8 +44,9 @@ ReadError :: enum {
 
 WriteError :: enum {
     None,
-    // BufWriteMark provided has become stale or is not valid at all.
+    // BufWriteMark provided to `write_at` operation is stale or is not valid at all.
     InvalidMark,
+    StringTooLong,
 }
 
 // An insertion position into a NetworkBuffer, this mark is only valid if it points
@@ -84,6 +86,16 @@ buf_advance_pos_unchecked :: proc(buf: ^NetworkBuffer, n: int) {
     buf.r_offset = (buf.r_offset + n) % cap(buf.data)
 }
 
+@(require_results)
+buf_write_string :: proc(buf: ^NetworkBuffer, str: string) -> WriteError {
+    if len(str) > MAX_STRING_LENGTH {
+        return .StringTooLong
+    }
+    buf_write_var_int(buf, VarInt(len(str)))
+    buf_write_bytes(buf, transmute([]u8)str)
+    return .None
+}
+
 // Pushes data into the buffer, resizing if necessary.
 // `data` is copied.
 buf_write_bytes :: proc(buf: ^NetworkBuffer, data: []u8) #no_bounds_check {
@@ -98,10 +110,10 @@ buf_write_bytes :: proc(buf: ^NetworkBuffer, data: []u8) #no_bounds_check {
     if w_offset + nrequired > alloc_sz {
         n_nowrap := alloc_sz - w_offset
         // limit copy to amount of items that fits without wrapping, and perform another copy
-        intrinsics.mem_copy_non_overlapping(&buf.data[w_offset], raw_data(data), n_nowrap)
-        intrinsics.mem_copy_non_overlapping(raw_data(buf.data), raw_data(data[n_nowrap:]), nrequired - n_nowrap)
+        intrinsics.mem_copy_non_overlapping(&buf.data[w_offset], &data[0], n_nowrap)
+        intrinsics.mem_copy_non_overlapping(&buf.data[0], &data[n_nowrap], nrequired - n_nowrap)
     } else {
-        intrinsics.mem_copy_non_overlapping(&buf.data[w_offset], raw_data(data), nrequired)
+        intrinsics.mem_copy_non_overlapping(&buf.data[w_offset], &data[0], nrequired)
     }
     (cast(^mem.Raw_Dynamic_Array)&buf.data).len += nrequired
 }
@@ -202,6 +214,13 @@ _buf_prepare_var_int :: proc(val: VarInt) -> (buf: [5]u8, n: int) {
     unreachable()
 }
 
+buf_write_long :: proc(buf: ^NetworkBuffer, val: Long) {
+    val := val
+    bytes := mem.any_to_bytes(val)
+    log.warnf("%v: %x", #procedure, bytes)
+    buf_write_bytes(buf, bytes)
+}
+
 buf_write_byte :: proc(buf: ^NetworkBuffer, b: u8) #no_bounds_check {
     space := cap(buf.data) - len(buf.data)
     if space == 0 {
@@ -241,18 +260,25 @@ buf_read_string :: proc(buf: ^NetworkBuffer, allocator: mem.Allocator) -> (s: st
         return s, .InvalidData
     }
     outb := make([]u8, length, allocator)
-    buf_read_nbytes(buf, outb) or_return
+    buf_read_bytes(buf, outb) or_return
     return string(outb), .None
+}
+
+buf_read_long :: proc(buf: ^NetworkBuffer) -> (l: Long, err: ReadError) {
+    out: [8]u8
+    buf_read_bytes(buf, out[:]) or_return
+    return transmute(Long)out, .None
 }
 
 // We accept a backing type, because sometimes an enum has only a few variants, where the transmission
 // type has a far bigger range, and we want to store the enum as the smallest possible type in order to save space.
-buf_read_enum :: proc(buf: ^NetworkBuffer, $E: typeid, $Backing: typeid) -> (E, ReadError)
+@(require_results)
+buf_read_enum :: proc(buf: ^NetworkBuffer, $E: typeid, $Backing: typeid) -> (e: E, err: ReadError)
 where
     intrinsics.type_is_enum(E), intrinsics.type_is_numeric(Backing) {
     outb: [size_of(Backing)]u8
-    buf_read_nbytes(buf, outb) or_return
-    e := transmute(E) outb
+    buf_read_bytes(buf, outb[:]) or_return
+    e = transmute(E) outb
     
     when intrinsics.type_enum_is_contiguous(E) {
         if e < min(E) || e > max(E) {
@@ -273,7 +299,6 @@ where
 buf_read_int :: proc(buf: ^NetworkBuffer) -> (val: i32be, err: ReadError) {
     buf_ensure_readable(buf^, 4) or_return
     #unroll for _ in 0..=3 {
-        // FIXME: optimize to single memcpy
         val = (val << 8) | cast(i32be) buf_unchecked_read_byte(buf)
     }
     return
@@ -354,7 +379,7 @@ buf_read_var_long :: proc(buf: ^NetworkBuffer) -> (val: VarLong, err: ReadError)
 // Copies `len(outb)` bytes from this buffer into `outb`. `ReadError.ShortRead` is returned
 // when not enough bytes are available, the internal state is updated to reflect the consumed bytes.
 @(require_results)
-buf_read_nbytes :: proc(buf: ^NetworkBuffer, outb: []u8) -> ReadError #no_bounds_check {
+buf_read_bytes :: proc(buf: ^NetworkBuffer, outb: []u8) -> ReadError #no_bounds_check {
     // TODO: when n is zero, return early?
     n := len(outb)
     buf_ensure_readable(buf^, n) or_return

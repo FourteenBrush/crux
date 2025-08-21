@@ -1,25 +1,51 @@
 package crux
 
+import "core:reflect"
+import "base:intrinsics"
+
 ServerboundPacket :: union {
     LegacyServerListPingPacket,
     HandshakePacket,
     StatusRequestPacket,
+    PingRequest,
 }
 
-ClientBoundPacket :: union {
+ClientBoundPacket :: union #no_nil {
     StatusResponsePacket,
+    PongResponse,
 }
 
 // 7 least significant bits are used to encode the value,
-// most significant bits indicate whether there's another byte
+// most significant bit indicates whether there's another byte
 VarInt :: distinct i32le
 VarLong :: distinct i64le
+
+Long :: distinct i64be
 
 Utf16String :: distinct []u8
 
 PacketId :: enum VarInt {
-    Handshake = 0x00,
-    StatusRequest = 0x00,
+    Handshake      = 0x00,
+    StatusRequest  = 0x00,
+    StatusResponse = 0x00, // CLIENTBOUND
+    // To calculate the server's latency
+    PingRequest    = 0x01,
+    PongResponse   = 0x01, // CLIENTBOUND
+}
+
+get_clientbound_packet_id :: proc(packet: ClientBoundPacket) -> PacketId {
+    tag: i64 = reflect.get_union_variant_raw_tag(packet)
+    return clientbound_packet_id_lookup[tag]
+}
+
+@(private)
+VARIANT_IDX_OF :: intrinsics.type_variant_index_of
+
+// IMPORTANT NOTE: ClientBoundPacket must be #no_nil or we need a +1
+@(rodata, private)
+clientbound_packet_id_lookup := [intrinsics.type_union_variant_count(ClientBoundPacket)]PacketId {
+    VARIANT_IDX_OF(ClientBoundPacket, StatusResponsePacket) = .StatusResponse,
+    VARIANT_IDX_OF(ClientBoundPacket, PongResponse) = .PongResponse,
 }
 
 HandshakePacket :: struct {
@@ -43,17 +69,29 @@ LegacyServerListPingV1_6Extension :: struct {
 
 StatusRequestPacket :: struct {}
 
+PingRequest :: struct {
+    payload: Long,
+}
+
 ConnectionState :: enum VarInt {
     Status = 1,
     Login = 2,
     Transfer = 3,
 }
 
+// Only the version.name field should be considered mandatory
 StatusResponsePacket :: struct {
-    version_name: string `json:"version"`,
-    version_protocol: uint `json:"protocol"`,
+    version: struct {
+        name: string `json:"name"`,
+        protocol: ProtocolVersion `json:"protocol"`,
+    },
     players: struct { max: uint, online: uint },
+    // TODO: make TextComponent
     description: struct { text: string },
     favicon: string,
     enforces_secure_chat: bool `json:"enforcesSecureChat"`,
+}
+
+PongResponse :: struct {
+    payload: Long,
 }
