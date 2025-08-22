@@ -1,6 +1,5 @@
 package crux
 
-import "core:math/rand"
 import "core:time"
 import "core:log"
 import "core:mem"
@@ -122,7 +121,7 @@ _network_worker_proc :: proc(state: _NetworkWorkerState) {
                 client_conn := state.client_connections_guarded_[event.client]
                 sync.atomic_mutex_unlock(&state.client_connections_mtx)
 
-                if buffered := buf_remaining(client_conn.tx_buf); buffered > 0 {
+                if buffered := buf_length(client_conn.tx_buf); buffered > 0 {
                     outb := make([]u8, buffered, context.temp_allocator)
                     read_err := buf_read_bytes(&client_conn.tx_buf, outb)
                     assert(read_err == .None, "invariant, bytes suddenly not available anymore?")
@@ -164,6 +163,9 @@ _accept_client :: proc(state: ^_NetworkWorkerState, allocator: mem.Allocator) ->
         log.warn("failed to accept client:", accept_err)
         return false
     }
+    
+    // TODO: handle network errors properly
+    assert(net.set_blocking(client_sock, false) == .None, "failed to set client socket as non blocking")
 
     if !reactor.register_client(&state.io_ctx, client_sock) {
         net.close(client_sock)
@@ -194,7 +196,6 @@ _disconnect_client :: proc(state: ^_NetworkWorkerState, client_sock: net.TCP_Soc
         delete_key(state.client_connections_guarded_, client_sock)
     }
     net.close(client_sock)
-    log.warn("closed client conn")
 }
 
 _drain_serverbound_packets :: proc(state: ^_NetworkWorkerState, client_conn: ^ClientConnection, packet_alloc: mem.Allocator) {
@@ -242,7 +243,7 @@ _handle_packet :: proc(state: ^_NetworkWorkerState, packet: ServerboundPacket, c
             },
             players = {
                 max = 100,
-                online = cast(uint)rand.int_max(10),
+                online = 2,
             },
             description = {
                 text = "Some server",

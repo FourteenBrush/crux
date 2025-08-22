@@ -1,6 +1,5 @@
 package crux
 
-import "core:log"
 import "core:fmt"
 import "core:mem"
 
@@ -68,7 +67,7 @@ buf_emit_write_mark :: proc(buf: NetworkBuffer) -> BufWriteMark {
 
 // Returns the number of total bytes in this buffer.
 @(require_results)
-buf_remaining :: proc(buf: NetworkBuffer) -> int {
+buf_length :: proc(buf: NetworkBuffer) -> int {
     return len(buf.data)
 }
 
@@ -216,8 +215,7 @@ _buf_prepare_var_int :: proc(val: VarInt) -> (buf: [5]u8, n: int) {
 
 buf_write_long :: proc(buf: ^NetworkBuffer, val: Long) {
     val := val
-    bytes := mem.any_to_bytes(val)
-    log.warnf("%v: %x", #procedure, bytes)
+    bytes := (cast([^]u8)&val)[:8]
     buf_write_bytes(buf, bytes)
 }
 
@@ -376,25 +374,31 @@ buf_read_var_long :: proc(buf: ^NetworkBuffer) -> (val: VarLong, err: ReadError)
     return val, .None
 }
 
-// Copies `len(outb)` bytes from this buffer into `outb`. `ReadError.ShortRead` is returned
-// when not enough bytes are available, the internal state is updated to reflect the consumed bytes.
+// See ´buf_copy_into´, additionally, the internal state is updated to reflect the consumed bytes.
 @(require_results)
 buf_read_bytes :: proc(buf: ^NetworkBuffer, outb: []u8) -> ReadError #no_bounds_check {
-    // TODO: when n is zero, return early?
+    buf_copy_into(buf, outb) or_return
+    n := len(outb)
+    
+    buf.r_offset = (buf.r_offset + n) % cap(buf.data)
+    (cast(^mem.Raw_Dynamic_Array)&buf.data).len -= n
+    return .None
+}
+
+// Copies `len(outb)` bytes from this buffer into `outb` (starting from the read offset), ReadError.ShortRead is returned
+// when not enough bytes are available, the internal state is not updated, merely a copy is made.
+@(require_results)
+buf_copy_into :: proc(buf: ^NetworkBuffer, outb: []u8) -> ReadError #no_bounds_check {
     n := len(outb)
     buf_ensure_readable(buf^, n) or_return
 
     // bytes copyable from read offset to boundary (array end or length)
-    // FIXME: can this be done with less branches?
     n_nowrap := min(n, cap(buf.data) - buf.r_offset, len(buf.data))
     intrinsics.mem_copy_non_overlapping(raw_data(outb), &buf.data[buf.r_offset], n_nowrap)
 
     if n > n_nowrap {
         intrinsics.mem_copy_non_overlapping(&outb[n_nowrap], raw_data(outb), n - n_nowrap)
     }
-
-    buf.r_offset = (buf.r_offset + n) % cap(buf.data)
-    (cast(^mem.Raw_Dynamic_Array)&buf.data).len -= n
     return .None
 }
 

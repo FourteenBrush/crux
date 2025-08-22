@@ -59,6 +59,16 @@ packed_read_non_enclosed_block :: proc(t: ^testing.T) {
 }
 
 @(test)
+read_zero_bytes :: proc(t: ^testing.T) {
+    using crux
+    buf := scoped_create_network_buf()
+    outb: [0]u8
+    
+    err := buf_read_bytes(&buf, outb[:])
+    testing.expect_value(t, err, ReadError.None)
+}
+
+@(test)
 growth :: proc(t: ^testing.T) {
     using crux
     buf := scoped_create_network_buf(cap=5)
@@ -191,7 +201,7 @@ read_var_ints :: proc(t: ^testing.T) {
         buf_write_bytes(&buf, test.bytes)
 
         initial_off := buf.r_offset
-        initial_len := buf_remaining(buf)
+        initial_len := buf_length(buf)
 
         value, err := buf_read_var_int(&buf)
 
@@ -207,8 +217,8 @@ read_var_ints :: proc(t: ^testing.T) {
                 i, initial_off, buf.r_offset,
             )
             testing.expectf(
-                t, buf_remaining(buf) == initial_len, "test case %d: length not rolled back (expected %d != %d)",
-                i, initial_len, buf_remaining(buf),
+                t, buf_length(buf) == initial_len, "test case %d: length not rolled back (expected %d != %d)",
+                i, initial_len, buf_length(buf),
             )
             continue
         }
@@ -330,7 +340,7 @@ expect_buf_state :: proc(
 ) {
     using crux
     if length, ok := length.?; ok {
-        testing.expect_value(t, buf_remaining(buf), length, loc=loc)
+        testing.expect_value(t, buf_length(buf), length, loc=loc)
     }
     if capacity, ok := capacity.?; ok {
         testing.expect_value(t, cap(buf.data), capacity, loc=loc)

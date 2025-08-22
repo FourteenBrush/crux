@@ -41,7 +41,8 @@ get_clientbound_packet_id :: proc(packet: ClientBoundPacket) -> PacketId {
 @(private)
 VARIANT_IDX_OF :: intrinsics.type_variant_index_of
 
-// IMPORTANT NOTE: ClientBoundPacket must be #no_nil or we need a +1
+// mapping of ClientBoundPacket raw union tags to packet ids
+// IMPORTANT NOTE: ClientBoundPacket must be #no_nil or we need a +1 on the variant idx
 @(rodata, private)
 clientbound_packet_id_lookup := [intrinsics.type_union_variant_count(ClientBoundPacket)]PacketId {
     VARIANT_IDX_OF(ClientBoundPacket, StatusResponsePacket) = .StatusResponse,

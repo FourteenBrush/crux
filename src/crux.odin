@@ -124,6 +124,7 @@ _register_user_formatters :: proc(allocator: mem.Allocator) {
 }
 
 ClientConnection :: struct {
+    // Non blocking socket
     socket: net.TCP_Socket,
     rx_buf: NetworkBuffer,
     tx_buf: NetworkBuffer,
