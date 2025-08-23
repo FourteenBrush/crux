@@ -25,17 +25,11 @@ read_serverbound :: proc(b: ^NetworkBuffer, allocator: mem.Allocator) -> (p: Ser
             return StatusRequestPacket {}, .None
         }
 
-        // handshake
-        protocol_version := read_protocol_version(b) or_return
-        server_addr := buf_read_string(b, allocator) or_return
-        server_port := buf_read_u16(b) or_return
-        next_state := read_client_state(b, min=.Status) or_return
-
         return HandshakePacket {
-            protocol_version = protocol_version,
-            server_addr = server_addr,
-            server_port = server_port,
-            intent = next_state,
+            protocol_version = read_protocol_version(b) or_return,
+            server_addr = buf_read_string(b, allocator) or_return,
+            server_port = buf_read_u16(b) or_return,
+            intent = read_client_state(b, min=.Status) or_return,
         }, .None
     case .PingRequest:
         payload := buf_read_long(b) or_return
@@ -75,8 +69,6 @@ read_legacy_server_list_ping :: proc(buf: ^NetworkBuffer, allocator: mem.Allocat
     }
     return p, .None
 }
-
-// TODO: enum lookups with fast path indicated by intrinsics.type_enum_is_contiguous
 
 read_protocol_version :: proc(buf: ^NetworkBuffer) -> (p: ProtocolVersion, err: ReadError) {
     val := buf_read_var_int(buf) or_return

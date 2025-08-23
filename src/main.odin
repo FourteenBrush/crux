@@ -15,6 +15,10 @@ _ :: mem
 _ :: time
 _ :: runtime
 
+// log levels for logging packet transfer, these values are bigger than .Debug (1)
+@(private) LOG_LEVEL_INBOUND :: log.Level(8)
+@(private) LOG_LEVEL_OUTBOUND :: log.Level(9)
+
 @(private="file")
 g_server_context: runtime.Context
 @(private="file")
@@ -54,11 +58,13 @@ main :: proc() {
     log_opts := log.Options {.Level, .Terminal_Color}
     // remove "---" and spacing inside []
     log.Level_Headers = {
-         0..<10 = "[DEBUG]",
-    	10..<20 = "[INFO] ",
-    	20..<30 = "[WARN] ",
-    	30..<40 = "[ERROR]",
-    	40..<50 = "[FATAL]",
+         0..<7  = "[DEBUG] ",
+        LOG_LEVEL_INBOUND  = "[INB]   ",
+        LOG_LEVEL_OUTBOUND = "[OUTB]  ",
+    	10..<20 = "[INFO]  ",
+    	20..<30 = "[WARN]  ",
+    	30..<40 = "[ERROR] ",
+    	40..<50 = "[FATAL] ",
     }
 
     g_server_context = context

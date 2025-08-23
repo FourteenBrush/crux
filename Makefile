@@ -15,7 +15,7 @@ all: release
 release: CFLAGS += -vet-unused -o:speed -microarch:native
 release: $(PROG)
 
-debug: CFLAGS += -debug -o:none -define:TRACY_ENABLE=true
+debug: CFLAGS += -debug -o:none # -define:TRACY_ENABLE=true
 debug: $(PROG)
 
 test: CFLAGS += -define:ODIN_TEST_LOG_LEVEL=warning -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_SHORT_LOGS=true -debug -keep-executable

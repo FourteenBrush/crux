@@ -1,25 +1,12 @@
 package crux
 
-import "base:runtime"
 import "core:log"
-import "core:net"
 import "core:mem"
 import "core:encoding/json"
 
-enqueue_packet :: proc(client_conn: ^ClientConnection, packet: ClientBoundPacket, allocator: mem.Allocator) -> bool {
-    log.info("sending packet", packet)
+enqueue_packet :: proc(client_conn: ^ClientConnection, packet: ClientBoundPacket, allocator: mem.Allocator) {
+    log.log(LOG_LEVEL_OUTBOUND, "Sending packet", packet)
     _serialize_clientbound(packet, &client_conn.tx_buf, allocator=allocator)
-
-    runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-    tx_buf := make([]u8, buf_length(client_conn.tx_buf), context.temp_allocator)
-    _ = buf_copy_into(&client_conn.tx_buf, tx_buf) // copies full contents, ignore impossible short reads
-    
-    n, send_err := net.send_tcp(client_conn.socket, tx_buf)
-    assert(send_err == .None || send_err == .Would_Block, "send() failed")
-    // kernel buf might not be able to hold full data, send remaining data next time
-    // (send_tcp() calls send() repeatedly in a loop, till any error occurs)
-    buf_advance_pos_unchecked(&client_conn.tx_buf, n)
-    return true
 }
 
 _serialize_clientbound :: proc(packet: ClientBoundPacket, outb: ^NetworkBuffer, allocator: mem.Allocator) {

@@ -123,9 +123,13 @@ _register_user_formatters :: proc(allocator: mem.Allocator) {
     })
 }
 
-ClientConnection :: struct {
+// Network related client data, this struct is `#no_copy` to prevent bugs
+// with modifying copies, FIXME: is this really desired to the outside?
+ClientConnection :: struct #no_copy {
     // Non blocking socket
     socket: net.TCP_Socket,
+    // Whether this connection needs to be closed after flushing all packets
+    close_after_flushing: bool,
     rx_buf: NetworkBuffer,
     tx_buf: NetworkBuffer,
     state: ClientState,

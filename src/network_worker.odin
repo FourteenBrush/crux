@@ -77,7 +77,7 @@ _network_worker_proc :: proc(state: _NetworkWorkerState) {
         }
 
         events: [512]reactor.Event
-        // do not indefinitely block or this thread can't be joined
+        // NOTE: do not indefinitely block or this thread can't be joined
         nready, ok := reactor.await_io_events(&state.io_ctx, &events, timeout_ms=10)
         assert(ok, "failed to await io events") // TODO: proper error handling
 
@@ -104,11 +104,13 @@ _network_worker_proc :: proc(state: _NetworkWorkerState) {
                     continue
                 case:
                     sync.atomic_mutex_lock(&state.client_connections_mtx)
-                    client_conn := state.client_connections_guarded_[event.client]
+                    client_conn := &state.client_connections_guarded_[event.client]
                     sync.atomic_mutex_unlock(&state.client_connections_mtx)
 
                     buf_write_bytes(&client_conn.rx_buf, recv_buf[:n])
-                    _drain_serverbound_packets(&state, &client_conn, packet_alloc=allocator)
+                    _drain_serverbound_packets(&state, client_conn, packet_alloc=allocator)
+                    log.warn("after draining:")
+                    buf_dump(client_conn.tx_buf)
                 }
             }
             if .Writable in event.flags {
@@ -118,18 +120,22 @@ _network_worker_proc :: proc(state: _NetworkWorkerState) {
                 // additionally, cant we store a stable ref to the client connection in the event,
                 // instead of storing the socket, and still having to acquire a lock to obtain the conn?
                 sync.atomic_mutex_lock(&state.client_connections_mtx)
-                client_conn := state.client_connections_guarded_[event.client]
+                client_conn := &state.client_connections_guarded_[event.client]
                 sync.atomic_mutex_unlock(&state.client_connections_mtx)
-
+                
                 if buffered := buf_length(client_conn.tx_buf); buffered > 0 {
+                    log.warn("actuallly sending")
+                    // FIXME: may we need a TEMP_ALLOCATOR_GUARD() here?
                     outb := make([]u8, buffered, context.temp_allocator)
-                    read_err := buf_read_bytes(&client_conn.tx_buf, outb)
-                    assert(read_err == .None, "invariant, bytes suddenly not available anymore?")
-                    _, send_err := net.send_tcp(event.client, outb)
-                    switch {
-                    // TODO: rollback, kernel buf is full?
-                    case send_err == .Would_Block: continue
-                    case send_err != nil:
+                    read_err := buf_copy_into(&client_conn.tx_buf, outb)
+                    assert(read_err == .None, "invariant, copied full length")
+                    n, send_err := net.send_tcp(event.client, outb)
+                    #partial switch send_err {
+                    case nil, .Would_Block:
+                        // kernel buf might not be able to hold full data, send remaining data next time
+                        // (send_tcp() calls send() repeatedly in a loop, till any error occurs)
+                        buf_advance_pos_unchecked(&client_conn.tx_buf, n)
+                    case:
                         log.warn("error writing to client socket:", send_err)
                         _disconnect_client(&state, client_conn.socket)
                         continue
@@ -220,7 +226,7 @@ _drain_serverbound_packets :: proc(state: ^_NetworkWorkerState, client_conn: ^Cl
 
 // FIXME: move packet processing to main thread
 _handle_packet :: proc(state: ^_NetworkWorkerState, packet: ServerboundPacket, client_conn: ^ClientConnection) {
-    log.info(packet)
+    log.log(LOG_LEVEL_OUTBOUND, "Received Packet", packet)
 
     switch packet in packet {
     case HandshakePacket:
@@ -234,7 +240,7 @@ _handle_packet :: proc(state: ^_NetworkWorkerState, packet: ServerboundPacket, c
         log.debugf("kicking client due to LegacyServerPingEvent")
         _disconnect_client(state, client_conn.socket)
         return
-        
+
     case StatusRequestPacket:
         status_response := StatusResponsePacket {
             version = {
@@ -248,17 +254,17 @@ _handle_packet :: proc(state: ^_NetworkWorkerState, packet: ServerboundPacket, c
             description = {
                 text = "Some server",
             },
-            // favicon = "data:image/png;base64,<data>",
-            // enforces_secure_chat = false,
+            favicon = "data:image/png;base64,<data>",
+            enforces_secure_chat = false,
         }
-        _ = enqueue_packet(client_conn, status_response, allocator=state.threadsafe_alloc)
+        enqueue_packet(client_conn, status_response, allocator=state.threadsafe_alloc)
     case PingRequest:
         response := PongResponse {
             payload = packet.payload,
         }
-        _ = enqueue_packet(client_conn, response, allocator=state.threadsafe_alloc)
-        // TODO: this  relies on the fact enqueue_packet send them directly, we would be closing before
-        // the packets were send otherwise
-        _disconnect_client(state, client_conn.socket)
+        log.info("before:")
+        buf_dump(client_conn.tx_buf)
+        enqueue_packet(client_conn, response, allocator=state.threadsafe_alloc)
+        client_conn.close_after_flushing = true
     }
 }

@@ -81,6 +81,7 @@ ConnectionState :: enum VarInt {
 }
 
 // Only the version.name field should be considered mandatory
+// TODO: place json:omitempty tags
 StatusResponsePacket :: struct {
     version: struct {
         name: string `json:"name"`,
@@ -88,7 +89,9 @@ StatusResponsePacket :: struct {
     },
     players: struct { max: uint, online: uint },
     // TODO: make TextComponent
-    description: struct { text: string },
+    description: struct {
+        text: string,
+    },
     favicon: string,
     enforces_secure_chat: bool `json:"enforcesSecureChat"`,
 }
