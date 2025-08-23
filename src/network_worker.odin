@@ -42,10 +42,6 @@ _NetworkWorkerState :: struct {
     threadsafe_alloc: mem.Allocator,
     // Ptr to atomic bool, indicating whether to continue running, modified upstream
     execution_permit: ^bool,
-
-    // ClientConnections shared with the main thread, protected by mutex
-    client_connections_guarded_: ^map[net.TCP_Socket]ClientConnection,
-    client_connections_mtx: sync.Atomic_Mutex,
 }
 
 _network_worker_proc :: proc(state: _NetworkWorkerState) {
@@ -103,28 +99,19 @@ _network_worker_proc :: proc(state: _NetworkWorkerState) {
                     log.info("client disconnected")
                     continue
                 case:
-                    sync.atomic_mutex_lock(&state.client_connections_mtx)
-                    client_conn := &state.client_connections_guarded_[event.client]
-                    sync.atomic_mutex_unlock(&state.client_connections_mtx)
-
+                    client_conn := get_client_connection(event.client)
+                    
                     buf_write_bytes(&client_conn.rx_buf, recv_buf[:n])
                     _drain_serverbound_packets(&state, client_conn, packet_alloc=allocator)
-                    log.warn("after draining:")
-                    buf_dump(client_conn.tx_buf)
                 }
             }
             if .Writable in event.flags {
                 // TODO: might want to do this a little more efficiently, as Writable events are
                 // continuously spammed, can we make only this flag level triggered?
 
-                // additionally, cant we store a stable ref to the client connection in the event,
-                // instead of storing the socket, and still having to acquire a lock to obtain the conn?
-                sync.atomic_mutex_lock(&state.client_connections_mtx)
-                client_conn := &state.client_connections_guarded_[event.client]
-                sync.atomic_mutex_unlock(&state.client_connections_mtx)
+                client_conn := get_client_connection(event.client)
                 
                 if buffered := buf_length(client_conn.tx_buf); buffered > 0 {
-                    log.warn("actuallly sending")
                     // FIXME: may we need a TEMP_ALLOCATOR_GUARD() here?
                     outb := make([]u8, buffered, context.temp_allocator)
                     read_err := buf_copy_into(&client_conn.tx_buf, outb)
@@ -139,6 +126,11 @@ _network_worker_proc :: proc(state: _NetworkWorkerState) {
                         log.warn("error writing to client socket:", send_err)
                         _disconnect_client(&state, client_conn.socket)
                         continue
+                    }
+                    
+                    if client_conn.close_after_flushing {
+                        log.info("disconnecting client")
+                        _disconnect_client(&state, client_conn.socket)
                     }
                 }
             }
@@ -179,14 +171,7 @@ _accept_client :: proc(state: ^_NetworkWorkerState, allocator: mem.Allocator) ->
         return false
     }
 
-    if sync.atomic_mutex_guard(&state.client_connections_mtx) {
-        state.client_connections_guarded_[client_sock] = ClientConnection {
-            socket = client_sock,
-            rx_buf = create_network_buf(allocator=allocator),
-            tx_buf = create_network_buf(allocator=allocator),
-            state = .Handshake,
-        }
-    }
+    register_client_connection(client_sock, buf_allocator=allocator)
     log.debugf(
         "client %s:%d connected (fd %d)",
         net.address_to_string(client_endpoint.address, context.temp_allocator), client_endpoint.port, client_sock,
@@ -198,9 +183,7 @@ _accept_client :: proc(state: ^_NetworkWorkerState, allocator: mem.Allocator) ->
 _disconnect_client :: proc(state: ^_NetworkWorkerState, client_sock: net.TCP_Socket) {
     // FIXME: probably want to handle error
     reactor.unregister_client(&state.io_ctx, client_sock)
-    if sync.atomic_mutex_guard(&state.client_connections_mtx) {
-        delete_key(state.client_connections_guarded_, client_sock)
-    }
+    delete_client_connection(client_sock)
     net.close(client_sock)
 }
 
@@ -262,8 +245,6 @@ _handle_packet :: proc(state: ^_NetworkWorkerState, packet: ServerboundPacket, c
         response := PongResponse {
             payload = packet.payload,
         }
-        log.info("before:")
-        buf_dump(client_conn.tx_buf)
         enqueue_packet(client_conn, response, allocator=state.threadsafe_alloc)
         client_conn.close_after_flushing = true
     }

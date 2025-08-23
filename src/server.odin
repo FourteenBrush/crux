@@ -12,6 +12,42 @@ import "src:reactor"
 
 // import "lib:tracy"
 
+@(private="file")
+g_server: Server
+
+@(private="file")
+Server :: struct {
+    _client_connections_guarded: map[net.TCP_Socket]ClientConnection,
+    _client_connections_mtx: sync.Ticket_Mutex,
+}
+
+// Returns an active client connection, or `nil`. This uses a spinlock internally.
+get_client_connection :: proc(client_sock: net.TCP_Socket) -> ^ClientConnection {
+    sync.ticket_mutex_guard(&g_server._client_connections_mtx)
+    return &g_server._client_connections_guarded[client_sock]
+}
+
+// Creates a new client with all default data.
+// TODO: get rid of this allocator, what allocators will we use for ringbuffers?
+register_client_connection :: proc(client_sock: net.TCP_Socket, buf_allocator: mem.Allocator) {
+    sync.ticket_mutex_guard(&g_server._client_connections_mtx)
+    
+    g_server._client_connections_guarded[client_sock] = ClientConnection {
+        socket = client_sock,
+        rx_buf = create_network_buf(allocator=buf_allocator),
+        tx_buf = create_network_buf(allocator=buf_allocator),
+        state = .Handshake,
+    }
+}
+
+// Deletes a client connection from the server, it must be first unregistered from the various subsystems.
+// TODO
+delete_client_connection :: proc(client_sock: net.TCP_Socket) -> ClientConnection {
+    sync.ticket_mutex_guard(&g_server._client_connections_mtx)
+    _, conn := delete_key(&g_server._client_connections_guarded, client_sock)
+    return conn
+}
+
 // Inputs:
 // - `execution_permit`: an atomic bool indicating whether to continue running
 run :: proc(threadsafe_alloc: mem.Allocator, execution_permit: ^bool) -> bool {
@@ -44,8 +80,6 @@ run :: proc(threadsafe_alloc: mem.Allocator, execution_permit: ^bool) -> bool {
        server_sock = server_sock,
        threadsafe_alloc = threadsafe_alloc,
        execution_permit = execution_permit,
-       client_connections_guarded_ = &client_connections,
-       client_connections_mtx = {}, // unlocked
     }
 
     // FIXME
@@ -123,9 +157,7 @@ _register_user_formatters :: proc(allocator: mem.Allocator) {
     })
 }
 
-// Network related client data, this struct is `#no_copy` to prevent bugs
-// with modifying copies, FIXME: is this really desired to the outside?
-ClientConnection :: struct #no_copy {
+ClientConnection :: struct {
     // Non blocking socket
     socket: net.TCP_Socket,
     // Whether this connection needs to be closed after flushing all packets
