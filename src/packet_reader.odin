@@ -3,7 +3,7 @@ package crux
 import "core:log"
 import "core:mem"
 
-read_serverbound :: proc(b: ^NetworkBuffer, allocator: mem.Allocator) -> (p: ServerboundPacket, err: ReadError) {
+read_serverbound :: proc(b: ^NetworkBuffer, allocator: mem.Allocator) -> (p: ServerBoundPacket, err: ReadError) {
     if buf_consume_byte(b, 0xfe) or_return {
         // NOTE: vanilla client attempts to send a legacy server list ping packet
         // when normal ping times out (30s), additionally older clients send this, which
@@ -19,7 +19,7 @@ read_serverbound :: proc(b: ^NetworkBuffer, allocator: mem.Allocator) -> (p: Ser
     buf_advance_pos_unchecked(b, length_nbytes)
     id := buf_read_var_int(b) or_return
 
-    #partial switch PacketId(id) {
+    switch ServerBoundPacketId(id) {
     case .Handshake: // shared with .StatusRequest, blame the protocol
         if length == 1 /* only id */ {
             return StatusRequestPacket {}, .None
@@ -33,10 +33,10 @@ read_serverbound :: proc(b: ^NetworkBuffer, allocator: mem.Allocator) -> (p: Ser
         }, .None
     case .PingRequest:
         payload := buf_read_long(b) or_return
-        return PingRequest { payload }, .None
+        return PingRequestPacket { payload }, .None
     case:
-        log.warn("unhandled packet id:", PacketId(id), "kicking with .InvalidData")
-        return p, .InvalidData
+        log.warn("unhandled packet id:", ServerBoundPacketId(id), "kicking with .InvalidData")
+        return p, .None
     }
 }
 

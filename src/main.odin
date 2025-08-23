@@ -9,6 +9,7 @@ import "core:sys/posix"
 
 import "base:runtime"
 
+import "lib:back"
 // import "lib:tracy"
 
 _ :: mem
@@ -54,6 +55,8 @@ main :: proc() {
             }
         }
     }
+    
+    back.register_segfault_handler()
 
     log_opts := log.Options {.Level, .Terminal_Color}
     // remove "---" and spacing inside []

@@ -4,7 +4,7 @@ PROG = crux
 SRC = src
 SOURCE_FILES = $(call rwildcard,$(SRC)/*.odin)
 TESTS = tests
-COLLECTIONS = -collection:src=src
+COLLECTIONS = -collection:src=src -collection:lib=lib
 
 CC = odin
 CFLAGS = -out:$(BUILD_DIR)/$(PROG) -strict-style -vet-semicolon -vet-cast -vet-using-param $(COLLECTIONS)

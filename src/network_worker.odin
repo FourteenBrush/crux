@@ -110,6 +110,12 @@ _network_worker_proc :: proc(state: _NetworkWorkerState) {
                 // continuously spammed, can we make only this flag level triggered?
 
                 client_conn := get_client_connection(event.client)
+                if client_conn == nil {
+                    // client might be disconnected but reactor events might have still been
+                    // on the way
+                    log.debug("received reactor events on disconnected client")
+                    continue
+                }
                 
                 if buffered := buf_length(client_conn.tx_buf); buffered > 0 {
                     // FIXME: may we need a TEMP_ALLOCATOR_GUARD() here?
@@ -202,13 +208,19 @@ _drain_serverbound_packets :: proc(state: ^_NetworkWorkerState, client_conn: ^Cl
             _disconnect_client(state, client_conn.socket)
             break loop
         case .None:
+            packet_desc := get_serverbound_packet_descriptor(packet)
+            if packet_desc.expected_client_state != client_conn.state {
+                log.debugf("client sent packet in wrong client state (%v != %v)", client_conn.state, packet_desc.expected_client_state)
+                _disconnect_client(state, client_conn.socket)
+                break loop
+            }
             _handle_packet(state, packet, client_conn)
         }
     }
 }
 
 // FIXME: move packet processing to main thread
-_handle_packet :: proc(state: ^_NetworkWorkerState, packet: ServerboundPacket, client_conn: ^ClientConnection) {
+_handle_packet :: proc(state: ^_NetworkWorkerState, packet: ServerBoundPacket, client_conn: ^ClientConnection) {
     log.log(LOG_LEVEL_OUTBOUND, "Received Packet", packet)
 
     switch packet in packet {
@@ -241,7 +253,7 @@ _handle_packet :: proc(state: ^_NetworkWorkerState, packet: ServerboundPacket, c
             enforces_secure_chat = false,
         }
         enqueue_packet(client_conn, status_response, allocator=state.threadsafe_alloc)
-    case PingRequest:
+    case PingRequestPacket:
         response := PongResponse {
             payload = packet.payload,
         }

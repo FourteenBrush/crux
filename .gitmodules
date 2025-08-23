@@ -1,3 +1,6 @@
 [submodule "tracy"]
 	path = lib/tracy
 	url = https://github.com/FourteenBrush/odin-tracy.git
+[submodule "lib/back"]
+	path = lib/back
+	url = https://github.com/laytan/back.git
