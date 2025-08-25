@@ -5,6 +5,15 @@ import "core:mem"
 
 import "base:intrinsics"
 
+// 7 least significant bits are used to encode the value,
+// most significant bit indicates whether there's another byte
+VarInt :: distinct i32le
+VarLong :: distinct i64le
+
+Long :: distinct i64be
+
+Utf16String :: distinct []u8
+
 MAX_VAR_INT :: int(max(VarInt))
 
 SEGMENT_BITS :: 0x7F
@@ -385,7 +394,7 @@ buf_read_bytes :: proc(buf: ^NetworkBuffer, outb: []u8) -> ReadError #no_bounds_
     return .None
 }
 
-// Copies `len(outb)` bytes from this buffer into `outb` (starting from the read offset), ReadError.ShortRead is returned
+// Copies `len(outb)` bytes from this buffer into `outb` (starting from the read offset), `ReadError.ShortRead` is returned
 // when not enough bytes are available, the internal state is not updated, merely a copy is made.
 @(require_results)
 buf_copy_into :: proc(buf: ^NetworkBuffer, outb: []u8) -> ReadError #no_bounds_check {

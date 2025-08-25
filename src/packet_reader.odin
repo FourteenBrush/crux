@@ -20,7 +20,7 @@ read_serverbound :: proc(b: ^NetworkBuffer, allocator: mem.Allocator) -> (p: Ser
     id := buf_read_var_int(b) or_return
 
     switch ServerBoundPacketId(id) {
-    case .Handshake: // shared with .StatusRequest, blame the protocol
+    case .Handshake: // shared with .StatusRequest and LoginStart, blame the protocol
         if length == 1 /* only id */ {
             return StatusRequestPacket {}, .None
         }

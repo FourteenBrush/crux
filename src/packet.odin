@@ -2,12 +2,17 @@ package crux
 
 import "core:reflect"
 import "base:intrinsics"
+import "core:encoding/uuid"
+
+// FIXME: cant we avoid having a tagged union inside another one?
+Packet :: union { ClientBoundPacket, ServerBoundPacket }
 
 ServerBoundPacket :: union #no_nil {
     LegacyServerListPingPacket,
     HandshakePacket,
     StatusRequestPacket,
     PingRequestPacket,
+    LoginStartPacket,
 }
 
 ClientBoundPacket :: union #no_nil {
@@ -15,25 +20,17 @@ ClientBoundPacket :: union #no_nil {
     PongResponse,
 }
 
-// 7 least significant bits are used to encode the value,
-// most significant bit indicates whether there's another byte
-VarInt :: distinct i32le
-VarLong :: distinct i64le
-
-Long :: distinct i64be
-
-Utf16String :: distinct []u8
-
 ServerBoundPacketId :: enum VarInt {
     Handshake      = 0x00,
     StatusRequest  = 0x00,
     // To calculate the server's latency
     PingRequest    = 0x01,
+    LoginStart     = 0x00,
 }
 
 ClientBoundPacketId :: enum VarInt {
-    StatusResponse = 0x00, // CLIENTBOUND
-    PongResponse   = 0x01, // CLIENTBOUND
+    StatusResponse = 0x00,
+    PongResponse   = 0x01,
 }
 
 get_clientbound_packet_id :: proc(packet: ClientBoundPacket) -> ClientBoundPacketId {
@@ -46,7 +43,7 @@ VARIANT_IDX_OF :: intrinsics.type_variant_index_of
 
 // mapping of ClientBoundPacket raw union tags to packet ids
 // IMPORTANT NOTE: ClientBoundPacket must be #no_nil or we need a +1 on the variant idx
-@(rodata, private)
+@(rodata, private="file")
 clientbound_packet_id_lookup := [intrinsics.type_union_variant_count(ClientBoundPacket)]ClientBoundPacketId {
     VARIANT_IDX_OF(ClientBoundPacket, StatusResponsePacket) = .StatusResponse,
     VARIANT_IDX_OF(ClientBoundPacket, PongResponse) = .PongResponse,
@@ -58,13 +55,14 @@ get_serverbound_packet_descriptor :: proc(packet: ServerBoundPacket) -> ServerBo
 }
 
 // IMPORTANT NOTE: ServerBoundPacket must be #no_nil or we need a +1 on the variant idx
-@(rodata, private)
+@(rodata, private="file")
 serverbound_packet_descriptors := [intrinsics.type_union_variant_count(ServerBoundPacket)]ServerBoundPacketDescriptor {
     // TODO: is this packet allowed in multiple states?
     VARIANT_IDX_OF(ServerBoundPacket, LegacyServerListPingPacket) = { .Handshake },
     VARIANT_IDX_OF(ServerBoundPacket, HandshakePacket)            = { .Handshake },
     VARIANT_IDX_OF(ServerBoundPacket, StatusRequestPacket)        = { .Status },
     VARIANT_IDX_OF(ServerBoundPacket, PingRequestPacket)          = { .Status },
+    VARIANT_IDX_OF(ServerBoundPacket, LoginStartPacket)           = { .Login},
 }
 
 ServerBoundPacketDescriptor :: struct {
@@ -83,6 +81,7 @@ LegacyServerListPingPacket :: struct {
     v1_6_extension: Maybe(LegacyServerListPingV1_6Extension),
 }
 
+// TODO: use string16 type when odin tagged release appears
 LegacyServerListPingV1_6Extension :: struct {
     plugin_msg_packet_id: u8,
     channel: Utf16String,
@@ -95,6 +94,11 @@ StatusRequestPacket :: struct {}
 
 PingRequestPacket :: struct {
     payload: Long,
+}
+
+LoginStartPacket :: struct {
+    username: string /*(16)*/,
+    uuid: uuid.Identifier,
 }
 
 ConnectionState :: enum VarInt {

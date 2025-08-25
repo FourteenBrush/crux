@@ -1,3 +1,5 @@
+// Worker thread responsable for network related things like performing
+// IO on client sockets, (de)serialization and transmission of packets.
 package crux
 
 import "core:time"
@@ -6,6 +8,7 @@ import "core:mem"
 import "core:net"
 import "core:sync"
 import "base:runtime"
+import "core:sync/chan"
 import "core:sys/posix"
 
 import "src:reactor"
@@ -29,22 +32,20 @@ foreign pthread {
 
 TARGET_TPS :: 20
 
-// Worker thread responsable for network related things like performing
-// IO on client sockets, (de)serialization and transmission of packets.
-
 // All members are explicitly owned by this thread, unless specified otherwise.
 _NetworkWorkerState :: struct {
     io_ctx: reactor.IOContext,
     // Non-blocking server socket.
     server_sock: net.TCP_Socket,
-    // An allocator to be used by this thread, the upstream must provide
-    // a threadsafe allocator if it is going to used by other threads too.
+    // An allocator to be used by this thread, must be owned by this thread or be thread safe.
     threadsafe_alloc: mem.Allocator,
     // Ptr to atomic bool, indicating whether to continue running, modified upstream
     execution_permit: ^bool,
+    connections: map[net.TCP_Socket]ClientConnection,
+    packet_bridge: chan.Chan(Packet, .Send),
 }
 
-_network_worker_proc :: proc(state: _NetworkWorkerState) {
+_network_worker_proc :: proc(state: ^_NetworkWorkerState) {
     defer cleanup: {
         log.debug("shutting down worker")
         // destroy temp alloc when this refers to the default one (thread_local)
@@ -53,7 +54,6 @@ _network_worker_proc :: proc(state: _NetworkWorkerState) {
         }
     }
 
-    state := state
     allocator := state.threadsafe_alloc
     log.debug("Network Worker entrypoint")
     _try_set_threadname()
@@ -61,6 +61,7 @@ _network_worker_proc :: proc(state: _NetworkWorkerState) {
     for sync.atomic_load(state.execution_permit) {
         // tracy.ZoneN("WORKER FRAME_IMPL")
 
+        // TODO: do we need the network thread to be tps bound?
         start := time.tick_now()
         defer {
             tick_duration := time.tick_since(start)
@@ -74,7 +75,7 @@ _network_worker_proc :: proc(state: _NetworkWorkerState) {
 
         events: [512]reactor.Event
         // NOTE: do not indefinitely block or this thread can't be joined
-        nready, ok := reactor.await_io_events(&state.io_ctx, &events, timeout_ms=10)
+        nready, ok := reactor.await_io_events(&state.io_ctx, &events, timeout_ms=5)
         assert(ok, "failed to await io events") // TODO: proper error handling
 
         recv_buf: [1024]u8
@@ -82,7 +83,7 @@ _network_worker_proc :: proc(state: _NetworkWorkerState) {
             if .Readable in event.flags {
                 if event.client == state.server_sock {
                     // new socket, the only events that we receive on the server sock
-                    _accept_client(&state, allocator=allocator) or_continue
+                    _accept_client(state) or_continue
                     continue
                 }
 
@@ -92,28 +93,27 @@ _network_worker_proc :: proc(state: _NetworkWorkerState) {
                 case recv_err == net.TCP_Recv_Error.Timeout: continue
                 case recv_err != .None:
                     log.warn("error reading from client socket:", recv_err)
-                    _disconnect_client(&state, event.client)
+                    _disconnect_client(state, event.client)
                     continue
                 case n == 0: // EOF
-                    _disconnect_client(&state, event.client)
+                    _disconnect_client(state, event.client)
                     log.info("client disconnected")
                     continue
                 case:
-                    client_conn := get_client_connection(event.client)
-                    
+                    client_conn := &state.connections[event.client]
                     buf_write_bytes(&client_conn.rx_buf, recv_buf[:n])
-                    _drain_serverbound_packets(&state, client_conn, packet_alloc=allocator)
+                    // attempt to read any complete packets
+                    _drain_serverbound_packets(state, client_conn, allocator)
                 }
             }
             if .Writable in event.flags {
-                // TODO: might want to do this a little more efficiently, as Writable events are
-                // continuously spammed, can we make only this flag level triggered?
+                // TODO: might want to do this a little more efficiently, as Writable events may be
+                // continuously spammed every "server tick", can we make only this flag level triggered?
 
-                client_conn := get_client_connection(event.client)
+                client_conn := &state.connections[event.client]
                 if client_conn == nil {
-                    // client might be disconnected but reactor events might have still been
-                    // on the way
-                    log.debug("received reactor events on disconnected client")
+                    // client might be disconnected but reactor events might have still been on the way
+                    log.debugf("received reactor events on disconnected client (%v)", event.flags)
                     continue
                 }
                 
@@ -130,67 +130,25 @@ _network_worker_proc :: proc(state: _NetworkWorkerState) {
                         buf_advance_pos_unchecked(&client_conn.tx_buf, n)
                     case:
                         log.warn("error writing to client socket:", send_err)
-                        _disconnect_client(&state, client_conn.socket)
+                        _disconnect_client(state, client_conn.socket)
                         continue
                     }
                     
                     if client_conn.close_after_flushing {
-                        log.info("disconnecting client")
-                        _disconnect_client(&state, client_conn.socket)
+                        log.debug("disconnecting client as requested")
+                        _disconnect_client(state, client_conn.socket)
                     }
                 }
             }
             if .Err in event.flags {
                 log.warn("client socket error")
-                _disconnect_client(&state, event.client)
+                _disconnect_client(state, event.client)
             } else if .Hangup in event.flags {
                 log.warn("client socket hangup")
-                _disconnect_client(&state, event.client)
+                _disconnect_client(state, event.client)
             }
         }
     }
-}
-
-@(disabled=ODIN_OS != .Linux)
-_try_set_threadname :: proc() {
-    // NOTE: must not be longer than 16 chars (including \0)
-    if errno := pthread_setname_np(posix.pthread_self(), "crux-NetWorker"); errno != .NONE {
-        log.warnf("failed to set worker thread name; err=%d", errno)
-    }
-}
-
-// Called when a new connection is available on the server socket, never blocks.
-// Acquires a lock on the client connections.
-_accept_client :: proc(state: ^_NetworkWorkerState, allocator: mem.Allocator) -> (ok: bool) {
-    client_sock, client_endpoint, accept_err := net.accept_tcp(state.server_sock)
-    if accept_err != nil {
-        log.warn("failed to accept client:", accept_err)
-        return false
-    }
-    
-    // TODO: handle network errors properly
-    assert(net.set_blocking(client_sock, false) == .None, "failed to set client socket as non blocking")
-
-    if !reactor.register_client(&state.io_ctx, client_sock) {
-        net.close(client_sock)
-        log.error("failed to register client")
-        return false
-    }
-
-    register_client_connection(client_sock, buf_allocator=allocator)
-    log.debugf(
-        "client %s:%d connected (fd %d)",
-        net.address_to_string(client_endpoint.address, context.temp_allocator), client_endpoint.port, client_sock,
-    )
-    return true
-}
-
-// Unregisters a client from the reactor and shuts down the connection.
-_disconnect_client :: proc(state: ^_NetworkWorkerState, client_sock: net.TCP_Socket) {
-    // FIXME: probably want to handle error
-    reactor.unregister_client(&state.io_ctx, client_sock)
-    delete_client_connection(client_sock)
-    net.close(client_sock)
 }
 
 _drain_serverbound_packets :: proc(state: ^_NetworkWorkerState, client_conn: ^ClientConnection, packet_alloc: mem.Allocator) {
@@ -210,32 +168,33 @@ _drain_serverbound_packets :: proc(state: ^_NetworkWorkerState, client_conn: ^Cl
         case .None:
             packet_desc := get_serverbound_packet_descriptor(packet)
             if packet_desc.expected_client_state != client_conn.state {
-                log.debugf("client sent packet in wrong client state (%v != %v)", client_conn.state, packet_desc.expected_client_state)
+                log.debugf("client sent packet in wrong client state (%v != %v): %v", client_conn.state, packet_desc.expected_client_state, packet)
                 _disconnect_client(state, client_conn.socket)
                 break loop
             }
+            
             _handle_packet(state, packet, client_conn)
+            success := chan.try_send(state.packet_bridge, packet)
+            if !success {
+                // TODO: do we even need a channel, what about a futex/atomic mutex and a darray?
+                log.error("tried sending packet to main thread but channel buf is full")
+            }
         }
     }
 }
 
-// FIXME: move packet processing to main thread
 _handle_packet :: proc(state: ^_NetworkWorkerState, packet: ServerBoundPacket, client_conn: ^ClientConnection) {
     log.log(LOG_LEVEL_OUTBOUND, "Received Packet", packet)
 
     switch packet in packet {
     case HandshakePacket:
-        if packet.intent != .Status {
-            log.info("received handshake with intent", packet.intent)
-            _disconnect_client(state, client_conn.socket)
-            return
-        }
-        client_conn.state = .Status
+        client_conn.state = packet.intent
     case LegacyServerListPingPacket:
         log.debugf("kicking client due to LegacyServerPingEvent")
         _disconnect_client(state, client_conn.socket)
         return
 
+    // TODO: move to main thread
     case StatusRequestPacket:
         status_response := StatusResponsePacket {
             version = {
@@ -259,5 +218,63 @@ _handle_packet :: proc(state: ^_NetworkWorkerState, packet: ServerBoundPacket, c
         }
         enqueue_packet(client_conn, response, allocator=state.threadsafe_alloc)
         client_conn.close_after_flushing = true
+    case LoginStartPacket:
+        // TODO
+        
+        
+        
+        
+        
     }
+}
+
+@(disabled=ODIN_OS != .Linux)
+_try_set_threadname :: proc() {
+    // NOTE: must not be longer than 16 chars (including \0)
+    if errno := pthread_setname_np(posix.pthread_self(), "crux-NetWorker"); errno != .NONE {
+        log.warnf("failed to set worker thread name; err=%d", errno)
+    }
+}
+
+// Called when a new connection is available on the server socket, never blocks.
+_accept_client :: proc(state: ^_NetworkWorkerState) -> (ok: bool) {
+    client_sock, client_endpoint, accept_err := net.accept_tcp(state.server_sock)
+    if accept_err != nil {
+        log.warn("failed to accept client:", accept_err)
+        return false
+    }
+    
+    if net.set_blocking(client_sock, false) != .None {
+        log.error("failed to set client socket as non blocking")
+        return false
+    }
+    
+    client_conn := map_insert(&state.connections, client_sock, ClientConnection {
+        socket = client_sock,
+        state = .Handshake,
+    })
+
+    if !reactor.register_client(&state.io_ctx, client_sock) {
+        log.error("failed to register client")
+        net.close(client_sock)
+        return false
+    }
+    
+    // in case reactor registration fails
+    client_conn.rx_buf = create_network_buf(allocator=state.threadsafe_alloc)
+    client_conn.tx_buf = create_network_buf(allocator=state.threadsafe_alloc)
+
+    log.debugf(
+        "client %s:%d connected (fd %d)",
+        net.address_to_string(client_endpoint.address, context.temp_allocator), client_endpoint.port, client_sock,
+    )
+    return true
+}
+
+// Unregisters a client from the reactor and shuts down the connection.
+_disconnect_client :: proc(state: ^_NetworkWorkerState, client_sock: net.TCP_Socket) {
+    // FIXME: probably want to handle error
+    reactor.unregister_client(&state.io_ctx, client_sock)
+    _delete_client_connection(client_sock)
+    net.close(client_sock)
 }
