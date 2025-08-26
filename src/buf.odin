@@ -1,5 +1,6 @@
 package crux
 
+import "core:encoding/uuid"
 import "core:fmt"
 import "core:mem"
 
@@ -259,11 +260,23 @@ _buf_reserve_exact :: proc(buf: ^NetworkBuffer, new_cap: int) #no_bounds_check {
     }
 }
 
+@(require_results)
+buf_read_uuid :: proc(buf: ^NetworkBuffer) -> (id: uuid.Identifier, err: ReadError) {
+    outb: [16]u8
+    buf_read_bytes(buf, outb[:]) or_return
+    return uuid.Identifier(outb), .None
+}
+
+buf_write_uuid :: proc(buf: ^NetworkBuffer, id: uuid.Identifier) {
+    id := id
+    buf_write_bytes(buf, id[:])
+}
+
 // FIXME: handle address decoding
 @(require_results)
-buf_read_string :: proc(buf: ^NetworkBuffer, allocator: mem.Allocator) -> (s: string, err: ReadError) {
+buf_read_string :: proc(buf: ^NetworkBuffer, #any_int max_len: int, allocator: mem.Allocator) -> (s: string, err: ReadError) {
     length := buf_read_var_int(buf) or_return
-    if length < MIN_STRING_LENGTH || length > MAX_STRING_LENGTH {
+    if length < MIN_STRING_LENGTH || int(length) > max_len {
         return s, .InvalidData
     }
     outb := make([]u8, length, allocator)
@@ -277,15 +290,11 @@ buf_read_long :: proc(buf: ^NetworkBuffer) -> (l: Long, err: ReadError) {
     return transmute(Long)out, .None
 }
 
-// We accept a backing type, because sometimes an enum has only a few variants, where the transmission
-// type has a far bigger range, and we want to store the enum as the smallest possible type in order to save space.
 @(require_results)
-buf_read_enum :: proc(buf: ^NetworkBuffer, $E: typeid, $Backing: typeid) -> (e: E, err: ReadError)
+buf_read_var_int_enum :: proc(buf: ^NetworkBuffer, $E: typeid) -> (e: E, err: ReadError)
 where
-    intrinsics.type_is_enum(E), intrinsics.type_is_numeric(Backing) {
-    outb: [size_of(Backing)]u8
-    buf_read_bytes(buf, outb[:]) or_return
-    e = transmute(E) outb
+    intrinsics.type_is_enum(E) {
+    e = cast(E) buf_read_var_int(buf) or_return
     
     when intrinsics.type_enum_is_contiguous(E) {
         if e < min(E) || e > max(E) {
@@ -299,8 +308,6 @@ where
         return e, .InvalidData
     }
 }
-
-// TODO: what even happens on short reads on primitives, we are probably supposed to handle this
 
 @(require_results)
 buf_read_int :: proc(buf: ^NetworkBuffer) -> (val: i32be, err: ReadError) {

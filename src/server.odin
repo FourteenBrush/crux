@@ -1,6 +1,5 @@
 package crux
 
-import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:net"
@@ -37,32 +36,30 @@ run :: proc(threadsafe_alloc: mem.Allocator, execution_permit: ^bool) -> bool {
     io_ctx := _setup_io_context(server_sock) or_return
     defer reactor.destroy_io_context(&io_ctx)
 
-    defer if fmt._user_formatters == nil {
-        delete(fmt._user_formatters^)
-    }
-    if fmt._user_formatters == nil {
-        formatters := make(map[typeid]fmt.User_Formatter, allocator=threadsafe_alloc)
-        fmt.set_user_formatters(&formatters)
-    }
-    _register_user_formatters(allocator=threadsafe_alloc)
-
     g_server = _setup_server(threadsafe_alloc) or_return
     defer _destroy_server(g_server)
     
-    // spawn network worker, the ownership of members is documented on this type itself
-    net_worker_state := _NetworkWorkerState {
+    packet_receiver, alloc_err := chan.create_buffered(chan.Chan(Packet, .Both), 512, allocator=threadsafe_alloc)
+    if alloc_err != .None {
+        return fatal("failed to create packet channel", alloc_err)
+    }
+    g_server.packet_receiver = chan.as_recv(packet_receiver)
+    
+    net_worker_state := NetworkWorkerSharedData {
        io_ctx = io_ctx,
        server_sock = server_sock,
        threadsafe_alloc = threadsafe_alloc,
        execution_permit = execution_permit,
-       packet_bridge = chan.as_send(g_server.packet_receiver),
+       packet_bridge = chan.as_send(packet_receiver),
     }
     
     net_worker_thread: ^thread.Thread
     {
         // because thread.create implicitly uses context.allocator
         context.allocator = threadsafe_alloc
-        net_worker_thread = thread.create_and_start_with_poly_data(&net_worker_state, _network_worker_proc, init_context=context)
+        init_context := context
+        init_context.allocator = mem.panic_allocator()
+        net_worker_thread = thread.create_and_start_with_poly_data(&net_worker_state, _network_worker_proc, init_context=init_context)
         if net_worker_thread == nil {
             return fatal("failed to start worker thread")
         }
@@ -73,7 +70,7 @@ run :: proc(threadsafe_alloc: mem.Allocator, execution_permit: ^bool) -> bool {
         start := time.tick_now()
 
         for packet in chan.try_recv(g_server.packet_receiver) {
-            log.warn("MAIN THREAD:", packet)
+            // log.warn("MAIN THREAD:", packet)
         }
         // work...
         // free_all(context.temp_allocator)
@@ -93,22 +90,13 @@ run :: proc(threadsafe_alloc: mem.Allocator, execution_permit: ^bool) -> bool {
     return true
 }
 
-// Returns an active client connection, or `nil`. This uses a spinlock internally.
-get_client_connection :: proc(client_sock: net.TCP_Socket) -> ^ClientConnection {
-    sync.ticket_mutex_guard(&g_server._client_connections_mtx)
-    return &g_server._client_connections_guarded[client_sock]
-}
-
 // Creates a new client with all default data.
-// TODO: get rid of this allocator, what allocators will we use for ringbuffers?
-register_client_connection :: proc(client_sock: net.TCP_Socket, buf_allocator: mem.Allocator) {
+register_client_connection :: proc(client_sock: net.TCP_Socket) {
     sync.ticket_mutex_guard(&g_server._client_connections_mtx)
     
     g_server._client_connections_guarded[client_sock] = ClientConnection {
         socket = client_sock,
         state = .Handshake,
-        rx_buf = create_network_buf(allocator=buf_allocator),
-        tx_buf = create_network_buf(allocator=buf_allocator),
     }
 }
 
@@ -158,14 +146,8 @@ _setup_io_context :: proc(server_sock: net.TCP_Socket) -> (reactor.IOContext, bo
 
 @(private="file")
 _setup_server :: proc(allocator: mem.Allocator) -> (server: Server, ok: bool) {
-    packet_receiver, alloc_err := chan.create(chan.Chan(Packet, .Recv), 512, allocator)
-    if alloc_err != .None {
-        log.error("failed to create packet channel")
-        return
-    }
     
     server._client_connections_guarded = make(map[net.TCP_Socket]ClientConnection, 8, allocator)
-    server.packet_receiver = packet_receiver
     return server, true
 }
 
@@ -174,17 +156,6 @@ _destroy_server :: proc(server: Server) {
     chan.destroy(server.packet_receiver)
     // TODO: do we need to acquire some mutex here just to be sure?
     delete(server._client_connections_guarded)
-}
-
-@(private="file")
-_register_user_formatters :: proc(allocator: mem.Allocator) {
-    context.allocator = allocator
-    fmt.register_user_formatter(Utf16String, proc(fi: ^fmt.Info, arg: any, verb: rune) -> bool {
-        str := (^Utf16String)(arg.data)^
-        // TODO: only correctly formatted on some terminals
-        fmt.wprintf(fi.writer, "%s", cast([]u8) str)
-        return true
-    })
 }
 
 ClientConnection :: struct {
@@ -197,11 +168,13 @@ ClientConnection :: struct {
     tx_buf: NetworkBuffer,
 }
 
+// IMPORTANT NOTE: values must match respective values from HandshakeIntent to allow casting
 ClientState :: enum VarInt {
-    Handshake = 0,
-    Status    = 1,
-    Login     = 2,
-    Transfer  = 3,
+    Handshake,
+    Status        = auto_cast HandshakeIntent.Status,
+    Login         = auto_cast HandshakeIntent.Login,
+    Transfer      = auto_cast HandshakeIntent.Transfer,
+    Configuration,
 }
 
 // Logs a fatal condition, which we cannot recover from.

@@ -28,7 +28,18 @@ _serialize_clientbound :: proc(packet: ClientBoundPacket, outb: ^NetworkBuffer, 
         bytes := json.marshal(packet, allocator=allocator) or_else panic("error serializing status response")
         werr := buf_write_string(outb, string(bytes))
         assert(werr == .None, "max string length exceeded") // TODO
-    case PongResponse:
+    case PongResponsePacket:
         buf_write_long(outb, packet.payload)
+    case LoginSuccessPacket:
+        buf_write_uuid(outb, packet.uuid)
+        _ = buf_write_string(outb, packet.username)
+        // properties
+        buf_write_var_int(outb, VarInt(1))
+        _ = buf_write_string(outb, packet.name)
+        _ = buf_write_string(outb, packet.value)
+        buf_write_byte(outb, 1 if packet.signature != nil else 0) // optional
+        if signature, ok := packet.signature.?; ok {
+            _ = buf_write_string(outb, signature)
+        }
     }
 }

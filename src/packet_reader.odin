@@ -3,7 +3,7 @@ package crux
 import "core:log"
 import "core:mem"
 
-read_serverbound :: proc(b: ^NetworkBuffer, allocator: mem.Allocator) -> (p: ServerBoundPacket, err: ReadError) {
+read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator: mem.Allocator) -> (p: ServerBoundPacket, err: ReadError) {
     if buf_consume_byte(b, 0xfe) or_return {
         // NOTE: vanilla client attempts to send a legacy server list ping packet
         // when normal ping times out (30s), additionally older clients send this, which
@@ -21,19 +21,31 @@ read_serverbound :: proc(b: ^NetworkBuffer, allocator: mem.Allocator) -> (p: Ser
 
     switch ServerBoundPacketId(id) {
     case .Handshake: // shared with .StatusRequest and LoginStart, blame the protocol
-        if length == 1 /* only id */ {
+        #partial switch client_state {
+        case .Handshake:
+            return HandshakePacket {
+                protocol_version = read_protocol_version(b) or_return,
+                server_addr = buf_read_string(b, 255, allocator) or_return,
+                server_port = buf_read_u16(b) or_return,
+                intent = buf_read_var_int_enum(b, HandshakeIntent) or_return,
+            }, .None
+        case .Status:
             return StatusRequestPacket {}, .None
+        case .Login:
+            
+            return LoginStartPacket {
+                username = buf_read_string(b, 16, allocator) or_return,
+                uuid = buf_read_uuid(b) or_return,
+            }, .None
+        case:
+            return p, .InvalidData
         }
-
-        return HandshakePacket {
-            protocol_version = read_protocol_version(b) or_return,
-            server_addr = buf_read_string(b, allocator) or_return,
-            server_port = buf_read_u16(b) or_return,
-            intent = read_client_state(b, min=.Status) or_return,
-        }, .None
+        
     case .PingRequest:
         payload := buf_read_long(b) or_return
         return PingRequestPacket { payload }, .None
+    case .LoginAcknowledged:
+        return LoginAcknowledgedPacket {}, .None
     case:
         log.warn("unhandled packet id:", ServerBoundPacketId(id), "kicking with .InvalidData")
         return p, .None
@@ -53,6 +65,7 @@ read_legacy_server_list_ping :: proc(buf: ^NetworkBuffer, allocator: mem.Allocat
         channel_bytes := make([]u8, channel_codeunits_len * 2, allocator)
         buf_read_bytes(buf, channel_bytes) or_return
         _remaining_len := buf_read_u16(buf) or_return
+        _ = _remaining_len
         protocol_version := buf_read_byte(buf) or_return
         hostname_codeunits_len := buf_read_u16(buf) or_return
         hostname_bytes := make([]u8, hostname_codeunits_len * 2, allocator)
@@ -74,12 +87,4 @@ read_protocol_version :: proc(buf: ^NetworkBuffer) -> (p: ProtocolVersion, err: 
     val := buf_read_var_int(buf) or_return
     protocol_valid := true // TODO: use table in protcol_version.odin
     return ProtocolVersion(val), .None if protocol_valid else .InvalidData
-}
-
-read_client_state :: proc(buf: ^NetworkBuffer, min: ClientState) -> (c: ClientState, err: ReadError) {
-    val := buf_read_var_int(buf) or_return
-    if ClientState(val) < min || ClientState(val) > max(ClientState) {
-        return c, .InvalidData
-    }
-    return ClientState(val), .None
 }

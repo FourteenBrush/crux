@@ -13,24 +13,28 @@ ServerBoundPacket :: union #no_nil {
     StatusRequestPacket,
     PingRequestPacket,
     LoginStartPacket,
+    LoginAcknowledgedPacket,
 }
 
 ClientBoundPacket :: union #no_nil {
     StatusResponsePacket,
-    PongResponse,
+    PongResponsePacket,
+    LoginSuccessPacket,
 }
 
 ServerBoundPacketId :: enum VarInt {
-    Handshake      = 0x00,
-    StatusRequest  = 0x00,
+    Handshake         = 0x00,
+    StatusRequest     = 0x00,
     // To calculate the server's latency
-    PingRequest    = 0x01,
-    LoginStart     = 0x00,
+    PingRequest       = 0x01,
+    LoginStart        = 0x00,
+    LoginAcknowledged = 0x03,
 }
 
 ClientBoundPacketId :: enum VarInt {
     StatusResponse = 0x00,
     PongResponse   = 0x01,
+    LoginSuccess   = 0x02,
 }
 
 get_clientbound_packet_id :: proc(packet: ClientBoundPacket) -> ClientBoundPacketId {
@@ -46,7 +50,8 @@ VARIANT_IDX_OF :: intrinsics.type_variant_index_of
 @(rodata, private="file")
 clientbound_packet_id_lookup := [intrinsics.type_union_variant_count(ClientBoundPacket)]ClientBoundPacketId {
     VARIANT_IDX_OF(ClientBoundPacket, StatusResponsePacket) = .StatusResponse,
-    VARIANT_IDX_OF(ClientBoundPacket, PongResponse) = .PongResponse,
+    VARIANT_IDX_OF(ClientBoundPacket, PongResponsePacket)   = .PongResponse,
+    VARIANT_IDX_OF(ClientBoundPacket, LoginSuccessPacket)   = .LoginSuccess,
 }
 
 get_serverbound_packet_descriptor :: proc(packet: ServerBoundPacket) -> ServerBoundPacketDescriptor {
@@ -62,7 +67,8 @@ serverbound_packet_descriptors := [intrinsics.type_union_variant_count(ServerBou
     VARIANT_IDX_OF(ServerBoundPacket, HandshakePacket)            = { .Handshake },
     VARIANT_IDX_OF(ServerBoundPacket, StatusRequestPacket)        = { .Status },
     VARIANT_IDX_OF(ServerBoundPacket, PingRequestPacket)          = { .Status },
-    VARIANT_IDX_OF(ServerBoundPacket, LoginStartPacket)           = { .Login},
+    VARIANT_IDX_OF(ServerBoundPacket, LoginStartPacket)           = { .Login },
+    VARIANT_IDX_OF(ServerBoundPacket, LoginAcknowledgedPacket)    = { .Login },
 }
 
 ServerBoundPacketDescriptor :: struct {
@@ -74,7 +80,13 @@ HandshakePacket :: struct {
     protocol_version: ProtocolVersion,
     server_addr: string,
     server_port: u16be,
-    intent: ClientState,
+    intent: HandshakeIntent,
+}
+
+HandshakeIntent :: enum VarInt {
+    Status    = 1,
+    Login     = 2,
+    Transfer  = 3,
 }
 
 LegacyServerListPingPacket :: struct {
@@ -101,6 +113,8 @@ LoginStartPacket :: struct {
     uuid: uuid.Identifier,
 }
 
+LoginAcknowledgedPacket :: struct {}
+
 ConnectionState :: enum VarInt {
     Status = 1,
     Login = 2,
@@ -123,6 +137,17 @@ StatusResponsePacket :: struct {
     enforces_secure_chat: bool `json:"enforcesSecureChat"`,
 }
 
-PongResponse :: struct {
+PongResponsePacket :: struct {
     payload: Long,
+}
+
+LoginSuccessPacket :: distinct GameProfile
+
+GameProfile :: struct {
+    uuid: uuid.Identifier,
+    username: string,
+    // FIXME: use some kind of property map?
+    name: string,
+    value: string,
+    signature: Maybe(string),
 }
