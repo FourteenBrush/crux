@@ -120,6 +120,7 @@ _setup_server_socket :: proc(endpoint: net.Endpoint) -> (net.TCP_Socket, bool) {
     net_err = net.set_blocking(sock, false)
     if net_err != nil {
         log.errorf("failed to set server socket to non blocking: %s", net_err)
+        net.close(sock)
         return sock, false
     }
     return sock, true
