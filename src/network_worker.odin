@@ -14,11 +14,6 @@ import "src:reactor"
 
 // import "lib:tracy"
 
-// TODO: add support for others
-when ODIN_OS == .Linux {
-    foreign import pthread "system:c"
-}
-
 TARGET_TPS :: 20
 
 NetworkWorkerSharedData :: struct {
