@@ -51,9 +51,6 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
     }
 
     allocator := state.threadsafe_alloc
-    when ODIN_OS == .Linux {
-        _try_set_threadname()
-    }
 
     {
         // initialize spall for this thread
