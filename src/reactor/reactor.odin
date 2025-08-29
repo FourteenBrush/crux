@@ -4,15 +4,6 @@ package reactor
 
 import "core:net"
 
-// - we can only associate 64 bits of user data with epoll/iocp events
-// - instead of storing the socket, which is used as key with a mutex -> ClientConnection,
-// we want to have a direct pointer (as the client connections mutex only guards modifications on the map, not on the connections),
-// a ptr is not stable, perhaps use a slotmap index, also not a pointer..
-// 
-// TODO: using spinlock was the first idea, as the critical section is small (map_insert/map_get call),
-// but only allowing one thread in at a time might stall when having a lot of clients?
-// semaphore style spinlock?
-
 // Event emitted by polling the IOContext.
 Event :: struct {
     // The client socket that emitted the event
@@ -29,4 +20,28 @@ EventFlag :: enum {
     Err,
     // Read hangup or abrupt disconnection
     Hangup,
+}
+
+IOContext :: _IOContext
+
+create_io_context :: proc() -> (IOContext, bool) {
+    return _create_io_context()
+}
+
+destroy_io_context :: proc(ctx: ^IOContext) {
+    _destroy_io_context(ctx)
+}
+
+register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
+    return _register_client(ctx, client)
+}
+
+unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
+    return _unregister_client(ctx, client)
+}
+
+// Inputs:
+// - `timeout_ms`: the waiting timeout in ms, -1 waits indefinitely, 0 means return immediately
+await_io_events :: proc(ctx: ^IOContext, events_out: ^[$N]Event, timeout_ms: int) -> (n: int, ok: bool) {
+    return _await_io_events(ctx, events_out, timeout_ms)
 }
