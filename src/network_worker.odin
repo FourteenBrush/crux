@@ -9,7 +9,6 @@ import "core:net"
 import "core:sync"
 import "base:runtime"
 import "core:sync/chan"
-import "core:sys/posix"
 
 import "src:reactor"
 
@@ -18,12 +17,6 @@ import "src:reactor"
 // TODO: add support for others
 when ODIN_OS == .Linux {
     foreign import pthread "system:c"
-}
-
-foreign pthread {
-    when ODIN_OS == .Linux {
-        pthread_setname_np :: proc(posix.pthread_t, cstring) -> posix.Errno ---
-    }
 }
 
 TARGET_TPS :: 20
@@ -63,7 +56,10 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
     }
 
     allocator := state.threadsafe_alloc
-    _try_set_threadname()
+    when ODIN_OS == .Linux {
+        _try_set_threadname()
+    }
+
     {
         // initialize spall for this thread
         // backing_buf := make([]u8, spall.BUFFER_DEFAULT_SIZE, state.threadsafe_alloc)
@@ -233,14 +229,6 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
         enqueue_packet(client_conn, response, allocator=state.threadsafe_alloc)
     case LoginAcknowledgedPacket:
         client_conn.state = .Configuration
-    }
-}
-
-@(disabled=ODIN_OS != .Linux)
-_try_set_threadname :: proc() {
-    // NOTE: must not be longer than 16 chars (including \0)
-    if errno := pthread_setname_np(posix.pthread_self(), "crux-NetWorker"); errno != .NONE {
-        log.warnf("failed to set worker thread name; err=%d", errno)
     }
 }
 
