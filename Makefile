@@ -1,13 +1,18 @@
 rwildcard = $(wildcard $1) $(foreach d,$1,$(call rwildcard,$(addsuffix /$(notdir $d),$(wildcard $(dir $d)*))))
 
-PROG = crux
+ifeq ($(OS), Windows_NT)
+	PROG = crux.exe
+else
+	PROG = crux
+endif
+
 SRC = src
 SOURCE_FILES = $(call rwildcard,$(SRC)/*.odin)
 TESTS = tests
 COLLECTIONS = -collection:src=src -collection:lib=lib
 
 CC = odin
-CFLAGS = -out:$(BUILD_DIR)/$(PROG) -strict-style -vet-semicolon -vet-cast -vet-using-param $(COLLECTIONS)
+CFLAGS = -out:$(BUILD_DIR)/$(PROG) -strict-style -vet-semicolon -vet-cast $(COLLECTIONS) # -vet-using-param
 BUILD_DIR = build
 
 all: release
