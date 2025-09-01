@@ -90,8 +90,6 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 	// TODO: individual frees are not supported, are we slowly leaking memory?
 	ctx.arena_allocator = mem.dynamic_arena_allocator(ctx.arena)
 
-	comp := new(Completion, ctx.arena_allocator)
-	comp.client = ctx.server_sock
 	_install_accept_handler(&ctx) or_return
 
 	// allow server sock to emit iocp events (for accept() processing)
