@@ -60,10 +60,10 @@ main :: proc() {
 
         defer {
             for _, leak in tracking_alloc.allocation_map {
-                log.warnf("%v leaked %m", leak.location, leak.size)
+                fmt.eprintfln("%v leaked %m", leak.location, leak.size)
             }
             for bad_free in tracking_alloc.bad_free_array {
-                log.warnf("%v allocation %p was freed badly", bad_free.location, bad_free.memory)
+                fmt.eprintfln("%v allocation %p was freed badly", bad_free.location, bad_free.memory)
             }
         }
 
@@ -77,6 +77,13 @@ main :: proc() {
             g_spall_buf = spall.buffer_create(backing_buf, u32(sync.current_thread_id()))
             defer spall.buffer_destroy(&g_spall_ctx, &g_spall_buf)
         }
+    }
+    when tracy.TRACY_ENABLE {
+        allocator = tracy.MakeProfiledAllocator(
+            self = &tracy.ProfiledAllocatorData{},
+            callstack_size = 14,
+            backing_allocator = allocator,
+        )
     }
 
     back.register_segfault_handler()
