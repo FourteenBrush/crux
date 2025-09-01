@@ -34,7 +34,9 @@ LPFN_GETACCEPTEXSOCKADDRS :: #type proc "system" (
 	RemoteSockaddrLength:  win32.LPINT,
 )
 
-// loaded by an WsaIoctl call
+// both loaded by an WsaIoctl call
+@(private="file")
+_accept_ex := win32.LPFN_ACCEPTEX(nil)
 @(private="file")
 _accept_ex_sock_addrs := LPFN_GETACCEPTEXSOCKADDRS(nil)
 
@@ -70,19 +72,11 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 		return ctx, false
 	}
 
-	// accepted client socket that which will be asynchronously set, must not be bound or connected
-	// (implicitly configured for overlapping io)
-	ctx.accept_sock = win32.socket(win32.AF_INET, win32.SOCK_STREAM, 0)
-	if ctx.accept_sock == win32.INVALID_SOCKET {
-        os.print_error(os.stderr, win32.System_Error(win32.WSAGetLastError()), "could not preconfigure client socket")
-		return ctx, false
-	}
-
 	ctx.server_sock = win32.SOCKET(server_sock)
-	accept_ex := _load_wsa_fn_ptr(&ctx, win32.WSAID_ACCEPTEX, win32.LPFN_ACCEPTEX)
+	_accept_ex = _load_wsa_fn_ptr(&ctx, win32.WSAID_ACCEPTEX, win32.LPFN_ACCEPTEX)
 	_accept_ex_sock_addrs = _load_wsa_fn_ptr(&ctx, win32.WSAID_GETACCEPTEXSOCKADDRS, LPFN_GETACCEPTEXSOCKADDRS)
 
-	if accept_ex == nil || _accept_ex_sock_addrs == nil {
+	if _accept_ex == nil || _accept_ex_sock_addrs == nil {
         os.print_error(os.stderr, win32.System_Error(win32.WSAGetLastError()), "failed to load WSA function pointers")
     	return ctx, false
 	}
@@ -98,23 +92,7 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 
 	comp := new(Completion, ctx.arena_allocator)
 	comp.client = ctx.server_sock
-
-	// setup an async accept() handler which will emit iocp events for inbound clients
-	accept_ok := accept_ex(
-		win32.SOCKET(server_sock),
-		ctx.accept_sock,
-		&ctx.accept_buf[0],
-		ACCEPTEX_RECEIVE_DATA_LENGTH,
-		ADDR_BUF_SIZE, /* local addr len */
-		ADDR_BUF_SIZE, /* remote addr len */
-		nil,           /* bytes received */
-		&comp.overlapped,
-	)
-	// on ERROR_IO_PENDING, the operation was successfully initiated and is still in progress
-	if accept_ok != win32.TRUE && win32.WSAGetLastError() != i32(win32.ERROR_IO_PENDING) {
-        os.print_error(os.stderr, win32.System_Error(win32.WSAGetLastError()), "could not setup accept() handler")
-		return ctx, false
-	}
+	_install_accept_handler(&ctx) or_return
 
 	// allow server sock to emit iocp events (for accept() processing)
 	result := win32.CreateIoCompletionPort(
@@ -131,6 +109,44 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 	ctx.connections = make(map[win32.SOCKET]ClientData, 16, ctx.arena_allocator)
 
 	return ctx, true
+}
+
+// Installs an `AcceptEx` handler, which will emit IOCP events for inbound connections.
+@(private="file")
+_install_accept_handler :: proc(ctx: ^IOContext) -> bool {
+    comp := new(Completion, ctx.arena_allocator)
+    comp.client = ctx.server_sock
+
+	// socket that AcceptEx will use to bind the accepted client to
+	ctx.accept_sock = _create_accept_client_socket() or_return
+
+	accept_ok := _accept_ex(
+		ctx.server_sock,
+		ctx.accept_sock,
+		&ctx.accept_buf[0],
+		ACCEPTEX_RECEIVE_DATA_LENGTH,
+		ADDR_BUF_SIZE, /* local addr len */
+		ADDR_BUF_SIZE, /* remote addr len */
+		nil,           /* bytes received */
+		&comp.overlapped,
+	)
+	// on ERROR_IO_PENDING, the operation was successfully initiated and is still in progress
+	if accept_ok != win32.TRUE && win32.WSAGetLastError() != i32(win32.ERROR_IO_PENDING) {
+        os.print_error(os.stderr, win32.System_Error(win32.WSAGetLastError()), "could not setup accept() handler")
+		return false
+	}
+	return true
+}
+
+// Create a socket implicitly configured for overlapping io.
+@(private="file")
+_create_accept_client_socket :: proc() -> (win32.SOCKET, bool) {
+    sock := win32.socket(win32.AF_INET, win32.SOCK_STREAM, 0)
+	if sock == win32.INVALID_SOCKET {
+        os.print_error(os.stderr, win32.System_Error(win32.WSAGetLastError()), "could not preconfigure client socket")
+		return sock, false
+	}
+	return sock, true
 }
 
 _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
@@ -268,6 +284,9 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 				if result != 0 {
 				    events_out[i].flags = {.Err}
 				}
+
+				// re-arm accept handler
+				_install_accept_handler(ctx) or_break
 			}
 		case .Write:
 		    events_out[i].flags = {.Writable}
