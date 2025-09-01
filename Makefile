@@ -20,7 +20,7 @@ all: release
 release: CFLAGS += -vet-unused -o:speed -microarch:native
 release: $(PROG)
 
-debug: CFLAGS += -debug -o:none # -define:TRACY_ENABLE=true
+debug: CFLAGS += -debug -o:none
 debug: $(PROG)
 
 test: CFLAGS += -define:ODIN_TEST_LOG_LEVEL=warning -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_SHORT_LOGS=true -debug -keep-executable
@@ -33,6 +33,9 @@ $(PROG): $(SOURCE_FILES)
 
 run: debug
 	./$(BUILD_DIR)/$(PROG)
+
+profile: CFLAGS += -define:TRACY_ENABLE=true
+profile: run
 
 check: CFLAGS := $(filter-out -out:$(BUILD_DIR)/$(PROG),$(CFLAGS))
 check: $(SOURCE_FILES)
