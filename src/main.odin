@@ -7,7 +7,7 @@ import "core:log"
 import "core:mem"
 import "core:sync"
 import "core:time"
-import "core:sys/posix"
+import "core:c/libc"
 import "core:prof/spall"
 
 import "base:runtime"
@@ -92,16 +92,9 @@ main :: proc() {
     	40..<50 = "[FATAL] ",
     }
 
-    sa := posix.sigaction_t {
-        sa_handler = _sigint_handler,
-        sa_flags = {.RESTART},
-    }
-    posix.sigemptyset(&sa.sa_mask)
-    install_result := posix.sigaction(.SIGINT, &sa, nil)
-    if install_result != .OK {
-        log.fatal("failed to install sigint handler:", posix.strerror())
-        return
-    }
+    libc.signal(libc.SIGINT, proc "c" (_sig: i32) {
+        sync.atomic_store_explicit(&g_continue_running, false, .Release)
+    })
 
     defer if fmt._user_formatters == nil {
         delete(fmt._user_formatters^)
@@ -118,18 +111,13 @@ main :: proc() {
     context.logger = log.create_console_logger(.Debug when ODIN_DEBUG else .Warning, log_opts, allocator=allocator)
     defer log.destroy_console_logger(context.logger, allocator=allocator)
 
-    // tracy.SetThreadName("main")
+    tracy.SetThreadName("main")
 
     // TODO
     args, ok := parse_cli_args(allocator)
-    
+
     exit_success = true
     exit_success = run(allocator, execution_permit=&g_continue_running)
-}
-
-@(no_instrumentation, private="file")
-_sigint_handler :: proc "c" (sig: posix.Signal) {
-    sync.atomic_store_explicit(&g_continue_running, false, .Release)
 }
 
 @(private="file")
