@@ -265,8 +265,12 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 				continue
 			}
 
-			events_out[i].operations = {.Read}
-			events_out[i].recv_buf = mem.slice_ptr(completion.buf.buf, int(entry.dwNumberOfBytesTransferred))
+			if entry.dwNumberOfBytesTransferred == 0 {
+			    events_out[i].operations = {.Hangup}
+			} else {
+    			events_out[i].operations = {.Read}
+    			events_out[i].recv_buf = mem.slice_ptr(completion.buf.buf, int(entry.dwNumberOfBytesTransferred))
+			}
 		case .Write:
 		    events_out[i].operations = {.Write}
 		}
