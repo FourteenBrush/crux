@@ -1,20 +1,19 @@
 package reactor
 
 import "core:os"
-import "core:fmt"
 import "core:mem"
 import "core:net"
 import win32 "core:sys/windows"
 
 import "lib:tracy"
 
-// required size to store ipv6 socket addr for AcceptEx calls (see docs)
-@(private="file")
-ADDR_BUF_SIZE :: size_of(win32.sockaddr_in) + 16
-
 // only allow one concurrent io worker for now
 @(private="file")
 IOCP_CONCURRENT_THREADS :: 1
+
+// required size to store ipv6 socket addr for AcceptEx calls (see docs)
+@(private="file")
+ADDR_BUF_SIZE :: size_of(win32.sockaddr_in) + 16
 
 // how many bytes of data to receive into the AcceptEx buffer
 @(private="file")
@@ -34,7 +33,7 @@ LPFN_GETACCEPTEXSOCKADDRS :: #type proc "system" (
 	RemoteSockaddrLength:  win32.LPINT,
 )
 
-// both loaded by an WsaIoctl call
+// both dynamically loaded by an WsaIoctl call
 @(private="file")
 _accept_ex := win32.LPFN_ACCEPTEX(nil)
 @(private="file")
@@ -44,18 +43,20 @@ _IOContext :: struct {
 	completion_port: win32.HANDLE,
 	server_sock: win32.SOCKET,
 	connections: map[win32.SOCKET]ClientData,
+	arena: ^mem.Dynamic_Arena,
+	arena_allocator: mem.Allocator,
 
-	// Client socket used for `AcceptEx` calls.
+	// Client socket on which to accept connections (`AcceptEx` style).
 	accept_sock: win32.SOCKET,
 	// Buf where local and remote addr are placed.
 	accept_buf: [ADDR_BUF_SIZE * 2]u8,
-	arena: ^mem.Dynamic_Arena,
-	arena_allocator: mem.Allocator,
 }
 
 @(private)
 ClientData :: struct {
 }
+
+// TODO: use net._dial_error()
 
 // TODO: cleanup here on partial failures
 _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (ctx: IOContext, ok: bool) {
@@ -109,7 +110,7 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 	return ctx, true
 }
 
-// Installs an `AcceptEx` handler, which will emit IOCP events for inbound connections.
+// Installs an `AcceptEx` handler to the context, which will emit IOCP events for inbound connections.
 @(private="file")
 _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
     comp := new(Completion, ctx.arena_allocator)
@@ -118,6 +119,9 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 	// socket that AcceptEx will use to bind the accepted client to
 	ctx.accept_sock = _create_accept_client_socket() or_return
 
+	// FIXME: we "know" clients will always send initial data after connecting (handshake packets and such),
+	// can we specify a recv buffer length > 0, while also defending against denial of service attacks
+	// by clients connecting and not sending data?
 	accept_ok := _accept_ex(
 		ctx.server_sock,
 		ctx.accept_sock,
@@ -170,14 +174,14 @@ _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 
     // TODO: instead of looking up info via ^OVERLAPPED, pass this ptr in the completion key?
 	data := new(Completion, ctx.arena_allocator)
+	data.client = win32.SOCKET(client)
 	buf := make([]u8, REACTOR_RECV_BUF_SIZE, ctx.arena_allocator)
 	data.buf = win32.WSABUF {
 		u32(len(buf)),
 		raw_data(buf),
 	}
 
-	// setup async read() handler
-	// TODO: how will we handle writes? (as buf starts off empty initially)
+	// initiate async recv call to emit iocp events whenever data is available
 	flags: u32
 	result := win32.WSARecv(
 		win32.SOCKET(client),
@@ -188,7 +192,7 @@ _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 		cast(win32.LPWSAOVERLAPPED) &data.overlapped,
 		nil, /* completion routine */
 	)
-	if result != 0 {
+	if result != 0 && win32.WSAGetLastError() != i32(win32.ERROR_IO_PENDING) {
 	    os.print_error(os.stderr, win32.System_Error(win32.WSAGetLastError()), "failed to initiate WSARecv")
 		return false
 	}
@@ -221,7 +225,7 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 	{
 	    tracy.ZoneN("GetQueuedCompletionStatusEx")
 
-    	// we could in theory also do this with event handles or APC callbacks
+    	// we could in theory also do this with event handles or APCs
     	result := win32.GetQueuedCompletionStatusEx(
     		ctx.completion_port,
     		raw_data(completion_entries),
@@ -239,24 +243,26 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 
 	for entry, i in completion_entries[:nready] {
 	    tracy.ZoneN("CompletionEntry")
-	    fmt.println("got smth")
-		succeeded := entry.Internal == 0
-		if !succeeded {
+
+		io_succeeded := entry.Internal == 0
+		if !io_succeeded {
 			events_out[i].flags = {.Err}
 			continue
 		}
 
 		completion: ^Completion = container_of(entry.lpOverlapped, Completion, "overlapped")
-		// fmt.println(completion)
+		events_out[i].client = net.TCP_Socket(completion.client)
 
 		switch completion.op {
 		case .Read:
 		    events_out[i].flags = {.Readable}
+
 			if completion.client == ctx.server_sock {
 			    tracy.ZoneN("AcceptEx")
-			    // new connection, parse AcceptEx buffer to find addresses
 			    events_out[i].flags += {.ServerSockEmitted}
+				events_out[i].client = net.TCP_Socket(ctx.accept_sock)
 
+			    // new connection, parse AcceptEx buffer to find addresses (unused)
 				local_addr: ^win32.sockaddr
 				local_addr_len: i32
 				remote_addr: ^win32.sockaddr
@@ -281,7 +287,10 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 				)
 				if result != 0 {
 				    events_out[i].flags = {.Err}
+					continue
 				}
+				assert(net.set_blocking(net.TCP_Socket(ctx.accept_sock), false) == .None)
+				_register_client(ctx, net.TCP_Socket(ctx.accept_sock)) or_continue
 
 				// re-arm accept handler
 				_install_accept_handler(ctx) or_break
@@ -290,7 +299,6 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 		    events_out[i].flags = {.Writable}
 		}
 
-		events_out[i].client = net.TCP_Socket(completion.client)
 		// TODO: put error in event?
 	}
 
