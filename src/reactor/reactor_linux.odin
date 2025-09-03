@@ -1,19 +1,21 @@
 package reactor
 
 import "core:net"
+import "core:mem"
 import "core:sys/linux"
 
 _IOContext :: struct {
     epoll_fd: linux.Fd,
 }
 
-_create_io_context :: proc() -> (ctx: IOContext, ok: bool) {
+_create_io_context :: proc(server_sock: net.Tcp_Socket, allocator: mem.Allocator) -> (ctx: IOContext, ok: bool) {
+    // TODO: does timer resolution need to be fixed here?
     epoll_fd, errno := linux.epoll_create()
     if errno != .NONE do return
     return IOContext { epoll_fd = epoll_fd }, true
 }
 
-_destroy_io_context :: proc(ctx: ^IOContext) {
+_destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
     // FIXME: perhaps handle error
     linux.close(ctx.epoll_fd)
 }
@@ -33,15 +35,16 @@ _unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
     return errno == .NONE
 }
 
-// TODO: pass slice instead of ptr to array
 // TODO: timeout: 0 handle returned bool correctly
-_await_io_events :: proc(ctx: ^IOContext, events_out: ^[$N]Event, timeout_ms: int) -> (n: int, ok: bool) {
-    epoll_events: [N]linux.EPoll_Event
+_await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) -> (n: int, ok: bool) {
+    events := make([]linux.EPoll_Event, len(events_out), context.temp_allocator)
 
-    nready, errno := linux.epoll_wait(ctx.epoll_fd, &epoll_events[0], len(epoll_events), timeout=i32(timeout_ms))
+    nready, errno := linux.epoll_wait(ctx.epoll_fd, &events[0], len(events), timeout=i32(timeout_ms))
     if errno != .NONE do return
 
-    for event, i in epoll_events[:nready] {
+    recv_buf: [RECV_BUF_SIZE]u8 = ---
+
+    for event, i in events[:nready] {
         flags: EventFlags
         if .IN in event.events {
             flags += {.Readable}
@@ -49,8 +52,8 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: ^[$N]Event, timeout_ms: in
         if .OUT in event.events {
             flags += {.Writable}
         }
-        if .ERR in event.events {
-            flags += {.Err}
+        if .Error in event.events {
+            flags += {.Error}
         }
         // handle abrupt disconnection and read hangup the same way
         if .HUP in event.events || .RDHUP in event.events {
@@ -59,7 +62,7 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: ^[$N]Event, timeout_ms: in
 
         events_out[i] = Event {
             client = net.TCP_Socket(event.data.fd),
-            flags = flags,
+            operations = flags,
         }
     }
     return int(nready), true

@@ -42,7 +42,6 @@ _accept_ex_sock_addrs := LPFN_GETACCEPTEXSOCKADDRS(nil)
 _IOContext :: struct {
 	completion_port: win32.HANDLE,
 	server_sock: win32.SOCKET,
-	connections: map[win32.SOCKET]ClientData,
 	arena: ^mem.Dynamic_Arena,
 	arena_allocator: mem.Allocator,
 
@@ -50,10 +49,6 @@ _IOContext :: struct {
 	accept_sock: win32.SOCKET,
 	// Buf where local and remote addr are placed.
 	accept_buf: [ADDR_BUF_SIZE * 2]u8,
-}
-
-@(private)
-ClientData :: struct {
 }
 
 // TODO: use net._dial_error()
@@ -105,16 +100,16 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 	    return
 	}
 
-	ctx.connections = make(map[win32.SOCKET]ClientData, 16, ctx.arena_allocator)
-
 	return ctx, true
 }
 
 // Installs an `AcceptEx` handler to the context, which will emit IOCP events for inbound connections.
 @(private="file")
 _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
+    tracy.Zone()
+
     comp := new(Completion, ctx.arena_allocator)
-    comp.client = ctx.server_sock
+    comp.source = ctx.server_sock
 
 	// socket that AcceptEx will use to bind the accepted client to
 	ctx.accept_sock = _create_accept_client_socket() or_return
@@ -154,13 +149,14 @@ _create_accept_client_socket :: proc() -> (win32.SOCKET, bool) {
 _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 	// NOTE: refcounted, no handles must be associated
 	win32.CloseHandle(ctx.completion_port)
-	delete(ctx.connections)
 	mem.dynamic_arena_destroy(ctx.arena)
 	free(ctx.arena, allocator)
-	// TODO: some CancelIoEx here, after ensuring iocp binds to server socket?
+	// TODO: some CancelIoEx here
 }
 
 _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
+    tracy.Zone()
+
     register_result := win32.CreateIoCompletionPort(
         win32.HANDLE(uintptr(client)),
         ctx.completion_port,
@@ -174,14 +170,14 @@ _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 
     // TODO: instead of looking up info via ^OVERLAPPED, pass this ptr in the completion key?
 	data := new(Completion, ctx.arena_allocator)
-	data.client = win32.SOCKET(client)
-	buf := make([]u8, REACTOR_RECV_BUF_SIZE, ctx.arena_allocator)
+	data.source = win32.SOCKET(client)
+	buf := make([]u8, RECV_BUF_SIZE, ctx.arena_allocator)
 	data.buf = win32.WSABUF {
 		u32(len(buf)),
 		raw_data(buf),
 	}
 
-	// initiate async recv call to emit iocp events whenever data is available
+	// initiate async recv call to emit an iocp event whenever data can be read
 	flags: u32
 	result := win32.WSARecv(
 		win32.SOCKET(client),
@@ -203,17 +199,19 @@ _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 @(private="file")
 Completion :: struct {
 	op: IOOperation,
-	client: win32.SOCKET,
+	source: win32.SOCKET,
 	buf: win32.WSABUF,
 	overlapped: win32.OVERLAPPED,
 }
 
+@(private="file")
 IOOperation :: enum {
 	Read,
 	Write,
 }
 
 _unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
+    // TODO: hEvent bit fiddling, for outstanding operations, expect WSAENOTCON or something
 	return true
 }
 
@@ -246,63 +244,73 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 
 		io_succeeded := entry.Internal == 0
 		if !io_succeeded {
-			events_out[i].flags = {.Err}
+			events_out[i].operations = {.Error}
 			continue
 		}
 
 		completion: ^Completion = container_of(entry.lpOverlapped, Completion, "overlapped")
-		events_out[i].client = net.TCP_Socket(completion.client)
+  		events_out[i].socket = net.TCP_Socket(completion.source)
 
 		switch completion.op {
 		case .Read:
-		    events_out[i].flags = {.Readable}
-
-			if completion.client == ctx.server_sock {
-			    tracy.ZoneN("AcceptEx")
-			    events_out[i].flags += {.ServerSockEmitted}
-				events_out[i].client = net.TCP_Socket(ctx.accept_sock)
-
-			    // new connection, parse AcceptEx buffer to find addresses (unused)
-				local_addr: ^win32.sockaddr
-				local_addr_len: i32
-				remote_addr: ^win32.sockaddr
-				remote_addr_len: i32
-				_accept_ex_sock_addrs(
-				    &ctx.accept_buf[0],
-					ACCEPTEX_RECEIVE_DATA_LENGTH,
-					ADDR_BUF_SIZE,
-					ADDR_BUF_SIZE,
-					&local_addr,
-					&local_addr_len,
-					&remote_addr,
-					&remote_addr_len,
-				)
-
-				// accepted socket is in the default state, update it
-				result := win32.setsockopt(
-    				ctx.accept_sock,
-                    win32.SOL_SOCKET,
-                    win32.SO_UPDATE_ACCEPT_CONTEXT,
-                    &ctx.server_sock, size_of(ctx.server_sock),
-				)
-				if result != 0 {
-				    events_out[i].flags = {.Err}
-					continue
-				}
-				assert(net.set_blocking(net.TCP_Socket(ctx.accept_sock), false) == .None)
+			if completion.source == ctx.server_sock {
+				// TODO: close client on error
+				_accept_client(ctx) or_continue
 				_register_client(ctx, net.TCP_Socket(ctx.accept_sock)) or_continue
+				events_out[i].operations = {.NewClient}
+				events_out[i].socket = net.TCP_Socket(ctx.accept_sock)
 
 				// re-arm accept handler
 				_install_accept_handler(ctx) or_break
+				continue
 			}
-		case .Write:
-		    events_out[i].flags = {.Writable}
-		}
 
-		// TODO: put error in event?
+			events_out[i].operations = {.Read}
+			events_out[i].recv_buf = mem.slice_ptr(completion.buf.buf, int(entry.dwNumberOfBytesTransferred))
+		case .Write:
+		    events_out[i].operations = {.Write}
+		}
 	}
 
 	return int(nready), true
+}
+
+// Accepts a new client on the server socket, and stores it in `ctx.accept_sock`.
+@(private="file")
+_accept_client :: proc(ctx: ^IOContext) -> bool {
+    tracy.Zone()
+
+    // parse AcceptEx buffer to find addresses (unused) and unblock socket
+	local_addr: ^win32.sockaddr
+	local_addr_len: i32
+	remote_addr: ^win32.sockaddr
+	remote_addr_len: i32
+	_accept_ex_sock_addrs(
+	    &ctx.accept_buf[0],
+		ACCEPTEX_RECEIVE_DATA_LENGTH,
+		ADDR_BUF_SIZE,
+		ADDR_BUF_SIZE,
+		&local_addr,
+		&local_addr_len,
+		&remote_addr,
+		&remote_addr_len,
+	)
+
+	// accepted socket is in the default state, update it
+	result := win32.setsockopt(
+		ctx.accept_sock,
+        win32.SOL_SOCKET,
+        win32.SO_UPDATE_ACCEPT_CONTEXT,
+        &ctx.server_sock, size_of(ctx.server_sock),
+	)
+	if result != 0 {
+	    return false
+	}
+
+	if net.set_blocking(net.TCP_Socket(ctx.accept_sock), false) != .None {
+	    return false
+	}
+	return true
 }
 
 // Changes timer resolution, in order to obtain millisecond precision for the event loop (if possible).

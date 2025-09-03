@@ -32,7 +32,7 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
         case .Status:
             return StatusRequestPacket {}, .None
         case .Login:
-            
+
             return LoginStartPacket {
                 username = buf_read_string(b, 16, allocator) or_return,
                 uuid = buf_read_uuid(b) or_return,
@@ -40,7 +40,7 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
         case:
             return p, .InvalidData
         }
-        
+
     case .PingRequest:
         payload := buf_read_long(b) or_return
         return PingRequestPacket { payload }, .None

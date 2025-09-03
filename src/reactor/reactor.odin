@@ -1,35 +1,49 @@
 // A poll-based reactor implementation where interests in IO events are registered and polled.
-// These IO events are bound to a certain client socket and indicate the state of their socket.
+// These IO events are bound to a certain client socket and indicate the state of that socket.
 package reactor
 
 import "core:net"
+import "core:mem"
+
+@(private)
+RECV_BUF_SIZE :: 2048
 
 // Event emitted by polling the IOContext.
 Event :: struct {
-    // The client socket that emitted the event
-    client: net.TCP_Socket,
-    // Multiple flags might be present at the same time, as to batch multiple events
-    flags: EventFlags,
+    // The affected socket, this is always the socket that emitted the event, except
+    // for when the server socket accepts new clients, then this stores the newly accepted client.
+    // Always non-blocking.
+    socket: net.TCP_Socket,
+    // Multiple flags might be present at the same time, as to batch multiple events.
+    // Every flag set, accounts for one batched event.
+    operations: bit_set[EventOperation],
+    // The buffer where received data is stored in, only applicable to events where a read operation was performed.
+    recv_buf: []u8,
 }
 
-EventFlags :: bit_set[EventFlag]
-
-EventFlag :: enum {
-    Readable,
-    Writable,
-    Err,
+EventOperation :: enum {
+    // An error occured on the execution of the IO operation.
+    // The downstream may probably want to check this first over other events.
+    Error,
+    // Data was read from the client socket and is now available in the `Event`.
+    Read,
+    Write,
     // Read hangup or abrupt disconnection
     Hangup,
+    // This `Event` represents a newly accepted client socket, available in `Event.socket`.
+    // The socket is already registered in this subsystem.
+    // This merely acts as a way to notify the downstream, so they may update their internal data structures.
+    NewClient,
 }
 
 IOContext :: _IOContext
 
-create_io_context :: proc() -> (IOContext, bool) {
-    return _create_io_context()
+create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (IOContext, bool) {
+    return _create_io_context(server_sock, allocator)
 }
 
-destroy_io_context :: proc(ctx: ^IOContext) {
-    _destroy_io_context(ctx)
+destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
+    _destroy_io_context(ctx, allocator)
 }
 
 register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
@@ -40,8 +54,10 @@ unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
     return _unregister_client(ctx, client)
 }
 
+// Await IO events for any of the registered clients (excluding the server socket).
 // Inputs:
 // - `timeout_ms`: the waiting timeout in ms, -1 waits indefinitely, 0 means return immediately
-await_io_events :: proc(ctx: ^IOContext, events_out: ^[$N]Event, timeout_ms: int) -> (n: int, ok: bool) {
+// TODO: handle this timeout correctly for different platforms
+await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) -> (n: int, ok: bool) {
     return _await_io_events(ctx, events_out, timeout_ms)
 }

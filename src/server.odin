@@ -10,7 +10,7 @@ import "core:sync/chan"
 
 import "src:reactor"
 
-// import "lib:tracy"
+import "lib:tracy"
 
 @(private="file")
 g_server: Server
@@ -33,18 +33,18 @@ run :: proc(threadsafe_alloc: mem.Allocator, execution_permit: ^bool) -> bool {
     server_sock := _setup_server_socket(endpoint) or_return
     defer net.close(server_sock)
 
-    io_ctx := _setup_io_context(server_sock) or_return
-    defer reactor.destroy_io_context(&io_ctx)
+    io_ctx := _setup_io_context(server_sock, threadsafe_alloc) or_return
+    defer reactor.destroy_io_context(&io_ctx, threadsafe_alloc)
 
     g_server = _setup_server(threadsafe_alloc) or_return
     defer _destroy_server(g_server)
-    
+
     packet_receiver, alloc_err := chan.create_buffered(chan.Chan(Packet, .Both), 512, allocator=threadsafe_alloc)
     if alloc_err != .None {
         return fatal("failed to create packet channel", alloc_err)
     }
     g_server.packet_receiver = chan.as_recv(packet_receiver)
-    
+
     net_worker_state := NetworkWorkerSharedData {
        io_ctx = io_ctx,
        server_sock = server_sock,
@@ -52,7 +52,7 @@ run :: proc(threadsafe_alloc: mem.Allocator, execution_permit: ^bool) -> bool {
        execution_permit = execution_permit,
        packet_bridge = chan.as_send(packet_receiver),
     }
-    
+
     net_worker_thread: ^thread.Thread
     {
         // because thread.create implicitly uses context.allocator
@@ -66,7 +66,7 @@ run :: proc(threadsafe_alloc: mem.Allocator, execution_permit: ^bool) -> bool {
     }
 
     for sync.atomic_load_explicit(execution_permit, .Acquire) {
-        // defer tracy.FrameMark()
+        defer tracy.FrameMark()
         start := time.tick_now()
 
         for packet in chan.try_recv(g_server.packet_receiver) {
@@ -93,7 +93,7 @@ run :: proc(threadsafe_alloc: mem.Allocator, execution_permit: ^bool) -> bool {
 // Creates a new client with all default data.
 register_client_connection :: proc(client_sock: net.TCP_Socket) {
     sync.ticket_mutex_guard(&g_server._client_connections_mtx)
-    
+
     g_server._client_connections_guarded[client_sock] = ClientConnection {
         socket = client_sock,
         state = .Handshake,
@@ -117,6 +117,7 @@ _setup_server_socket :: proc(endpoint: net.Endpoint) -> (net.TCP_Socket, bool) {
         return sock, false
     }
 
+    // TODO: should this be blocking on windows? as we asynchronously use it?
     net_err = net.set_blocking(sock, false)
     if net_err != nil {
         log.errorf("failed to set server socket to non blocking: %s", net_err)
@@ -127,27 +128,28 @@ _setup_server_socket :: proc(endpoint: net.Endpoint) -> (net.TCP_Socket, bool) {
 }
 
 @(private="file")
-_setup_io_context :: proc(server_sock: net.TCP_Socket) -> (reactor.IOContext, bool) {
-    io_ctx, ctx_ok := reactor.create_io_context()
+_setup_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (reactor.IOContext, bool) {
+    io_ctx, ctx_ok := reactor.create_io_context(server_sock, allocator)
     if !ctx_ok {
         log.error("failed to create io context")
         return io_ctx, false
     }
 
+    // TODO: remove, reactor handles registering server socket internally
     // register server sock to io waitset, so we can simply receive events
     // indicating new clients want to connect, instead of manually calling accept() and such
-    register_server_ok := reactor.register_client(&io_ctx, server_sock)
-    if !register_server_ok {
-        log.error("failed to register server socket to io context")
-        reactor.destroy_io_context(&io_ctx)
-        return io_ctx, false
-    }
+    // register_server_ok := reactor.register_client(&io_ctx, server_sock)
+    // if !register_server_ok {
+    //     log.error("failed to register server socket to io context")
+    //     reactor.destroy_io_context(&io_ctx, allocator)
+    //     return io_ctx, false
+    // }
     return io_ctx, true
 }
 
 @(private="file")
 _setup_server :: proc(allocator: mem.Allocator) -> (server: Server, ok: bool) {
-    
+
     server._client_connections_guarded = make(map[net.TCP_Socket]ClientConnection, 8, allocator)
     return server, true
 }
