@@ -11,14 +11,17 @@ RECV_BUF_SIZE :: 2048
 // Event emitted by polling the IOContext.
 Event :: struct {
     // The affected socket, this is always the socket that emitted the event, except
-    // for when the server socket accepts new clients, then this stores the newly accepted client.
-    // Always non-blocking.
+    // for cases where the server socket accepts new clients, then this stores the newly accepted client.
+    // Always configured to be non-blocking.
     socket: net.TCP_Socket,
     // Multiple flags might be present at the same time, as to batch multiple events.
     // Every flag set, accounts for one batched event.
     operations: bit_set[EventOperation],
-    // The buffer where received data is stored in, only applicable to events where a read operation was performed.
+
+    // The buffer where received data is stored in, only applicable to a read operations.
     recv_buf: []u8,
+    // The number of bytes affected in the io operation, only used for read and write operations.
+    nr_of_bytes_affected: int,
 }
 
 EventOperation :: enum {
@@ -26,6 +29,7 @@ EventOperation :: enum {
     // The downstream may probably want to check this first over other events.
     Error,
     // Data was read from the client socket and is now available in the `Event`.
+    // This always indicates a successful read, an EOF condition is handled with `.Hangup` instead.
     Read,
     Write,
     // Read hangup or abrupt disconnection
@@ -60,4 +64,8 @@ unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 // TODO: handle this timeout correctly for different platforms
 await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) -> (n: int, ok: bool) {
     return _await_io_events(ctx, events_out, timeout_ms)
+}
+
+submit_write_copy :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) -> bool {
+    return _submit_write_copy(ctx, client, data)
 }

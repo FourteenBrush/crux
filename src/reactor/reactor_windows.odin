@@ -1,5 +1,6 @@
 package reactor
 
+import "core:fmt"
 import "core:os"
 import "core:mem"
 import "core:net"
@@ -168,6 +169,11 @@ _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
         return false
     }
 
+    return _install_recv_handler(ctx, win32.SOCKET(client))
+}
+
+// Initiate async recv call to emit an iocp event whenever data can be read
+_install_recv_handler :: proc(ctx: ^IOContext, client: win32.SOCKET) -> bool {
     // TODO: instead of looking up info via ^OVERLAPPED, pass this ptr in the completion key?
 	data := new(Completion, ctx.arena_allocator)
 	data.source = win32.SOCKET(client)
@@ -176,9 +182,7 @@ _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 		u32(len(buf)),
 		raw_data(buf),
 	}
-
-	// initiate async recv call to emit an iocp event whenever data can be read
-	flags: u32
+    flags: u32
 	result := win32.WSARecv(
 		win32.SOCKET(client),
 		&data.buf,
@@ -215,6 +219,7 @@ _unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 	return true
 }
 
+// NOTE: instead of batching events, every emitted event represents one io operation
 _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) -> (n: int, ok: bool) {
     tracy.Zone()
 	completion_entries := make([]win32.OVERLAPPED_ENTRY, len(events_out), context.temp_allocator)
@@ -242,14 +247,16 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 	for entry, i in completion_entries[:nready] {
 	    tracy.ZoneN("CompletionEntry")
 
+		completion: ^Completion = container_of(entry.lpOverlapped, Completion, "overlapped")
+  		events_out[i].socket = net.TCP_Socket(completion.source)
+
 		io_succeeded := entry.Internal == 0
 		if !io_succeeded {
 			events_out[i].operations = {.Error}
 			continue
 		}
 
-		completion: ^Completion = container_of(entry.lpOverlapped, Completion, "overlapped")
-  		events_out[i].socket = net.TCP_Socket(completion.source)
+        events_out[i].nr_of_bytes_affected = int(entry.dwNumberOfBytesTransferred)
 
 		switch completion.op {
 		case .Read:
@@ -270,13 +277,42 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 			} else {
     			events_out[i].operations = {.Read}
     			events_out[i].recv_buf = mem.slice_ptr(completion.buf.buf, int(entry.dwNumberOfBytesTransferred))
+
+    			// re-arm recv handler
+    			_install_recv_handler(ctx, completion.source) or_continue
 			}
 		case .Write:
 		    events_out[i].operations = {.Write}
+			assert(entry.dwNumberOfBytesTransferred == completion.buf.len)
 		}
 	}
 
 	return int(nready), true
+}
+
+_submit_write_copy :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) -> bool {
+    comp := new(Completion, ctx.arena_allocator)
+    comp.op = .Write
+    comp.source = win32.SOCKET(client)
+    comp.buf = win32.WSABUF {
+        u32(len(data)),
+        raw_data(data),
+    }
+
+    result := win32.WSASend(
+        comp.source,
+        &comp.buf,
+        1, /* buffer count */
+        nil,
+        0, /* flags */
+        cast(win32.LPWSAOVERLAPPED) &comp.overlapped,
+        nil, /* completion routine */
+    )
+    if result != 0 && win32.WSAGetLastError() != i32(win32.ERROR_IO_PENDING) {
+        os.print_error(os.stderr, win32.System_Error(win32.WSAGetLastError()), "failed to initiate WSASend")
+        return false
+    }
+    return true
 }
 
 // Accepts a new client on the server socket, and stores it in `ctx.accept_sock`.

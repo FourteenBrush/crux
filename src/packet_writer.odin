@@ -2,11 +2,23 @@ package crux
 
 import "core:log"
 import "core:mem"
+import "base:runtime"
 import "core:encoding/json"
 
-enqueue_packet :: proc(client_conn: ^ClientConnection, packet: ClientBoundPacket, allocator: mem.Allocator) {
+import "src:reactor"
+
+enqueue_packet :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnection, packet: ClientBoundPacket, allocator: mem.Allocator) {
+    runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
     log.log(LOG_LEVEL_OUTBOUND, "Sending packet", packet)
     _serialize_clientbound(packet, &client_conn.tx_buf, allocator=allocator)
+
+    outb := make([]u8, buf_length(client_conn.tx_buf), context.temp_allocator)
+    read_err := buf_copy_into(&client_conn.tx_buf, outb)
+    assert(read_err == .None, "invariant, copied full length")
+
+    submission_ok := reactor.submit_write_copy(io_ctx, client_conn.socket, outb)
+    assert(submission_ok, "TODO: submission errors")
+    buf_advance_pos_unchecked(&client_conn.tx_buf, len(outb))
 }
 
 _serialize_clientbound :: proc(packet: ClientBoundPacket, outb: ^NetworkBuffer, allocator: mem.Allocator) {

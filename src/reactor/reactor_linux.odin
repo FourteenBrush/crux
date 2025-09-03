@@ -67,3 +67,8 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
     }
     return int(nready), true
 }
+
+_submit_write_copy :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) -> bool {
+    // TODO: append iovec to userspace queue
+    return false
+}

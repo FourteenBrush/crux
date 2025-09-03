@@ -84,46 +84,17 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
             }
 
             if .Read in event.operations {
-                // switch {
-                // case recv_err == net.TCP_Recv_Error.Timeout: continue
-                // case recv_err != .None:
-                //     log.warn("error reading from client socket:", recv_err)
-                //     _disconnect_client(&state, event.client)
-                //     continue
-                // case n == 0: // EOF
-                //     _disconnect_client(&state, event.client)
-                //     log.info("client disconnected")
-                //     continue
-                // case:
-                //     client_conn := &state.connections[event.client]
-                //     buf_write_bytes(&client_conn.rx_buf, recv_buf[:n])
-                //     _drain_serverbound_packets(&state, client_conn, allocator)
-                // }
+                client_conn := &state.connections[event.socket]
+                buf_write_bytes(&client_conn.rx_buf, event.recv_buf)
+                _drain_serverbound_packets(&state, client_conn, state.threadsafe_alloc)
             }
             if .Write in event.operations {
                 client_conn := &state.connections[event.socket]
+                // buf_advance_pos_unchecked(&client_conn.tx_buf, event.nr_of_bytes_affected)
 
-                if buffered := buf_length(client_conn.tx_buf); buffered > 0 {
-                    // FIXME: may we need a TEMP_ALLOCATOR_GUARD() here?
-                    outb := make([]u8, buffered, context.temp_allocator)
-                    read_err := buf_copy_into(&client_conn.tx_buf, outb)
-                    assert(read_err == .None, "invariant, copied full length")
-                    n, send_err := net.send_tcp(event.socket, outb)
-                    #partial switch send_err {
-                    case nil, .Would_Block:
-                        // kernel buf might not be able to hold full data, send remaining data next time
-                        // (send_tcp() calls send() repeatedly in a loop, till any error occurs)
-                        buf_advance_pos_unchecked(&client_conn.tx_buf, n)
-                    case:
-                        log.warn("error writing to client socket:", send_err)
-                        _disconnect_client(&state, client_conn.socket)
-                        continue
-                    }
-
-                    if client_conn.close_after_flushing {
-                        log.debug("disconnecting client as requested")
-                        _disconnect_client(&state, client_conn.socket)
-                    }
+                if client_conn.close_after_flushing {
+                    log.debug("disconnecting client as requested")
+                    _disconnect_client(&state, client_conn.socket)
                 }
             }
             if .NewClient in event.operations {
@@ -200,12 +171,12 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
             favicon = "data:image/png;base64,<data>",
             enforces_secure_chat = false,
         }
-        enqueue_packet(client_conn, status_response, allocator=state.threadsafe_alloc)
+        enqueue_packet(&state.io_ctx, client_conn, status_response, allocator=state.threadsafe_alloc)
     case PingRequestPacket:
         response := PongResponsePacket {
             payload = packet.payload,
         }
-        enqueue_packet(client_conn, response, allocator=state.threadsafe_alloc)
+        enqueue_packet(&state.io_ctx, client_conn, response, allocator=state.threadsafe_alloc)
         client_conn.close_after_flushing = true
     case LoginStartPacket:
         response := LoginSuccessPacket {
@@ -215,7 +186,7 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
             value = "",
             signature = nil,
         }
-        enqueue_packet(client_conn, response, allocator=state.threadsafe_alloc)
+        enqueue_packet(&state.io_ctx, client_conn, response, allocator=state.threadsafe_alloc)
     case LoginAcknowledgedPacket:
         client_conn.state = .Configuration
     }
