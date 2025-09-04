@@ -1,5 +1,6 @@
-// A poll-based reactor implementation where interests in IO events are registered and polled.
-// These IO events are bound to a certain client socket and indicate the state of that socket.
+// A poll-based reactor implementation where sockets are registered, in order to express interest in IO events.
+// Upon polling, events may be emitted for registered sockets, which indicate the outcome of IO events that
+// were started beforehand. The application code is given an opportunity to act on the result of those operations.
 package reactor
 
 import "core:net"
@@ -25,35 +26,44 @@ Event :: struct {
 }
 
 EventOperation :: enum {
-    // An error occured on the execution of the IO operation.
-    // The downstream may probably want to check this first over other events.
+    // An error occured during the execution or the processing of the IO operation.
+    // The downstream may probably want to check this first before checking other events.
     Error,
-    // Data was read from the client socket and is now available in the `Event`.
+    // Data was read from the client socket and is now available in the `Event.recv_buf`.
     // This always indicates a successful read, an EOF condition is handled with `.Hangup` instead.
     Read,
     Write,
-    // Read hangup or abrupt disconnection
+    // Read hangup or abrupt disconnection.
     Hangup,
-    // This `Event` represents a newly accepted client socket, available in `Event.socket`.
-    // The socket is already registered in this subsystem.
+    // Represents a newly accepted client socket, stored in `Event.socket`. The socket is configured
+    // to be non-blocking and is already registered in this subsystem.
     // This merely acts as a way to notify the downstream, so they may update their internal data structures.
-    NewClient,
+    NewConnection,
 }
 
 IOContext :: _IOContext
 
+// Creates a new `IOContext`, which registers the server socket as a source to accept new incoming clients.
+// Inputs:
+// - `server_sock`: the non-blocking server socket.
 create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (IOContext, bool) {
     return _create_io_context(server_sock, allocator)
 }
 
+// Destroys the given `IOContext`, the passed allocator must be the same as the one used in `create_io_context`.
 destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
     _destroy_io_context(ctx, allocator)
 }
 
+// Registers a client to this subsystem, upon registration `EventOperation.Read` events may immediately
+// be emitted whenever the client sends data. Write completions only occur after calling `submit_write_*` procedures.
 register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
     return _register_client(ctx, client)
 }
 
+// Unregisters a client, making it unable to emit any more events. Any outstanding IO operations that were
+// queued but were not yet executed, will be canceled.
+// Additionally the client socket is also closed, as this is assumed to be called at the end of the connection's lifecylcle.
 unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
     return _unregister_client(ctx, client)
 }
