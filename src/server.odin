@@ -111,7 +111,7 @@ _delete_client_connection :: proc(client_sock: net.TCP_Socket) -> ClientConnecti
 
 @(private="file")
 _setup_server_socket :: proc(endpoint: net.Endpoint) -> (net.TCP_Socket, bool) {
-    sock, net_err := net.listen_tcp(endpoint, backlog=1000)
+    sock, net_err := net.listen_tcp(endpoint, backlog=75)
     if net_err != nil {
         log.errorf("failed to create server socket: %s", net_err)
         return sock, false
