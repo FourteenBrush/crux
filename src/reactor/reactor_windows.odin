@@ -1,6 +1,5 @@
 package reactor
 
-import "core:fmt"
 import "core:os"
 import "core:mem"
 import "core:net"
@@ -8,15 +7,23 @@ import win32 "core:sys/windows"
 
 import "lib:tracy"
 
+foreign import kernel32 "system:Kernel32.lib"
+
+// TODO: change to win32 type after odin release dev-09
+@(default_calling_convention="system")
+foreign kernel32 {
+    CancelIoEx :: proc(hFile: win32.HANDLE, lpOverlapped: win32.LPOVERLAPPED) -> win32.BOOL ---
+}
+
 // only allow one concurrent io worker for now
 @(private="file")
 IOCP_CONCURRENT_THREADS :: 1
 
-// required size to store ipv6 socket addr for AcceptEx calls (see docs)
+// required size to store ipv4 socket addr for AcceptEx calls (see docs)
 @(private="file")
 ADDR_BUF_SIZE :: size_of(win32.sockaddr_in) + 16
 
-// how many bytes of data to receive into the AcceptEx buffer
+// how many bytes of actual data to receive into the AcceptEx buffer
 @(private="file")
 ACCEPTEX_RECEIVE_DATA_LENGTH :: 0
 
@@ -52,9 +59,6 @@ _IOContext :: struct {
 	accept_buf: [ADDR_BUF_SIZE * 2]u8,
 }
 
-// TODO: use net._dial_error()
-
-// TODO: cleanup here on partial failures
 _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (ctx: IOContext, ok: bool) {
     tracy.Zone()
     _lower_timer_resolution()
@@ -68,6 +72,9 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 	if ctx.completion_port == nil {
 	    os.print_error(os.stderr, win32.System_Error(win32.GetLastError()), "failed to create iocp")
 		return ctx, false
+	}
+	defer if !ok {
+	    _ = win32.CloseHandle(ctx.completion_port)
 	}
 
 	ctx.server_sock = win32.SOCKET(server_sock)
@@ -87,6 +94,10 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 	)
 	// TODO: individual frees are not supported, are we slowly leaking memory?
 	ctx.arena_allocator = mem.dynamic_arena_allocator(ctx.arena)
+	defer if !ok {
+	    mem.dynamic_arena_destroy(ctx.arena)
+		free(ctx.arena, allocator)
+	}
 
 	_install_accept_handler(&ctx) or_return
 
@@ -110,8 +121,7 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
     tracy.Zone()
 
-    comp := new(Completion, ctx.arena_allocator)
-    comp.source = ctx.server_sock
+    comp := _alloc_completion(ctx^, .Read, ctx.server_sock, {})
 
 	// socket that AcceptEx will use to bind the accepted client to
 	ctx.accept_sock = _create_accept_client_socket() or_return
@@ -151,9 +161,11 @@ _create_accept_client_socket :: proc() -> (win32.SOCKET, bool) {
 _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 	// NOTE: refcounted, no handles must be associated
 	win32.CloseHandle(ctx.completion_port)
+
 	mem.dynamic_arena_destroy(ctx.arena)
 	free(ctx.arena, allocator)
-	// TODO: some CancelIoEx here
+	// TODO: some CancelIoEx here?
+	// TODO: what happens with accept_sock?
 }
 
 _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
@@ -180,25 +192,22 @@ _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 }
 
 // Initiate async recv call to emit an iocp event whenever data can be read
+@(private="file")
 _install_recv_handler :: proc(ctx: ^IOContext, client: win32.SOCKET) -> bool {
     tracy.Zone()
 
-    // TODO: instead of looking up info via ^OVERLAPPED, pass this ptr in the completion key?
-	data := new(Completion, ctx.arena_allocator)
-	data.source = win32.SOCKET(client)
-	buf := make([]u8, RECV_BUF_SIZE, ctx.arena_allocator)
-	data.buf = win32.WSABUF {
-		u32(len(buf)),
-		raw_data(buf),
-	}
+    buf := make([]u8, RECV_BUF_SIZE, ctx.arena_allocator)
+    wsabuf := win32.WSABUF { u32(len(buf)), raw_data(buf) }
+    comp := _alloc_completion(ctx^, .Read, win32.SOCKET(client), wsabuf)
+
     flags: u32
 	result := win32.WSARecv(
 		win32.SOCKET(client),
-		&data.buf,
+		&comp.buf,
 		1,      /* buffer count */
 		nil,    /* nr of bytes received */
 		&flags,
-		cast(win32.LPWSAOVERLAPPED) &data.overlapped,
+		cast(win32.LPWSAOVERLAPPED) &comp.overlapped,
 		nil,   /* completion routine */
 	)
 	if result != 0 && win32.WSAGetLastError() != i32(win32.ERROR_IO_PENDING) {
@@ -209,6 +218,7 @@ _install_recv_handler :: proc(ctx: ^IOContext, client: win32.SOCKET) -> bool {
 	return true
 }
 
+// Per IO operation associated data
 @(private="file")
 Completion :: struct {
 	op: IOOperation,
@@ -224,8 +234,10 @@ IOOperation :: enum {
 }
 
 _unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
-    // cancel outstanding io operations, outstanding completions will have ERROR_OPERATION_ABORTED set
-    win32.CancelIo(win32.HANDLE(win32.SOCKET(client)))
+    // cancel outstanding io operations, yet to arrive completions will have ERROR_OPERATION_ABORTED set as OVERLAPPED_ENTRY.Internal
+    if !CancelIoEx(win32.HANDLE(win32.SOCKET(client)), nil) {
+        os.print_error(os.stderr, win32.System_Error(win32.GetLastError()), "failed to cancel outstanding io operations")
+    }
     net.close(client)
 	return true
 }
@@ -261,31 +273,37 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 		defer i += 1
 
 		completion: ^Completion = container_of(entry.lpOverlapped, Completion, "overlapped")
-  		events_out[i].socket = net.TCP_Socket(completion.source)
+		event := &events_out[i]
+  		event.socket = net.TCP_Socket(completion.source)
 
         status := entry.Internal
         if status == uint(win32.ERROR_OPERATION_ABORTED) {
-            fmt.println("stale packet")
+            tracy.ZoneN("Stale Completion")
             // incoming completion packet for already unregistered connection, ignore
             i -= 1 // reuse same entry
             nready -= 1
             continue
         } else if status != 0 {
-            fmt.println("error:", status, win32.System_Error(win32.WSAGetLastError()))
-            events_out[i].operations = {.Error}
+            event.operations = {.Error}
 			continue
         }
 
-        events_out[i].nr_of_bytes_affected = int(entry.dwNumberOfBytesTransferred)
+        event.nr_of_bytes_affected = int(entry.dwNumberOfBytesTransferred)
 
 		switch completion.op {
 		case .Read:
 			if completion.source == ctx.server_sock {
-				// TODO: close client on error
-				_accept_client(ctx) or_continue
+			    // newly accepted client stored in io context
+			    accept_success := false
+				defer if !accept_success {
+				    net.close(net.TCP_Socket(ctx.accept_sock))
+				}
+
+				_configure_accepted_client(ctx) or_continue
 				_register_client(ctx, net.TCP_Socket(ctx.accept_sock)) or_continue
-				events_out[i].operations = {.NewClient}
-				events_out[i].socket = net.TCP_Socket(ctx.accept_sock)
+				event.operations = {.NewConnection}
+				event.socket = net.TCP_Socket(ctx.accept_sock)
+				accept_success = true
 
 				// re-arm accept handler
 				// TODO: consider this as being fatal, no more new clients can be accepted..
@@ -294,17 +312,18 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 			}
 
 			if entry.dwNumberOfBytesTransferred == 0 {
-			    events_out[i].operations = {.Hangup}
+			    event.operations = {.Hangup}
 			} else {
-    			events_out[i].operations = {.Read}
-    			events_out[i].recv_buf = mem.slice_ptr(completion.buf.buf, int(entry.dwNumberOfBytesTransferred))
+    			event.operations = {.Read}
+    			event.recv_buf = mem.slice_ptr(completion.buf.buf, int(entry.dwNumberOfBytesTransferred))
 
     			// re-arm recv handler
     			_install_recv_handler(ctx, completion.source) or_continue
 			}
 		case .Write:
-		    events_out[i].operations = {.Write}
-			assert(entry.dwNumberOfBytesTransferred == completion.buf.len)
+		    event.operations = {.Write}
+			// TODO: handle WSASend partial writes
+			assert(entry.dwNumberOfBytesTransferred == completion.buf.len, "TODO: handle partial writes")
 		}
 	}
 
@@ -315,13 +334,8 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 _submit_write_copy :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) -> bool {
     tracy.Zone()
 
-    comp := new(Completion, ctx.arena_allocator)
-    comp.op = .Write
-    comp.source = win32.SOCKET(client)
-    comp.buf = win32.WSABUF {
-        u32(len(data)),
-        raw_data(data),
-    }
+    buf := win32.WSABUF { u32(len(data)), raw_data(data) }
+    comp := _alloc_completion(ctx^, .Write, win32.SOCKET(client), buf)
 
     // this returns WSAENOTSOCK when the socket is already closed
     result := win32.WSASend(
@@ -342,7 +356,7 @@ _submit_write_copy :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) 
 
 // Accepts a new client on the server socket, and stores it in `ctx.accept_sock`.
 @(private="file")
-_accept_client :: proc(ctx: ^IOContext) -> bool {
+_configure_accepted_client :: proc(ctx: ^IOContext) -> bool {
     tracy.Zone()
 
     // parse AcceptEx buffer to find addresses (unused) and unblock socket
@@ -376,6 +390,16 @@ _accept_client :: proc(ctx: ^IOContext) -> bool {
 	    return false
 	}
 	return true
+}
+
+@(private="file")
+_alloc_completion :: proc(ctx: IOContext, op: IOOperation, source: win32.SOCKET, buf: win32.WSABUF) -> ^Completion {
+    comp := new(Completion, ctx.arena_allocator)
+    comp.op = op
+    comp.source = source
+    comp.buf = buf
+
+    return comp
 }
 
 // Changes timer resolution, in order to obtain millisecond precision for the event loop (if possible).
