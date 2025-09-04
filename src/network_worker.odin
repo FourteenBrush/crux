@@ -71,7 +71,7 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
         assert(ok, "failed to await io events") // TODO: proper error handling
 
         for event in events[:nready] {
-            fmt.println(event)
+            fmt.println(event.operations)
 
             if .Error in event.operations {
                 log.warn("client socket error")
@@ -90,7 +90,6 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
             }
             if .Write in event.operations {
                 client_conn := &state.connections[event.socket]
-                // buf_advance_pos_unchecked(&client_conn.tx_buf, event.nr_of_bytes_affected)
 
                 if client_conn.close_after_flushing {
                     log.debug("disconnecting client as requested")
@@ -192,10 +191,9 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
     }
 }
 
-// Unregisters a client from the reactor and shuts down the connection.
+// Unregisters a client and shuts down the connection without transmissing any more data.
 _disconnect_client :: proc(state: ^NetworkWorkerState, client_sock: net.TCP_Socket) {
     // FIXME: probably want to handle error
     reactor.unregister_client(&state.io_ctx, client_sock)
     _delete_client_connection(client_sock)
-    net.close(client_sock)
 }

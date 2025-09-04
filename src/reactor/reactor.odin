@@ -60,8 +60,7 @@ unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 
 // Await IO events for any of the registered clients (excluding the server socket).
 // Inputs:
-// - `timeout_ms`: the waiting timeout in ms, -1 waits indefinitely, 0 means return immediately
-// TODO: handle this timeout correctly for different platforms
+// - `timeout_ms`: the waiting timeout in ms, 0 means return immediately if no events can be awaited.
 await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) -> (n: int, ok: bool) {
     return _await_io_events(ctx, events_out, timeout_ms)
 }

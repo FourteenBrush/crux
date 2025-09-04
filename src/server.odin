@@ -117,7 +117,6 @@ _setup_server_socket :: proc(endpoint: net.Endpoint) -> (net.TCP_Socket, bool) {
         return sock, false
     }
 
-    // TODO: should this be blocking on windows? as we asynchronously use it?
     net_err = net.set_blocking(sock, false)
     if net_err != nil {
         log.errorf("failed to set server socket to non blocking: %s", net_err)
@@ -134,22 +133,11 @@ _setup_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator)
         log.error("failed to create io context")
         return io_ctx, false
     }
-
-    // TODO: remove, reactor handles registering server socket internally
-    // register server sock to io waitset, so we can simply receive events
-    // indicating new clients want to connect, instead of manually calling accept() and such
-    // register_server_ok := reactor.register_client(&io_ctx, server_sock)
-    // if !register_server_ok {
-    //     log.error("failed to register server socket to io context")
-    //     reactor.destroy_io_context(&io_ctx, allocator)
-    //     return io_ctx, false
-    // }
     return io_ctx, true
 }
 
 @(private="file")
 _setup_server :: proc(allocator: mem.Allocator) -> (server: Server, ok: bool) {
-
     server._client_connections_guarded = make(map[net.TCP_Socket]ClientConnection, 8, allocator)
     return server, true
 }
