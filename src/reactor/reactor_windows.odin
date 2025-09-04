@@ -197,13 +197,12 @@ _install_recv_handler :: proc(ctx: ^IOContext, client: win32.SOCKET) -> bool {
     tracy.Zone()
 
     buf := make([]u8, RECV_BUF_SIZE, ctx.arena_allocator)
-    wsabuf := win32.WSABUF { u32(len(buf)), raw_data(buf) }
-    comp := _alloc_completion(ctx^, .Read, win32.SOCKET(client), wsabuf)
+    comp := _alloc_completion(ctx^, .Read, win32.SOCKET(client), buf)
 
     flags: u32
 	result := win32.WSARecv(
 		win32.SOCKET(client),
-		&comp.buf,
+		&win32.WSABUF { u32(len(buf)), raw_data(buf) },
 		1,      /* buffer count */
 		nil,    /* nr of bytes received */
 		&flags,
@@ -223,7 +222,7 @@ _install_recv_handler :: proc(ctx: ^IOContext, client: win32.SOCKET) -> bool {
 Completion :: struct {
 	op: IOOperation,
 	source: win32.SOCKET,
-	buf: win32.WSABUF,
+	buf: []u8, // WSABUF
 	overlapped: win32.OVERLAPPED,
 }
 
@@ -319,7 +318,7 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 			    event.operations = {.Hangup}
 			} else {
     			event.operations = {.Read}
-    			event.recv_buf = mem.slice_ptr(completion.buf.buf, int(entry.dwNumberOfBytesTransferred))
+    			event.recv_buf = completion.buf[:entry.dwNumberOfBytesTransferred]
 
     			// re-arm recv handler
     			_install_recv_handler(ctx, completion.source) or_continue
@@ -327,7 +326,7 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 		case .Write:
 		    event.operations = {.Write}
 			// TODO: handle WSASend partial writes
-			assert(entry.dwNumberOfBytesTransferred == completion.buf.len, "TODO: handle partial writes")
+			assert(int(entry.dwNumberOfBytesTransferred) == len(completion.buf), "TODO: handle partial writes")
 		}
 	}
 
@@ -338,13 +337,12 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 _submit_write_copy :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) -> bool {
     tracy.Zone()
 
-    buf := win32.WSABUF { u32(len(data)), raw_data(data) }
-    comp := _alloc_completion(ctx^, .Write, win32.SOCKET(client), buf)
+    comp := _alloc_completion(ctx^, .Write, win32.SOCKET(client), data)
 
     // this returns WSAENOTSOCK when the socket is already closed
     result := win32.WSASend(
         comp.source,
-        &comp.buf,
+        &win32.WSABUF { u32(len(data)), raw_data(data) },
         1, /* buffer count */
         nil,
         0, /* flags */
@@ -397,7 +395,7 @@ _configure_accepted_client :: proc(ctx: ^IOContext) -> bool {
 }
 
 @(private="file")
-_alloc_completion :: proc(ctx: IOContext, op: IOOperation, source: win32.SOCKET, buf: win32.WSABUF) -> ^Completion {
+_alloc_completion :: proc(ctx: IOContext, op: IOOperation, source: win32.SOCKET, buf: []u8) -> ^Completion {
     comp := new(Completion, ctx.arena_allocator)
     comp.op = op
     comp.source = source
