@@ -1,6 +1,6 @@
 package reactor
 
-import "core:os"
+import "core:log"
 import "core:mem"
 import "core:net"
 import win32 "core:sys/windows"
@@ -70,7 +70,7 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 		IOCP_CONCURRENT_THREADS,
 	)
 	if ctx.completion_port == nil {
-	    os.print_error(os.stderr, win32.System_Error(win32.GetLastError()), "failed to create iocp")
+        _log_error(win32.GetLastError(), "failed to create IO completion port")
 		return ctx, false
 	}
 	defer if !ok {
@@ -82,7 +82,7 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 	_accept_ex_sock_addrs = _load_wsa_fn_ptr(&ctx, win32.WSAID_GETACCEPTEXSOCKADDRS, LPFN_GETACCEPTEXSOCKADDRS)
 
 	if _accept_ex == nil || _accept_ex_sock_addrs == nil {
-        os.print_error(os.stderr, win32.System_Error(win32.WSAGetLastError()), "failed to load WSA function pointers")
+	    _log_error(win32.WSAGetLastError(), "failed to load WSA function pointers")
     	return ctx, false
 	}
 
@@ -109,7 +109,7 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 		IOCP_CONCURRENT_THREADS,
 	)
 	if result != win32.HANDLE(ctx.server_sock) && win32.GetLastError() != win32.ERROR_IO_PENDING {
-	    os.print_error(os.stderr, win32.System_Error(win32.GetLastError()), "failed to register server sock")
+	    _log_error(win32.GetLastError(), "failed to register server socket to completion port")
 	    return
 	}
 
@@ -141,7 +141,7 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 	)
 	// on ERROR_IO_PENDING, the operation was successfully initiated and is still in progress
 	if accept_ok != win32.TRUE && win32.WSAGetLastError() != i32(win32.ERROR_IO_PENDING) {
-        os.print_error(os.stderr, win32.System_Error(win32.WSAGetLastError()), "could not setup accept() handler")
+	    _log_error(win32.WSAGetLastError(), "could not setup accept handler")
 		return false
 	}
 	return true
@@ -152,7 +152,7 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 _create_accept_client_socket :: proc() -> (win32.SOCKET, bool) {
     sock := win32.socket(win32.AF_INET, win32.SOCK_STREAM, 0)
 	if sock == win32.INVALID_SOCKET {
-        os.print_error(os.stderr, win32.System_Error(win32.WSAGetLastError()), "could not preconfigure client socket")
+	    _log_error(win32.WSAGetLastError(), "could not preconfigure client socket")
 		return sock, false
 	}
 	return sock, true
@@ -179,13 +179,13 @@ _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
         IOCP_CONCURRENT_THREADS,
     )
     if register_result != ctx.completion_port {
-        os.print_error(os.stderr, win32.System_Error(win32.GetLastError()), "failed to register client to iocp")
+        _log_error(win32.GetLastError(), "failed to register client to iocp")
         return false
     }
 
     // don't bother setting up OVERLAPPED.hEvent, we are using iocp for notifications, not WaitForSingleObject and related logic
     if !win32.SetFileCompletionNotificationModes(handle, win32.FILE_SKIP_SET_EVENT_ON_HANDLE) {
-        os.print_error(os.stderr, win32.System_Error(win32.GetLastError()), "failed to set FILE_SKIP_SET_EVENT bit")
+        _log_error(win32.GetLastError(), "failed to set FILE_SKIP_SET_EVENT bit")
     }
 
     return _install_recv_handler(ctx, win32.SOCKET(client))
@@ -211,7 +211,7 @@ _install_recv_handler :: proc(ctx: ^IOContext, client: win32.SOCKET) -> bool {
 		nil,   /* completion routine */
 	)
 	if result != 0 && win32.WSAGetLastError() != i32(win32.ERROR_IO_PENDING) {
-	    os.print_error(os.stderr, win32.System_Error(win32.WSAGetLastError()), "failed to initiate WSARecv")
+	    _log_error(win32.WSAGetLastError(), "failed to initiate WSARecv")
 		return false
 	}
 
@@ -234,9 +234,13 @@ IOOperation :: enum {
 }
 
 _unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
-    // cancel outstanding io operations, yet to arrive completions will have ERROR_OPERATION_ABORTED set as OVERLAPPED_ENTRY.Internal
-    if !CancelIoEx(win32.HANDLE(win32.SOCKET(client)), nil) {
-        os.print_error(os.stderr, win32.System_Error(win32.GetLastError()), "failed to cancel outstanding io operations")
+    // cancel outstanding io operations, yet to arrive completions will have a ERROR_OPERATION_ABORTED status.
+    // this is the only way to unregister clients, there is no real "iocp unregister" procedure
+    ok := CancelIoEx(win32.HANDLE(win32.SOCKET(client)), /*cancel all*/ nil)
+
+    // TODO: replace with proper ERROR_ constant after it's defined in win32 pkg
+    if !ok && win32.GetLastError() != win32.DWORD(win32.System_Error.NOT_FOUND) {
+        _log_error(win32.GetLastError(), "failed to cancel outstanding io operations")
     }
     net.close(client)
 	return true
@@ -262,7 +266,7 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
     	)
     	// instead of returning TRUE, 0, WAIT_TIMEOUT is being set
     	if result == win32.FALSE && win32.GetLastError() != win32.WAIT_TIMEOUT {
-    	    os.print_error(os.stderr, win32.System_Error(win32.GetLastError()), "queuing completion entries failed")
+            _log_error(win32.GetLastError(), "failed to queue completion entries")
     		return
     	}
 	}
@@ -348,7 +352,7 @@ _submit_write_copy :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) 
         nil, /* completion routine */
     )
     if result != 0 && win32.WSAGetLastError() != i32(win32.ERROR_IO_PENDING) {
-        os.print_error(os.stderr, win32.System_Error(win32.WSAGetLastError()), "failed to initiate WSASend")
+        _log_error(win32.WSAGetLastError(), "failed to initiate WSASend")
         return false
     }
     return true
@@ -436,4 +440,9 @@ _load_wsa_fn_ptr :: proc(ctx: ^IOContext, guid: win32.GUID, $Sig: typeid) -> (fn
     }
     assert(nbytes == size_of(fn_ptr))
     return
+}
+
+@(private="file")
+_log_error :: proc(#any_int err: win32.DWORD, message: string) {
+    log.logf(ERROR_LOG_LEVEL, "%s: %s", message, win32.System_Error(err))
 }

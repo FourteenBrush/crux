@@ -71,13 +71,15 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
         assert(ok, "failed to await io events") // TODO: proper error handling
 
         for event in events[:nready] {
-            fmt.println(event.operations)
-
             if .Error in event.operations {
                 log.warn("client socket error")
                 _disconnect_client(&state, event.socket)
                 continue
             } else if .Hangup in event.operations {
+                // NOTE: we may have already disconnected a client, when the next iteration of events
+                // returns a .Hangup because the peer did the same thing, where we disconnect again, with a stale socket
+                if event.socket not_in state.connections do continue
+
                 log.warn("client socket hangup")
                 _disconnect_client(&state, event.socket)
                 continue
@@ -96,7 +98,7 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
                     _disconnect_client(&state, client_conn.socket)
                 }
             }
-            if .NewClient in event.operations {
+            if .NewConnection in event.operations {
                 state.connections[event.socket] = ClientConnection {
                     socket = event.socket,
                     state  = .Handshake,
@@ -196,4 +198,5 @@ _disconnect_client :: proc(state: ^NetworkWorkerState, client_sock: net.TCP_Sock
     // FIXME: probably want to handle error
     reactor.unregister_client(&state.io_ctx, client_sock)
     _delete_client_connection(client_sock)
+    delete_key(&state.connections, client_sock)
 }

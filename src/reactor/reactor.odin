@@ -5,9 +5,15 @@ package reactor
 
 import "core:net"
 import "core:mem"
+import "core:log"
 
 @(private)
 RECV_BUF_SIZE :: 2048
+
+// The log level used for error logs produced by the `IOContext`, specified in this package
+// to avoid circular import errors. Should be closely kept in sync with other custom log levels.
+// This log level will be used in conjunction with `context.logger`.
+ERROR_LOG_LEVEL :: log.Level(9)
 
 // Event emitted by polling the IOContext.
 Event :: struct {
@@ -46,6 +52,7 @@ IOContext :: _IOContext
 // Creates a new `IOContext`, which registers the server socket as a source to accept new incoming clients.
 // Inputs:
 // - `server_sock`: the non-blocking server socket.
+// Will use `context.logger` to log error messages.
 create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (IOContext, bool) {
     return _create_io_context(server_sock, allocator)
 }
@@ -64,6 +71,7 @@ register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 // Unregisters a client, making it unable to emit any more events. Any outstanding IO operations that were
 // queued but were not yet executed, will be canceled.
 // Additionally the client socket is also closed, as this is assumed to be called at the end of the connection's lifecylcle.
+// Must not be called twice for the same client.
 unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
     return _unregister_client(ctx, client)
 }

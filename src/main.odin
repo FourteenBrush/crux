@@ -7,10 +7,12 @@ import "core:mem"
 import "core:sync"
 import "core:time"
 import "core:c/libc"
+import "base:runtime"
 import "core:prof/spall"
 import "core:encoding/uuid"
 
-import "base:runtime"
+
+import "src:reactor"
 
 import "lib:back"
 import "lib:tracy"
@@ -24,8 +26,9 @@ _ :: runtime
 CRUX_PROFILE :: #config(CRUX_PROFILE, false)
 
 // log levels for logging packet transfer, these values are bigger than .Debug (1)
-@(private) LOG_LEVEL_INBOUND :: log.Level(8)
-@(private) LOG_LEVEL_OUTBOUND :: log.Level(9)
+@(private) LOG_LEVEL_INBOUND :: log.Level(7)
+@(private) LOG_LEVEL_OUTBOUND :: log.Level(8)
+@(private) LOG_LEVEL_REACTOR_ERROR :: reactor.ERROR_LOG_LEVEL
 
 @(private="file")
 g_continue_running := true
@@ -89,11 +92,13 @@ main :: proc() {
     back.register_segfault_handler()
 
     log_opts := log.Options {.Level, .Terminal_Color}
-    // remove "---" and spacing inside []
+
+    // define log levels in order of importance
     log.Level_Headers = {
-         0..<7  = "[DEBUG] ",
+         0..<6  = "[DEBUG] ",
         LOG_LEVEL_INBOUND  = "[INB]   ",
         LOG_LEVEL_OUTBOUND = "[OUTB]  ",
+        LOG_LEVEL_REACTOR_ERROR = "[IO]    ",
     	10..<20 = "[INFO]  ",
     	20..<30 = "[WARN]  ",
     	30..<40 = "[ERROR] ",
