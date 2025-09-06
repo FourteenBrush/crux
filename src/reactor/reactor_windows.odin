@@ -13,6 +13,7 @@ foreign import kernel32 "system:Kernel32.lib"
 @(default_calling_convention="system")
 foreign kernel32 {
     CancelIoEx :: proc(hFile: win32.HANDLE, lpOverlapped: win32.LPOVERLAPPED) -> win32.BOOL ---
+    RtlNtStatusToDosError :: proc(status: win32.NTSTATUS) -> win32.ULONG ---
 }
 
 // only allow one concurrent io worker for now
@@ -188,12 +189,12 @@ _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
         _log_error(win32.GetLastError(), "failed to set FILE_SKIP_SET_EVENT bit")
     }
 
-    return _install_recv_handler(ctx, win32.SOCKET(client))
+    return _initiate_recv(ctx, win32.SOCKET(client))
 }
 
 // Initiate async recv call to emit an iocp event whenever data can be read
 @(private="file")
-_install_recv_handler :: proc(ctx: ^IOContext, client: win32.SOCKET) -> bool {
+_initiate_recv :: proc(ctx: ^IOContext, client: win32.SOCKET) -> bool {
     tracy.Zone()
 
     buf := make([]u8, RECV_BUF_SIZE, ctx.arena_allocator)
@@ -220,14 +221,16 @@ _install_recv_handler :: proc(ctx: ^IOContext, client: win32.SOCKET) -> bool {
 // Per IO operation associated data
 @(private="file")
 Completion :: struct {
-	op: IOOperation,
+    op: IOOperation,
 	source: win32.SOCKET,
 	buf: []u8, // WSABUF
+	// TODO: store partial write offset next to complete buf (or we cannot deallocate it anymore)
+	partial_write_off: u32,
 	overlapped: win32.OVERLAPPED,
 }
 
 @(private="file")
-IOOperation :: enum {
+IOOperation :: enum u8 {
 	Read,
 	Write,
 }
@@ -279,14 +282,16 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 		event := &events_out[i]
   		event.socket = net.TCP_Socket(completion.source)
 
-        status := entry.Internal
-        if status == uint(win32.ERROR_OPERATION_ABORTED) {
+        // map NTSTATUS to win32 error
+        status := RtlNtStatusToDosError(i32(entry.Internal))
+        if status == u32(win32.ERROR_OPERATION_ABORTED) {
             tracy.ZoneN("Stale Completion")
             // incoming completion packet for already unregistered connection, ignore
             i -= 1 // reuse same entry
             nready -= 1
             continue
         } else if status != 0 {
+            _log_error(status, "completion entry failed with error")
             event.operations = {.Error}
 			continue
         }
@@ -321,9 +326,17 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
     			event.recv_buf = completion.buf[:entry.dwNumberOfBytesTransferred]
 
     			// re-arm recv handler
-    			_install_recv_handler(ctx, completion.source) or_continue
+    			_initiate_recv(ctx, completion.source) or_continue
 			}
 		case .Write:
+		    partial_write := int(entry.dwNumberOfBytesTransferred) != len(completion.buf)
+			if partial_write {
+			    // ignore this entry, query another send with the remaining part of the buffer
+				// TODO: reuse completion
+				completion.partial_write_off = entry.dwNumberOfBytesTransferred
+				// TODO: do not realloc new comp internally here
+				_initiate_send(ctx, completion.source, completion.buf[entry.dwNumberOfBytesTransferred:])
+			}
 		    event.operations = {.Write}
 			// TODO: handle WSASend partial writes
 			assert(int(entry.dwNumberOfBytesTransferred) == len(completion.buf), "TODO: handle partial writes")
@@ -337,7 +350,12 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 _submit_write_copy :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) -> bool {
     tracy.Zone()
 
-    comp := _alloc_completion(ctx^, .Write, win32.SOCKET(client), data)
+    return _initiate_send(ctx, win32.SOCKET(client), data)
+}
+
+@(private="file")
+_initiate_send :: proc(ctx: ^IOContext, client: win32.SOCKET, data: []u8) -> bool {
+    comp := _alloc_completion(ctx^, .Write, client, data)
 
     // this returns WSAENOTSOCK when the socket is already closed
     result := win32.WSASend(
@@ -389,6 +407,9 @@ _configure_accepted_client :: proc(ctx: ^IOContext) -> bool {
 	}
 
 	if net.set_blocking(net.TCP_Socket(ctx.accept_sock), false) != .None {
+	    return false
+	}
+	if net.set_option(net.TCP_Socket(ctx.accept_sock), .TCP_Nodelay, true) != .None {
 	    return false
 	}
 	return true
