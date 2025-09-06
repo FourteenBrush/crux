@@ -1,5 +1,6 @@
 package reactor
 
+import "core:thread"
 import "core:log"
 import "core:mem"
 import "core:net"
@@ -223,8 +224,11 @@ _initiate_recv :: proc(ctx: ^IOContext, client: win32.SOCKET) -> bool {
 Completion :: struct {
     op: IOOperation,
 	source: win32.SOCKET,
-	buf: []u8, // WSABUF
-	// TODO: store partial write offset next to complete buf (or we cannot deallocate it anymore)
+	// buffer for written or received data
+	buf: []u8,
+	// slice offset into `buf`, which indicates actual data to pass to sends.
+	// This is used in situations where we send another completion which contains the
+	// remaining bytes of a partial send. We must also store the whole buffer to avoid leaking it.
 	partial_write_off: u32,
 	overlapped: win32.OVERLAPPED,
 }
@@ -332,14 +336,17 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 		    partial_write := int(entry.dwNumberOfBytesTransferred) != len(completion.buf)
 			if partial_write {
 			    // ignore this entry, query another send with the remaining part of the buffer
-				// TODO: reuse completion
-				completion.partial_write_off = entry.dwNumberOfBytesTransferred
-				// TODO: do not realloc new comp internally here
-				_initiate_send(ctx, completion.source, completion.buf[entry.dwNumberOfBytesTransferred:])
+				i -= 1
+				nready -= 1
+
+				// in case this is not the first partial write for this buffer
+				partial_write_off := completion.partial_write_off + entry.dwNumberOfBytesTransferred
+				_initiate_send(ctx, completion.source, completion.buf, partial_write_off=partial_write_off) or_continue
+				continue
 			}
+
 		    event.operations = {.Write}
-			// TODO: handle WSASend partial writes
-			assert(int(entry.dwNumberOfBytesTransferred) == len(completion.buf), "TODO: handle partial writes")
+			assert(int(entry.dwNumberOfBytesTransferred) == len(completion.buf), "partial writes should be handled above")
 		}
 	}
 
@@ -354,9 +361,12 @@ _submit_write_copy :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) 
 }
 
 @(private="file")
-_initiate_send :: proc(ctx: ^IOContext, client: win32.SOCKET, data: []u8) -> bool {
+_initiate_send :: proc(ctx: ^IOContext, client: win32.SOCKET, data: []u8, partial_write_off: u32 = 0) -> bool {
     comp := _alloc_completion(ctx^, .Write, client, data)
+    comp.partial_write_off = partial_write_off
 
+    // handle potential partial writes, send this buffer while we keep storing the original in order to free it later
+    data := data[partial_write_off:]
     // this returns WSAENOTSOCK when the socket is already closed
     result := win32.WSASend(
         comp.source,
