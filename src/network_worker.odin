@@ -2,7 +2,6 @@
 // IO on client sockets, (de)serialization and transmission of packets.
 package crux
 
-import "core:fmt"
 import "core:time"
 import "core:log"
 import "core:mem"
@@ -71,13 +70,14 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
         assert(ok, "failed to await io events") // TODO: proper error handling
 
         for event in events[:nready] {
+            // TODO: handle cases here where stale events arrive after disconnect was already issued
+
             if .Error in event.operations {
                 log.warn("client socket error")
                 _disconnect_client(&state, event.socket)
                 continue
             } else if .Hangup in event.operations {
-                // NOTE: we may have already disconnected a client, when the next iteration of events
-                // returns a .Hangup because the peer did the same thing, where we disconnect again, with a stale socket
+                // NOTE: avoid disconnecting twice because of peer shutdown caused by closing our socket end
                 if event.socket not_in state.connections do continue
 
                 log.warn("client socket hangup")

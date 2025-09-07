@@ -127,7 +127,7 @@ main :: proc() {
     tracy.SetThreadName("main")
 
     // TODO
-    args, ok := parse_cli_args(allocator)
+    // args, ok := parse_cli_args(allocator)
 
     exit_success = true
     exit_success = run(allocator, execution_permit=&g_continue_running)
