@@ -35,7 +35,8 @@ run: debug
 	./$(BUILD_DIR)/$(PROG)
 
 profile: CFLAGS += -define:TRACY_ENABLE=true
-profile: run
+profile: release
+	./$(BUILD_DIR)/$(PROG)
 
 check: CFLAGS := $(filter-out -out:$(BUILD_DIR)/$(PROG),$(CFLAGS))
 check: $(SOURCE_FILES)
