@@ -9,12 +9,9 @@ CliArgs :: struct {
     endpoint: string,
 }
 
-@(init, private)
-cli_init :: proc() {
-    flags.register_flag_checker(endpoint_flag_checker)
-}
-
 parse_cli_args :: proc(allocator := context.allocator) -> (CliArgs, bool) {
+    flags.register_flag_checker(endpoint_flag_checker)
+
     args: CliArgs
     if err := flags.parse(&args, os.args[1:], allocator=allocator); err != nil {
         log.error("failed to parse command line:", err)
