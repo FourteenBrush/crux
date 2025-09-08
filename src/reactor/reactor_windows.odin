@@ -1,6 +1,6 @@
 package reactor
 
-import "core:thread"
+import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:net"
@@ -11,7 +11,7 @@ import "lib:tracy"
 foreign import kernel32 "system:Kernel32.lib"
 
 // TODO: change to win32 type after odin release dev-09
-@(default_calling_convention="system")
+@(default_calling_convention="system", private="file")
 foreign kernel32 {
     CancelIoEx :: proc(hFile: win32.HANDLE, lpOverlapped: win32.LPOVERLAPPED) -> win32.BOOL ---
     RtlNtStatusToDosError :: proc(status: win32.NTSTATUS) -> win32.ULONG ---
@@ -49,6 +49,7 @@ _accept_ex := win32.LPFN_ACCEPTEX(nil)
 @(private="file")
 _accept_ex_sock_addrs := LPFN_GETACCEPTEXSOCKADDRS(nil)
 
+@(private)
 _IOContext :: struct {
 	completion_port: win32.HANDLE,
 	server_sock: win32.SOCKET,
@@ -61,8 +62,16 @@ _IOContext :: struct {
 	accept_buf: [ADDR_BUF_SIZE * 2]u8,
 }
 
+@(private)
 _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (ctx: IOContext, ok: bool) {
     tracy.Zone()
+
+    listening_end, sockname_err := net.bound_endpoint(server_sock)
+    if sockname_err != .None {
+        _log_error(win32.WSAGetLastError(), "failed to query endpoint associated to server socket")
+        return ctx, false
+    }
+    assert(listening_end != {}, "received a server socket which is not listening")
     _lower_timer_resolution()
 
     ctx.completion_port = win32.CreateIoCompletionPort(
@@ -160,6 +169,7 @@ _create_accept_client_socket :: proc() -> (win32.SOCKET, bool) {
 	return sock, true
 }
 
+@(private)
 _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 	// NOTE: refcounted, no handles must be associated
 	win32.CloseHandle(ctx.completion_port)
@@ -170,6 +180,7 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 	// TODO: what happens with accept_sock?
 }
 
+@(private)
 _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
     tracy.Zone()
     handle := win32.HANDLE(uintptr(client))
@@ -198,7 +209,11 @@ _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 _initiate_recv :: proc(ctx: ^IOContext, client: win32.SOCKET) -> bool {
     tracy.Zone()
 
-    buf := make([]u8, RECV_BUF_SIZE, ctx.arena_allocator)
+    buf: []u8
+    {
+        tracy.ZoneN("ALLOC RECV")
+        buf = make([]u8, RECV_BUF_SIZE, ctx.arena_allocator)
+    }
     comp := _alloc_completion(ctx^, .Read, win32.SOCKET(client), buf)
 
     flags: u32
@@ -225,7 +240,7 @@ Completion :: struct {
     op: IOOperation,
 	source: win32.SOCKET,
 	// buffer for written or received data
-	buf: []u8,
+	buf: []u8 `fmt:"-"`,
 	// slice offset into `buf`, which indicates actual data to pass to sends.
 	// This is used in situations where we send another completion which contains the
 	// remaining bytes of a partial send. We must also store the whole buffer to avoid leaking it.
@@ -233,12 +248,14 @@ Completion :: struct {
 	overlapped: win32.OVERLAPPED,
 }
 
+// IO operation from the point of view of the server.
 @(private="file")
 IOOperation :: enum u8 {
 	Read,
 	Write,
 }
 
+@(private)
 _unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
     // cancel outstanding io operations, yet to arrive completions will have a ERROR_OPERATION_ABORTED status.
     // this is the only way to unregister clients, there is no real "iocp unregister" procedure
@@ -253,6 +270,7 @@ _unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 }
 
 // NOTE: instead of batching events, every emitted event represents one io operation
+@(private)
 _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) -> (n: int, ok: bool) {
     tracy.Zone()
 	completion_entries := make([]win32.OVERLAPPED_ENTRY, len(events_out), context.temp_allocator)
@@ -262,6 +280,7 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 	    tracy.ZoneN("GetQueuedCompletionStatusEx")
 
     	// we could in theory also do this with event handles or APCs
+        // NOTE: nothing is guaranteed in terms of order
     	result := win32.GetQueuedCompletionStatusEx(
     		ctx.completion_port,
     		raw_data(completion_entries),
@@ -285,6 +304,7 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 		completion: ^Completion = container_of(entry.lpOverlapped, Completion, "overlapped")
 		event := &events_out[i]
   		event.socket = net.TCP_Socket(completion.source)
+        fmt.println(completion)
 
         // map NTSTATUS to win32 error
         status := RtlNtStatusToDosError(i32(entry.Internal))
@@ -354,6 +374,7 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 }
 
 // TODO: don't actually flush on every call
+@(private)
 _submit_write_copy :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) -> bool {
     tracy.Zone()
 

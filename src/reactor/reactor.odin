@@ -26,7 +26,7 @@ Event :: struct {
     operations: bit_set[EventOperation],
 
     // The buffer where received data is stored in, only applicable to a read operations.
-    recv_buf: []u8,
+    recv_buf: []u8 `fmt:"-"`,
     // The number of bytes affected in the io operation, only used for read and write operations.
     nr_of_bytes_affected: int,
 }
@@ -40,6 +40,7 @@ EventOperation :: enum {
     Read,
     Write,
     // Read hangup or abrupt disconnection.
+    // The associated socket in the event cannot be used for IO anymore.
     Hangup,
     // Represents a newly accepted client socket, stored in `Event.socket`. The socket is configured
     // to be non-blocking and is already registered in this subsystem.
@@ -51,7 +52,7 @@ IOContext :: _IOContext
 
 // Creates a new `IOContext`, which registers the server socket as a source to accept new incoming clients.
 // Inputs:
-// - `server_sock`: the non-blocking server socket.
+// - `server_sock`: the non-blocking server socket that is already listening.
 // Will use `context.logger` to log error messages.
 create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (IOContext, bool) {
     return _create_io_context(server_sock, allocator)
@@ -68,15 +69,17 @@ register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
     return _register_client(ctx, client)
 }
 
-// Unregisters a client, making it unable to emit any more events. Any outstanding IO operations that were
-// queued but were not yet executed, will be canceled.
-// Additionally the client socket is also closed, as this is assumed to be called at the end of the connection's lifecylcle.
-// Must not be called twice for the same client.
+// Unregisters a client from the IO context, after this call, the client will no longer produce new events.
+// Any pending IO operations will be canceled, buf events that were already
+// queued in the system's internal buffers before cancellation, may still be delivered.
+// As a result, some events might still be delived after unregistering, even though
+// no new IO operations were issued. The application should safeguard against this behaviour.
 unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
     return _unregister_client(ctx, client)
 }
 
 // Await IO events for any of the registered clients (excluding the server socket).
+// This function returns when either `timeout_ms` has elapsed, or at least one event has been awaited.
 // Inputs:
 // - `timeout_ms`: the waiting timeout in ms, 0 means return immediately if no events can be awaited.
 await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) -> (n: int, ok: bool) {
