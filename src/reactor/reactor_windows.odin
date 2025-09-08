@@ -1,6 +1,5 @@
 package reactor
 
-import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:net"
@@ -304,7 +303,6 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 		completion: ^Completion = container_of(entry.lpOverlapped, Completion, "overlapped")
 		event := &events_out[i]
   		event.socket = net.TCP_Socket(completion.source)
-        fmt.println(completion)
 
         // map NTSTATUS to win32 error
         status := RtlNtStatusToDosError(i32(entry.Internal))
@@ -426,7 +424,8 @@ _configure_accepted_client :: proc(ctx: ^IOContext) -> bool {
 		&remote_addr_len,
 	)
 
-	// accepted socket is in the default state, update it
+	// accepted socket is in the default state, update it to make
+	// setsockopt among other functions work
 	result := win32.setsockopt(
 		ctx.accept_sock,
         win32.SOL_SOCKET,
