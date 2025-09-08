@@ -70,6 +70,7 @@ run :: proc(threadsafe_alloc: mem.Allocator, execution_permit: ^bool) -> bool {
         start := time.tick_now()
 
         for packet in chan.try_recv(g_server.packet_receiver) {
+            _ = packet
             // log.warn("MAIN THREAD:", packet)
         }
         // work...
@@ -153,6 +154,7 @@ ClientConnection :: struct {
     // Non blocking socket
     socket: net.TCP_Socket,
     state: ClientState,
+
     // Whether this connection needs to be closed after flushing all packets
     close_after_flushing: bool,
     rx_buf: NetworkBuffer,
@@ -169,7 +171,7 @@ ClientState :: enum VarInt {
 }
 
 // Logs a fatal condition, which we cannot recover from.
-// This proc always returns false, for the sake of `return fatal("aa")`
+// This proc always returns false, for the sake of `return fatal("message")`
 @(require_results, private)
 fatal :: proc(args: ..any, loc := #caller_location) -> bool {
     log.fatal(..args, location=loc)
