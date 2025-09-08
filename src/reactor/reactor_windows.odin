@@ -28,25 +28,11 @@ ADDR_BUF_SIZE :: size_of(win32.sockaddr_in) + 16
 @(private="file")
 ACCEPTEX_RECEIVE_DATA_LENGTH :: 0
 
-// fn ptr signature for `GetAcceptExSockaddrs`
-// TODO: change to win32 type after tagged odin release dev-09
-@(private="file")
-LPFN_GETACCEPTEXSOCKADDRS :: #type proc "system" (
-	lpOutputBuffer:        win32.PVOID,
-	dwReceiveDataLength:   win32.DWORD,
-	dwLocalAddressLength:  win32.DWORD,
-	dwRemoteAddressLength: win32.DWORD,
-	LocalSockaddr:         ^^win32.sockaddr,
-	LocalSockaddrLength:   win32.LPINT,
-	RemoteSockaddr:        ^^win32.sockaddr,
-	RemoteSockaddrLength:  win32.LPINT,
-)
-
 // both dynamically loaded by an WsaIoctl call
 @(private="file")
 _accept_ex := win32.LPFN_ACCEPTEX(nil)
 @(private="file")
-_accept_ex_sock_addrs := LPFN_GETACCEPTEXSOCKADDRS(nil)
+_accept_ex_sock_addrs := win32.LPFN_GETACCEPTEXSOCKADDRS(nil)
 
 @(private)
 _IOContext :: struct {
@@ -64,13 +50,6 @@ _IOContext :: struct {
 @(private)
 _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (ctx: IOContext, ok: bool) {
     tracy.Zone()
-
-    listening_end, sockname_err := net.bound_endpoint(server_sock)
-    if sockname_err != .None {
-        _log_error(win32.WSAGetLastError(), "failed to query endpoint associated to server socket")
-        return ctx, false
-    }
-    assert(listening_end != {}, "received a server socket which is not listening")
     _lower_timer_resolution()
 
     ctx.completion_port = win32.CreateIoCompletionPort(
@@ -89,7 +68,7 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 
 	ctx.server_sock = win32.SOCKET(server_sock)
 	_accept_ex = _load_wsa_fn_ptr(&ctx, win32.WSAID_ACCEPTEX, win32.LPFN_ACCEPTEX)
-	_accept_ex_sock_addrs = _load_wsa_fn_ptr(&ctx, win32.WSAID_GETACCEPTEXSOCKADDRS, LPFN_GETACCEPTEXSOCKADDRS)
+	_accept_ex_sock_addrs = _load_wsa_fn_ptr(&ctx, win32.WSAID_GETACCEPTEXSOCKADDRS, win32.LPFN_GETACCEPTEXSOCKADDRS)
 
 	if _accept_ex == nil || _accept_ex_sock_addrs == nil {
 	    _log_error(win32.WSAGetLastError(), "failed to load WSA function pointers")
