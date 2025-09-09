@@ -35,7 +35,7 @@ NetworkWorkerState :: struct {
 }
 
 _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
-    tracy.SetThreadName("crux-Networker")
+    tracy.SetThreadName("crux-NetWorker")
     state := NetworkWorkerState {
         shared = shared^,
         connections = make(map[net.TCP_Socket]ClientConnection, shared.threadsafe_alloc),
@@ -43,7 +43,7 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
 
     defer cleanup: {
         log.debug("shutting down worker")
-        delete(state.connections)
+        _network_worker_atexit(&state)
         // destroy temp alloc when this refers to the default one (thread_local)
         if context.temp_allocator.data == &runtime.global_default_temp_allocator_data {
             runtime.default_temp_allocator_destroy(&runtime.global_default_temp_allocator_data)
@@ -70,29 +70,28 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
         assert(ok, "failed to await io events") // TODO: proper error handling
 
         for event in events[:nready] {
-            // TODO: handle cases here where stale events arrive after disconnect was already issued
+            client_conn := &state.connections[event.socket]
+            if client_conn == nil && .NewConnection not_in event.operations {
+                // stale event arrived after a disconnect was issued (peer hangup confirmation or io completion
+                // that could not be canceled in time)
+                continue
+            }
 
             if .Error in event.operations {
                 log.warn("client socket error")
                 _disconnect_client(&state, event.socket)
                 continue
             } else if .Hangup in event.operations {
-                // NOTE: avoid disconnecting twice because of peer shutdown caused by closing our socket end
-                if event.socket not_in state.connections do continue
-
                 log.warn("client socket hangup")
                 _disconnect_client(&state, event.socket)
                 continue
             }
 
             if .Read in event.operations {
-                client_conn := &state.connections[event.socket]
                 buf_write_bytes(&client_conn.rx_buf, event.recv_buf)
                 _drain_serverbound_packets(&state, client_conn, state.threadsafe_alloc)
             }
             if .Write in event.operations {
-                client_conn := &state.connections[event.socket]
-
                 if client_conn.close_after_flushing {
                     log.debug("disconnecting client as requested")
                     _disconnect_client(&state, client_conn.socket)
@@ -110,6 +109,15 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
             }
         }
     }
+}
+
+@(private="file")
+_network_worker_atexit :: proc(state: ^NetworkWorkerState) {
+    for socket in state.connections {
+        _disconnect_client(state, socket)
+    }
+    delete(state.connections)
+    reactor.destroy_io_context(&state.io_ctx, state.threadsafe_alloc)
 }
 
 _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection, packet_alloc: mem.Allocator) {
@@ -200,6 +208,7 @@ _disconnect_client :: proc(state: ^NetworkWorkerState, client_sock: net.TCP_Sock
     // FIXME: probably want to handle error
     reactor.unregister_client(&state.io_ctx, client_sock)
     _delete_client_connection(client_sock)
+
     _, client_conn := delete_key(&state.connections, client_sock)
     destroy_network_buf(client_conn.tx_buf)
     destroy_network_buf(client_conn.rx_buf)

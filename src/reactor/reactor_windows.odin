@@ -258,7 +258,8 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 	    tracy.ZoneN("GetQueuedCompletionStatusEx")
 
     	// we could in theory also do this with event handles or APCs
-        // NOTE: nothing is guaranteed in terms of order
+        // NOTE: nothing is guaranteed in terms of order, but we only have one concurrent read for each socket,
+        // and potentially multiple writes, so this does not seem to be an issue
     	result := win32.GetQueuedCompletionStatusEx(
     		ctx.completion_port,
     		raw_data(completion_entries),

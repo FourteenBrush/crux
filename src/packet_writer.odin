@@ -12,7 +12,8 @@ enqueue_packet :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnectio
     log.log(LOG_LEVEL_OUTBOUND, "Sending packet", packet)
     _serialize_clientbound(packet, &client_conn.tx_buf, allocator=allocator)
 
-    outb := make([]u8, buf_length(client_conn.tx_buf), context.temp_allocator)
+    // TODO: figure out when to free this
+    outb := make([]u8, buf_length(client_conn.tx_buf), allocator)
     read_err := buf_copy_into(&client_conn.tx_buf, outb)
     assert(read_err == .None, "invariant, copied full length")
 

@@ -23,7 +23,7 @@ length_and_offset_correctness :: proc(t: ^testing.T) {
     using crux
     buf := scoped_create_network_buf()
     data := random_block(50)
-    
+
     buf_write_bytes(&buf, data[:])
     expect_buf_state(t, buf, length=len(data), r_offset=0)
     expect_same_retrieval(t, &buf, &data)
@@ -34,7 +34,7 @@ packed_reads_zero_offset :: proc(t: ^testing.T) {
     using crux
     buf := scoped_create_network_buf()
     data := random_block(50)
-    
+
     buf_write_bytes(&buf, data[:])
     expect_same_retrieval(t, &buf, &data)
 }
@@ -63,7 +63,7 @@ read_zero_bytes :: proc(t: ^testing.T) {
     using crux
     buf := scoped_create_network_buf()
     outb: [0]u8
-    
+
     err := buf_read_bytes(&buf, outb[:])
     testing.expect_value(t, err, ReadError.None)
 }
@@ -73,7 +73,7 @@ growth :: proc(t: ^testing.T) {
     using crux
     buf := scoped_create_network_buf(cap=5)
     data := random_block(50)
-    
+
     buf_write_bytes(&buf, data[:])
     expect_buf_state(t, buf, length=len(data), capacity=50, r_offset=0)
 }
@@ -126,7 +126,7 @@ write_var_ints :: proc(t: ^testing.T) {
         { VarInt(-255), {0x81, 0xFE, 0xFF, 0xFF, 0xF} },
         { VarInt(-1024), {0x80, 0xF8, 0xFF, 0xFF, 0x0F} },
     }
-    
+
     for test in test_cases {
         buf := scoped_create_network_buf()
         buf_write_var_int(&buf, test.input)
@@ -145,7 +145,7 @@ read_var_ints :: proc(t: ^testing.T) {
         {bytes = {0xff, 0x01}, expected = VarInt(255)},
         {bytes = {0xdd, 0xc7, 0x01}, expected = VarInt(25565)},
         {bytes = {0xff, 0xff, 0x7f}, expected = VarInt(2097151)},
-        
+
         {bytes = {0x00}, expected = VarInt(0)},
         {bytes = {0x00, 0x00, 0x00}, expected = VarInt(0)},
         {bytes = {0x01}, expected = VarInt(1)},
@@ -245,10 +245,10 @@ prepend_var_int_2bytes_empty :: proc(t: ^testing.T) {
     buf := scoped_create_network_buf(cap=4)
     wmark := buf_emit_write_mark(buf)
     werr := buf_write_var_int_at(&buf, wmark, VarInt(128) /* 0x80 0x01 */)
-    
+
     testing.expect_value(t, werr, WriteError.None)
     expect_buf_state(t, buf, length=2, r_offset=0, raw_data=[]u8{ 0x80, 0x01 })
-    
+
     expect_read_result(
         t, buf_read_var_int(&buf),
         VarInt(128), .None,
@@ -263,7 +263,7 @@ prepend_var_int_3bytes_filling_cap :: proc(t: ^testing.T) {
     buf := scoped_create_network_buf(cap=3)
     wmark := buf_emit_write_mark(buf)
     werr := buf_write_var_int_at(&buf, wmark, VarInt(25565) /* 0xDD 0xC7 0x01 */)
-    
+
     testing.expect_value(t, werr, WriteError.None)
     expect_buf_state(t, buf, length=3, capacity=3, r_offset=0)
 }
@@ -274,7 +274,7 @@ prepending_var_int_5bytes_reallocs :: proc(t: ^testing.T) {
     buf := scoped_create_network_buf(cap=3)
     wmark := buf_emit_write_mark(buf)
     werr := buf_write_var_int_at(&buf, wmark, VarInt(-2147483648) /* 0x80 0x80 0x80 0x80 0x08 */)
-    
+
     testing.expect_value(t, werr, WriteError.None)
     expect_buf_state(t, buf, length=5)
     testing.expect(t, cap(buf.data) >= 5, "expected to resize >= 5")
@@ -298,20 +298,20 @@ insert_var_int_3bytes_excess_trailing_space :: proc(t: ^testing.T) {
     expect_buf_state(t, buf, length=5, r_offset=0, raw_data=[]u8{ 0x05, 0x06, 0x80, 0x80, 0x01 })
 }
 
-// | 0x12 | 0x48 |     | ... |  ->  | 0x12 | 0xac | 0x02 | 0x48 | ... | 
+// | 0x12 | 0x48 |     | ... |  ->  | 0x12 | 0xac | 0x02 | 0x48 | ... |
 // R------M------W-----| ... |      R------M------|------|------W ... |
 @(test)
 insert_var_int_between_existing_data :: proc(t: ^testing.T) {
     using crux
     buf := scoped_create_network_buf()
-    
+
     buf_write_byte(&buf, 0x12)
     wmark := buf_emit_write_mark(buf)
     buf_write_byte(&buf, 0x48)
-    
+
     expect_buf_state(t, buf, length=2, r_offset=0)
     werr := buf_write_var_int_at(&buf, wmark, VarInt(300) /* 0xAC, 0x02 */)
-    
+
     testing.expect_value(t, werr, WriteError.None)
     expect_buf_state(t, buf, length=4, r_offset=0, raw_data=[]u8{ 0x12, 0xAC, 0x02, 0x48 })
 }
@@ -320,10 +320,10 @@ insert_var_int_between_existing_data :: proc(t: ^testing.T) {
 insert_var_int_5bytes_negative :: proc(t: ^testing.T) {
     using crux
     buf := scoped_create_network_buf()
-    
+
     wmark := buf_emit_write_mark(buf)
     werr := buf_write_var_int_at(&buf, wmark, VarInt(-2147483648))
-    
+
     testing.expect_value(t, werr, WriteError.None)
     expect_buf_state(t, buf, length=5, raw_data=[]u8{ 0x80, 0x80, 0x80, 0x80, 0x08 })
 }
@@ -331,10 +331,10 @@ insert_var_int_5bytes_negative :: proc(t: ^testing.T) {
 @(private)
 expect_buf_state :: proc(
     t: ^testing.T,
-    buf: crux.NetworkBuffer, 
+    buf: crux.NetworkBuffer,
     length: Maybe(int) = nil,
     capacity: Maybe(int) = nil,
-    r_offset: Maybe(int) = nil, 
+    r_offset: Maybe(int) = nil,
     raw_data: Maybe([]u8) = nil,
     loc:=#caller_location,
 ) {
