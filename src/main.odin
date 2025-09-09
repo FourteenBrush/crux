@@ -95,7 +95,7 @@ main :: proc() {
 
     // define log levels in order of importance
     log.Level_Headers = {
-         0..<6  = "[DEBUG] ",
+        0..<6  = "[DEBUG] ",
         LOG_LEVEL_INBOUND  = "[INB]   ",
         LOG_LEVEL_OUTBOUND = "[OUTB]  ",
         LOG_LEVEL_REACTOR_ERROR = "[IO]    ",
