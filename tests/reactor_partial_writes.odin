@@ -14,6 +14,8 @@ RECV_BUF_SIZE :: 2048
 // FIXME: this actually causes a partial write, currently only one completion packet seems to arrive internally
 @(test)
 partial_write_arrives_in_one_completion :: proc(t: ^testing.T) {
+    testing.set_fail_timeout(t, 8 * time.Second)
+
     _endpoint := net.Endpoint { address = net.IP4_Loopback, port = 0 /* make os choose free port */ }
     server_sock, listen_err := net.listen_tcp(_endpoint)
     defer if listen_err != nil {
