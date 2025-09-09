@@ -195,8 +195,12 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
 
 // Unregisters a client and shuts down the connection without transmissing any more data.
 _disconnect_client :: proc(state: ^NetworkWorkerState, client_sock: net.TCP_Socket) {
+    tracy.Zone()
+
     // FIXME: probably want to handle error
     reactor.unregister_client(&state.io_ctx, client_sock)
     _delete_client_connection(client_sock)
-    delete_key(&state.connections, client_sock)
+    _, client_conn := delete_key(&state.connections, client_sock)
+    destroy_network_buf(client_conn.tx_buf)
+    destroy_network_buf(client_conn.rx_buf)
 }
