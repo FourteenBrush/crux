@@ -56,7 +56,7 @@ main :: proc() {
     // in debug mode, wrap a tracking allocator around the dynamic arena
     when ODIN_DEBUG {
         tracking_alloc: mem.Tracking_Allocator
-        mem.tracking_allocator_init(&tracking_alloc, allocator, allocator)
+        mem.tracking_allocator_init(&tracking_alloc, allocator, os.heap_allocator())
         tracking_alloc.bad_free_callback = mem.tracking_allocator_bad_free_callback_add_to_array
         defer mem.tracking_allocator_destroy(&tracking_alloc)
         allocator = mem.tracking_allocator(&tracking_alloc)
