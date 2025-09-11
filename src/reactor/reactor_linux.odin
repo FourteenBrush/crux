@@ -45,14 +45,13 @@ _unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, timeout_ms: int) -> (n: int, ok: bool) {
     events := make([]linux.EPoll_Event, len(completions_out), context.temp_allocator)
 
-    nready, errno := linux.epoll_wait(ctx.epoll_fd, &events[0], 32(len(events)), timeout=i32(timeout_ms))
+    nready, errno := linux.epoll_wait(ctx.epoll_fd, &events[0], i32(len(events)), timeout=i32(timeout_ms))
     if errno != .NONE do return
 
-    #no_bounds_check comp := completions_out[i]
-    comp.socket = net.TCP_Socket(event.data.fd)
+    for event, i in events[:nready] {
+        #no_bounds_check comp := completions_out[i]
+        comp.socket = net.TCP_Socket(event.data.fd)
 
-    for event in events[:nready] {
-        flags:
         if .IN in event.events {
             comp.operations += {.Read}
         }
