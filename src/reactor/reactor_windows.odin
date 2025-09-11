@@ -1,6 +1,5 @@
 package reactor
 
-import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:net"
