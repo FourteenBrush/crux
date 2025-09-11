@@ -217,16 +217,15 @@ _initiate_recv :: proc(ctx: ^IOContext, client: win32.SOCKET) -> bool {
 Completion :: struct {
     op: IOOperation,
 	source: win32.SOCKET,
-	// buffer for written or received data
+	// buffer for written or received data, in the case of partial writes, this always
+	// contains the whole write buffer, and `write_already_transfered` is used to indicate
+	// which part actually still needs to be transferred. (we must store the whole buffer to avoid leaking it)
 	buf: []u8 `fmt:"-"`,
-	// slice offset into `buf`, which indicates actual data to pass to sends.
-	// This is used in situations where we send another completion which contains the
-	// remaining bytes of a partial send. We must also store the whole buffer to avoid leaking it.
-	partial_write_off: u32,
+	write_already_transfered: u32,
 	overlapped: win32.OVERLAPPED,
 }
 
-// IO operation from the point of view of the server.
+// IO operation as seen from the server.
 @(private="file")
 IOOperation :: enum u8 {
 	Read,
@@ -239,7 +238,7 @@ _unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
     // this is the only way to unregister clients, there is no real "iocp unregister" procedure
     ok := CancelIoEx(win32.HANDLE(win32.SOCKET(client)), /*cancel all*/ nil)
 
-    // TODO: replace with proper ERROR_ constant after it's defined in win32 pkg
+    // TODO: replace with proper ERROR_ constant after it's defined in win32 pkg (dev-10)
     if !ok && win32.GetLastError() != win32.DWORD(win32.System_Error.NOT_FOUND) {
         _log_error(win32.GetLastError(), "failed to cancel outstanding io operations")
     }
@@ -331,15 +330,14 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
     			_initiate_recv(ctx, completion.source) or_continue
 			}
 		case .Write:
-		    partial_write := int(entry.dwNumberOfBytesTransferred) != len(completion.buf)
+		    total_transfer := entry.dwNumberOfBytesTransferred + completion.write_already_transfered
+		    partial_write := int(total_transfer) != len(completion.buf)
 			if partial_write {
 			    // ignore this entry, query another send with the remaining part of the buffer
 				i -= 1
 				nready -= 1
 
-				// in case this is not the first partial write for this buffer
-				partial_write_off := completion.partial_write_off + entry.dwNumberOfBytesTransferred
-				_initiate_send(ctx, completion.source, completion.buf, partial_write_off=partial_write_off) or_continue
+				_initiate_send(ctx, completion.source, completion.buf, partial_write_off=total_transfer) or_continue
 				continue
 			}
 
@@ -362,7 +360,7 @@ _submit_write_copy :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) 
 @(private="file")
 _initiate_send :: proc(ctx: ^IOContext, client: win32.SOCKET, data: []u8, partial_write_off: u32 = 0) -> bool {
     comp := _alloc_completion(ctx^, .Write, client, data)
-    comp.partial_write_off = partial_write_off
+    comp.write_already_transfered = partial_write_off
 
     // handle potential partial writes, send this buffer while we keep storing the original in order to free it later
     data := data[partial_write_off:]
