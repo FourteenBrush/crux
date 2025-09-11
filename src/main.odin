@@ -22,7 +22,7 @@ _ :: time
 _ :: spall
 _ :: runtime
 
-// TODO: remove, theres a makefile rule
+@(private="file")
 CRUX_PROFILE :: #config(CRUX_PROFILE, false)
 
 // log levels for logging packet transfer, these values are bigger than .Debug (1)
@@ -32,12 +32,6 @@ CRUX_PROFILE :: #config(CRUX_PROFILE, false)
 
 @(private="file")
 g_continue_running := true
-when CRUX_PROFILE {
-    @(private)
-    g_spall_ctx: spall.Context
-    @(private)
-    g_spall_buf: spall.Buffer
-}
 
 main :: proc() {
     exit_success: bool
@@ -54,7 +48,7 @@ main :: proc() {
     defer mem.dynamic_arena_destroy(&pool)
 
     // in debug mode, wrap a tracking allocator around the dynamic arena
-    when ODIN_DEBUG {
+    when ODIN_DEBUG && !CRUX_PROFILE {
         tracking_alloc: mem.Tracking_Allocator
         mem.tracking_allocator_init(&tracking_alloc, allocator, os.heap_allocator())
         tracking_alloc.bad_free_callback = mem.tracking_allocator_bad_free_callback_add_to_array
@@ -69,18 +63,8 @@ main :: proc() {
                 fmt.eprintfln("%v allocation %p was freed badly", bad_free.location, bad_free.memory)
             }
         }
-
-        when CRUX_PROFILE {
-            max_tsc_acquisition_time :: 500 * time.Millisecond
-            g_spall_ctx = spall.context_create_with_sleep("trace.spall", sleep=max_tsc_acquisition_time)
-            defer spall.context_destroy(&g_spall_ctx)
-
-            backing_buf := make([]u8, spall.BUFFER_DEFAULT_SIZE)
-            defer delete(backing_buf)
-            g_spall_buf = spall.buffer_create(backing_buf, u32(sync.current_thread_id()))
-            defer spall.buffer_destroy(&g_spall_ctx, &g_spall_buf)
-        }
     }
+
     when tracy.TRACY_ENABLE {
         allocator = tracy.MakeProfiledAllocator(
             self = &tracy.ProfiledAllocatorData{},
@@ -147,16 +131,4 @@ _register_user_formatters :: proc() {
         fmt.wprint(fi.writer, uuid.to_string_buffer(id, buf[:]))
         return true
     })
-}
-
-when CRUX_PROFILE {
-    @(instrumentation_enter, private="file")
-    spall_enter :: proc "contextless" (proc_addr, callsite_ret_addr: rawptr, loc: runtime.Source_Code_Location) {
-        spall._buffer_begin(&g_spall_ctx, &g_spall_buf, "", "", loc)
-    }
-
-    @(instrumentation_exit, private="file")
-    spall_exit :: proc "contextless" (proc_addr, callsite_ret_addr: rawptr, loc: runtime.Source_Code_Location) {
-        spall._buffer_end(&g_spall_ctx, &g_spall_buf)
-    }
 }
