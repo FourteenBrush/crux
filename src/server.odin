@@ -12,6 +12,8 @@ import "src:reactor"
 
 import "lib:tracy"
 
+TARGET_TPS :: 20
+
 @(private="file")
 g_server: Server
 

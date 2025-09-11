@@ -14,7 +14,8 @@ import "src:reactor"
 
 import "lib:tracy"
 
-TARGET_TPS :: 20
+@(private="file")
+WORKER_TARGET_MSPT :: 5
 
 NetworkWorkerSharedData :: struct {
     io_ctx: reactor.IOContext,
@@ -51,11 +52,10 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
     }
 
     for sync.atomic_load(state.execution_permit) {
-        // TODO: do we need the network thread to be tps bound?
         start := time.tick_now()
         defer {
             tick_duration := time.tick_since(start)
-            target_tick_time := 1000 / TARGET_TPS * time.Millisecond
+            target_tick_time := WORKER_TARGET_MSPT * time.Millisecond
             if tick_duration < target_tick_time {
                 tracy.ZoneNC("Worker Sleep", color=0x9c4433)
                 time.sleep(target_tick_time - tick_duration)
@@ -64,9 +64,12 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
             tracy.FrameMark("Worker")
         }
 
+        REACTOR_TIMEOUT_MS :: 1
+        #assert(REACTOR_TIMEOUT_MS < WORKER_TARGET_MSPT)
+
         events: [512]reactor.Event
         // NOTE: do not indefinitely block or this thread can't be joined
-        nready, ok := reactor.await_io_events(&state.io_ctx, events[:], timeout_ms=5)
+        nready, ok := reactor.await_io_events(&state.io_ctx, events[:], timeout_ms=REACTOR_TIMEOUT_MS)
         assert(ok, "failed to await io events") // TODO: proper error handling
 
         for event in events[:nready] {
@@ -167,8 +170,8 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
     case StatusRequestPacket:
         status_response := StatusResponsePacket {
             version = {
-                name = "1.21.6",
-                protocol = .V1_21_6,
+                name = "1.21.8",
+                protocol = .V1_21_8,
             },
             players = {
                 max = 100,
