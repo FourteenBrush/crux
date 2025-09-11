@@ -42,8 +42,8 @@ _unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 
 // TODO: timeout: 0 handle returned bool correctly
 @(private)
-_await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) -> (n: int, ok: bool) {
-    events := make([]linux.EPoll_Event, len(events_out), context.temp_allocator)
+_await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, timeout_ms: int) -> (n: int, ok: bool) {
+    events := make([]linux.EPoll_Event, len(completions_out), context.temp_allocator)
 
     nready, errno := linux.epoll_wait(ctx.epoll_fd, &events[0], len(events), timeout=i32(timeout_ms))
     if errno != .NONE do return
@@ -63,11 +63,11 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
         }
         // handle abrupt disconnection and read hangup the same way
         if .HUP in event.events || .RDHUP in event.events {
-            flags += {.Hangup}
+            flags += {.PeerHangup}
         }
 
-        events_out[i] = Event {
-            client = net.TCP_Socket(event.data.fd),
+        completions_out[i] = Completion {
+            Completion = net.TCP_Socket(event.data.fd),
             operations = flags,
         }
     }

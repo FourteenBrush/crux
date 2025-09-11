@@ -67,12 +67,12 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
         REACTOR_TIMEOUT_MS :: 1
         #assert(REACTOR_TIMEOUT_MS < WORKER_TARGET_MSPT)
 
-        events: [512]reactor.Event
+        completions: [512]reactor.Completion
         // NOTE: do not indefinitely block or this thread can't be joined
-        nready, ok := reactor.await_io_events(&state.io_ctx, events[:], timeout_ms=REACTOR_TIMEOUT_MS)
+        nready, ok := reactor.await_io_completions(&state.io_ctx, completions[:], timeout_ms=REACTOR_TIMEOUT_MS)
         assert(ok, "failed to await io events") // TODO: proper error handling
 
-        for event in events[:nready] {
+        for event in completions[:nready] {
             client_conn := &state.connections[event.socket]
             if client_conn == nil && .NewConnection not_in event.operations {
                 // stale event arrived after a disconnect was issued (peer hangup confirmation or io completion
@@ -84,7 +84,7 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
                 log.warn("client socket error")
                 _disconnect_client(&state, event.socket)
                 continue
-            } else if .Hangup in event.operations {
+            } else if .PeerHangup in event.operations {
                 log.warn("client socket hangup")
                 _disconnect_client(&state, event.socket)
                 continue
@@ -120,7 +120,6 @@ _network_worker_atexit :: proc(state: ^NetworkWorkerState) {
         _disconnect_client(state, socket)
     }
     delete(state.connections)
-    reactor.destroy_io_context(&state.io_ctx, state.threadsafe_alloc)
 }
 
 _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection, packet_alloc: mem.Allocator) {

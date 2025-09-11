@@ -1,5 +1,6 @@
 package reactor
 
+import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:net"
@@ -38,8 +39,7 @@ _accept_ex_sock_addrs := win32.LPFN_GETACCEPTEXSOCKADDRS(nil)
 _IOContext :: struct {
 	completion_port: win32.HANDLE,
 	server_sock: win32.SOCKET,
-	arena: ^mem.Dynamic_Arena,
-	arena_allocator: mem.Allocator,
+	allocator: mem.Allocator,
 
 	// Client socket on which to accept connections (`AcceptEx` style).
 	accept_sock: win32.SOCKET,
@@ -75,17 +75,17 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
     	return ctx, false
 	}
 
-	ctx.arena = new(mem.Dynamic_Arena, allocator)
+	arena := new(mem.Dynamic_Arena, allocator)
 	mem.dynamic_arena_init(
-		ctx.arena,
+		arena,
 		block_allocator=allocator,
 		array_allocator=allocator,
 	)
 	// TODO: individual frees are not supported, are we slowly leaking memory?
-	ctx.arena_allocator = mem.dynamic_arena_allocator(ctx.arena)
+	ctx.allocator = mem.dynamic_arena_allocator(arena)
 	defer if !ok {
-	    mem.dynamic_arena_destroy(ctx.arena)
-		free(ctx.arena, allocator)
+	    mem.dynamic_arena_destroy(arena)
+		free(arena, allocator)
 	}
 
 	_install_accept_handler(&ctx) or_return
@@ -149,13 +149,13 @@ _create_accept_client_socket :: proc() -> (win32.SOCKET, bool) {
 
 @(private)
 _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
-	// NOTE: refcounted, no handles must be associated
+	// NOTE: refcounted, no socket handles must be associated with this iocp
 	win32.CloseHandle(ctx.completion_port)
+	_ = win32.CloseHandle(win32.HANDLE(ctx.accept_sock))
 
-	mem.dynamic_arena_destroy(ctx.arena)
-	free(ctx.arena, allocator)
-	// TODO: some CancelIoEx here?
-	// TODO: what happens with accept_sock?
+	arena := cast(^mem.Dynamic_Arena) ctx.allocator.data
+	mem.dynamic_arena_destroy(arena)
+	free(arena, allocator)
 }
 
 @(private)
@@ -190,7 +190,7 @@ _initiate_recv :: proc(ctx: ^IOContext, client: win32.SOCKET) -> bool {
     buf: []u8
     {
         tracy.ZoneN("ALLOC RECV")
-        buf = make([]u8, RECV_BUF_SIZE, ctx.arena_allocator)
+        buf = make([]u8, RECV_BUF_SIZE, ctx.allocator)
     }
     comp := _alloc_completion(ctx^, .Read, win32.SOCKET(client), buf)
 
@@ -212,20 +212,19 @@ _initiate_recv :: proc(ctx: ^IOContext, client: win32.SOCKET) -> bool {
 	return true
 }
 
-// Per IO operation associated data
 @(private="file")
-Completion :: struct {
-    op: IOOperation,
-	source: win32.SOCKET,
+IOOperationData :: struct {
+    overlapped: win32.OVERLAPPED,
+    source: win32.SOCKET,
 	// buffer for written or received data, in the case of partial writes, this always
 	// contains the whole write buffer, and `write_already_transfered` is used to indicate
 	// which part actually still needs to be transferred. (we must store the whole buffer to avoid leaking it)
-	buf: []u8 `fmt:"-"`,
+	transport_buf: []u8 `fmt:"-"`,
 	write_already_transfered: u32,
-	overlapped: win32.OVERLAPPED,
+	op: IOOperation,
 }
 
-// IO operation as seen from the server.
+// IO operation as seen from our side.
 @(private="file")
 IOOperation :: enum u8 {
 	Read,
@@ -246,11 +245,10 @@ _unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 	return true
 }
 
-// NOTE: instead of batching events, every emitted event represents one io operation
 @(private)
-_await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) -> (n: int, ok: bool) {
+_await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, timeout_ms: int) -> (n: int, ok: bool) {
     tracy.Zone()
-	completion_entries := make([]win32.OVERLAPPED_ENTRY, len(events_out), context.temp_allocator)
+	completion_entries := make([]win32.OVERLAPPED_ENTRY, len(completions_out), context.temp_allocator)
 	nready: u32
 
 	{
@@ -279,9 +277,9 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 	    tracy.ZoneN("CompletionEntry")
 		defer i += 1
 
-		completion: ^Completion = container_of(entry.lpOverlapped, Completion, "overlapped")
-		event := &events_out[i]
-  		event.socket = net.TCP_Socket(completion.source)
+		op_data: ^IOOperationData = container_of(entry.lpOverlapped, IOOperationData, "overlapped")
+		#no_bounds_check comp := &completions_out[i]
+  		comp.socket = net.TCP_Socket(op_data.source)
 
         // map NTSTATUS to win32 error
         status := RtlNtStatusToDosError(i32(entry.Internal))
@@ -293,15 +291,15 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
             continue
         } else if status != 0 {
             _log_error(status, "completion entry failed with error")
-            event.operations = {.Error}
+            comp.operations = {.Error}
 			continue
         }
 
-        event.nr_of_bytes_affected = int(entry.dwNumberOfBytesTransferred)
+        comp.nr_of_bytes_affected = entry.dwNumberOfBytesTransferred
 
-		switch completion.op {
+		switch op_data.op {
 		case .Read:
-			if completion.source == ctx.server_sock {
+			if op_data.source == ctx.server_sock {
 			    // newly accepted client stored in io context
 			    accept_success := false
 				defer if !accept_success {
@@ -309,9 +307,10 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 				}
 
 				_configure_accepted_client(ctx) or_continue
+				// TODO: reuse recv buffers per connection
 				_register_client(ctx, net.TCP_Socket(ctx.accept_sock)) or_continue
-				event.operations = {.NewConnection}
-				event.socket = net.TCP_Socket(ctx.accept_sock)
+				comp.operations = {.NewConnection}
+				comp.socket = net.TCP_Socket(ctx.accept_sock)
 				accept_success = true
 
 				// re-arm accept handler
@@ -321,28 +320,28 @@ _await_io_events :: proc(ctx: ^IOContext, events_out: []Event, timeout_ms: int) 
 			}
 
 			if entry.dwNumberOfBytesTransferred == 0 {
-			    event.operations = {.Hangup}
+			    comp.operations = {.PeerHangup}
 			} else {
-    			event.operations = {.Read}
-    			event.recv_buf = completion.buf[:entry.dwNumberOfBytesTransferred]
+    			comp.operations = {.Read}
+    			comp.recv_buf = op_data.transport_buf[:entry.dwNumberOfBytesTransferred]
 
     			// re-arm recv handler
-    			_initiate_recv(ctx, completion.source) or_continue
+    			_initiate_recv(ctx, op_data.source) or_continue
 			}
 		case .Write:
-		    total_transfer := entry.dwNumberOfBytesTransferred + completion.write_already_transfered
-		    partial_write := int(total_transfer) != len(completion.buf)
+		    total_transfer := entry.dwNumberOfBytesTransferred + op_data.write_already_transfered
+		    partial_write := int(total_transfer) != len(op_data.transport_buf)
 			if partial_write {
 			    // ignore this entry, query another send with the remaining part of the buffer
 				i -= 1
 				nready -= 1
 
-				_initiate_send(ctx, completion.source, completion.buf, partial_write_off=total_transfer) or_continue
+				_initiate_send(ctx, op_data.source, op_data.transport_buf, partial_write_off=total_transfer) or_continue
 				continue
 			}
 
-		    event.operations = {.Write}
-			assert(int(entry.dwNumberOfBytesTransferred) == len(completion.buf), "partial writes should be handled above")
+		    comp.operations = {.Write}
+			assert(int(entry.dwNumberOfBytesTransferred) == len(op_data.transport_buf), "partial writes should be handled above")
 		}
 	}
 
@@ -424,16 +423,16 @@ _configure_accepted_client :: proc(ctx: ^IOContext) -> bool {
 }
 
 @(private="file")
-_alloc_completion :: proc(ctx: IOContext, op: IOOperation, source: win32.SOCKET, buf: []u8) -> ^Completion {
-    comp := new(Completion, ctx.arena_allocator)
+_alloc_completion :: proc(ctx: IOContext, op: IOOperation, source: win32.SOCKET, buf: []u8) -> ^IOOperationData {
+    comp := new(IOOperationData, ctx.allocator)
     comp.op = op
     comp.source = source
-    comp.buf = buf
+    comp.transport_buf = buf
 
     return comp
 }
 
-// Changes timer resolution, in order to obtain millisecond precision for the event loop (if possible).
+// Alters timer resolution, in order to obtain millisecond precision for the event loop (if possible).
 @(private="file")
 _lower_timer_resolution :: proc() {
     caps: win32.TIMECAPS

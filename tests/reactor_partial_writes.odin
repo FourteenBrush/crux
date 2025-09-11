@@ -50,15 +50,15 @@ partial_write_arrives_in_one_completion :: proc(t: ^testing.T) {
     client_state: enum { AwaitingConn, Idle, ReceivedWrite, ReceivedHangup } = .AwaitingConn
 
     thread: for {
-        events: [128]reactor.Event
-        nready, ok := reactor.await_io_events(&io, events[:], timeout_ms=5)
+        completions: [128]reactor.Completion
+        nready, ok := reactor.await_io_completions(&io, completions[:], timeout_ms=5)
         testing.expect(t, ok, "failed to await io events") or_break thread
 
-        for event in events[:nready] {
-            testing.expect(t, .Error not_in event.operations, "event with .Error flag was returned") or_break thread
-            testing.expect(t, .Read not_in event.operations, "unexpected .Read event")
+        for comp in completions[:nready] {
+            testing.expect(t, .Error not_in comp.operations, "event with .Error flag was returned") or_break thread
+            testing.expect(t, .Read not_in comp.operations, "unexpected .Read event")
 
-            if .NewConnection in event.operations {
+            if .NewConnection in comp.operations {
                 testing.expectf(t, client_state == .AwaitingConn, "received .NewConnection event in state %s", client_state) or_break thread
                 client_state = .Idle
 
@@ -67,15 +67,15 @@ partial_write_arrives_in_one_completion :: proc(t: ^testing.T) {
                 testing.expect(t, opt_err == nil, "failed to configure send buffer size") or_break thread
 
                 data := make([]u8, RECV_BUF_SIZE * 3, context.temp_allocator)
-                submission_ok := reactor.submit_write_copy(&io, event.socket, data)
+                submission_ok := reactor.submit_write_copy(&io, comp.socket, data)
                 testing.expect(t, submission_ok, "failed to submit chunked write to client") or_break thread
             }
-            if .Write in event.operations {
+            if .Write in comp.operations {
                 testing.expectf(t, client_state == .Idle, "received .Write event in state %s", client_state) or_break thread
                 client_state = .ReceivedWrite
             }
-            if .Hangup in event.operations {
-                testing.expectf(t, client_state == .ReceivedWrite, "received .Hangup event in state %s", client_state) or_break thread
+            if .PeerHangup in comp.operations {
+                testing.expectf(t, client_state == .ReceivedWrite, "received .PeerHangup event in state %s", client_state) or_break thread
                 client_state = .ReceivedHangup
                 break thread
             }
