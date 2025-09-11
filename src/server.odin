@@ -1,5 +1,6 @@
 package crux
 
+import "core:os"
 import "core:log"
 import "core:mem"
 import "core:net"
@@ -35,8 +36,8 @@ run :: proc(threadsafe_alloc: mem.Allocator, execution_permit: ^bool) -> bool {
     server_sock := _setup_server_socket(endpoint) or_return
     defer net.close(server_sock)
 
-    io_ctx := _setup_io_context(server_sock, threadsafe_alloc) or_return
-    defer reactor.destroy_io_context(&io_ctx, threadsafe_alloc)
+    io_ctx := _setup_io_context(server_sock, os.heap_allocator()) or_return
+    defer reactor.destroy_io_context(&io_ctx, os.heap_allocator())
 
     g_server = _setup_server(threadsafe_alloc) or_return
     defer _destroy_server(g_server)
