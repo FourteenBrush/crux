@@ -3,7 +3,7 @@ package crux
 // Lets not even care about pre-netty age
 // TODO: some snapshots are missing
 ProtocolVersion :: enum VarInt {
-    V1_21_8      = 722,
+    V1_21_8      = 772,
     V1_21_7      = 772,
     V1_21_6      = 771,
     V1_21_5      = 770,
