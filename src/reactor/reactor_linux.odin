@@ -51,7 +51,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
     #no_bounds_check comp := completions_out[i]
     comp.socket = net.TCP_Socket(event.data.fd)
 
-    for event, i in events[:nready] {
+    for event in events[:nready] {
         flags:
         if .IN in event.events {
             comp.operations += {.Read}
