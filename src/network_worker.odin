@@ -38,7 +38,7 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
     tracy.SetThreadName("crux-NetWorker")
     state := NetworkWorkerState {
         shared = shared^,
-        connections = make(map[net.TCP_Socket]ClientConnection, shared.threadsafe_alloc),
+        connections = make(map[net.TCP_Socket]ClientConnection, 16, shared.threadsafe_alloc),
     }
 
     defer cleanup: {
