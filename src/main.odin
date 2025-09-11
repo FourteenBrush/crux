@@ -1,3 +1,5 @@
+// TODO: remove after lib/back makes init procs contextless
+#+feature global-context
 package crux
 
 import "core:fmt"

@@ -10,7 +10,7 @@ _IOContext :: struct {
 }
 
 @(private)
-_create_io_context :: proc(server_sock: net.Tcp_Socket, allocator: mem.Allocator) -> (ctx: IOContext, ok: bool) {
+_create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (ctx: IOContext, ok: bool) {
     // TODO: does timer resolution need to be fixed here?
     epoll_fd, errno := linux.epoll_create()
     if errno != .NONE do return
@@ -45,30 +45,26 @@ _unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, timeout_ms: int) -> (n: int, ok: bool) {
     events := make([]linux.EPoll_Event, len(completions_out), context.temp_allocator)
 
-    nready, errno := linux.epoll_wait(ctx.epoll_fd, &events[0], len(events), timeout=i32(timeout_ms))
+    nready, errno := linux.epoll_wait(ctx.epoll_fd, &events[0], 32(len(events)), timeout=i32(timeout_ms))
     if errno != .NONE do return
 
-    recv_buf: [RECV_BUF_SIZE]u8 = ---
+    #no_bounds_check comp = completions_out[i]
+    comp.socket = net.TCP_Socket(event.data.fd)
 
     for event, i in events[:nready] {
-        flags: EventFlags
+        flags:
         if .IN in event.events {
-            flags += {.Readable}
+            comp.operations += {.Read}
         }
         if .OUT in event.events {
-            flags += {.Writable}
+            comp.operations += {.Write}
         }
-        if .Error in event.events {
-            flags += {.Error}
+        if .ERR in event.events {
+            comp.operations += {.Error}
         }
         // handle abrupt disconnection and read hangup the same way
         if .HUP in event.events || .RDHUP in event.events {
-            flags += {.PeerHangup}
-        }
-
-        completions_out[i] = Completion {
-            Completion = net.TCP_Socket(event.data.fd),
-            operations = flags,
+            comp.operations += {.PeerHangup}
         }
     }
     return int(nready), true
