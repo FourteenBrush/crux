@@ -1,11 +1,14 @@
 package reactor
 
+import "core:mem/tlsf"
 import "core:log"
 import "core:mem"
 import "core:net"
 import win32 "core:sys/windows"
 
 import "lib:tracy"
+
+_ :: tlsf
 
 foreign import kernel32 "system:Kernel32.lib"
 
@@ -27,6 +30,9 @@ ADDR_BUF_SIZE :: size_of(win32.sockaddr_in) + 16
 // how many bytes of actual data to receive into the AcceptEx buffer
 @(private="file")
 ACCEPTEX_RECEIVE_DATA_LENGTH :: 0
+
+@(private="file")
+USE_TLSF :: true
 
 // both dynamically loaded by an WsaIoctl call
 @(private="file")
@@ -74,17 +80,33 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
     	return ctx, false
 	}
 
-	arena := new(mem.Dynamic_Arena, allocator)
-	mem.dynamic_arena_init(
-		arena,
-		block_allocator=allocator,
-		array_allocator=allocator,
-	)
-	// TODO: individual frees are not supported, are we slowly leaking memory?
-	ctx.allocator = mem.dynamic_arena_allocator(arena)
-	defer if !ok {
-	    mem.dynamic_arena_destroy(arena)
-		free(arena, allocator)
+	when USE_TLSF {
+	    tlsf_alloc := new(tlsf.Allocator, allocator)
+		init_err := tlsf.init_from_allocator(
+		    tlsf_alloc,
+			backing=allocator,
+			initial_pool_size=2 * RECV_BUF_SIZE,
+			new_pool_size=4 * RECV_BUF_SIZE,
+		)
+		assert(init_err == .None, "failed to init tlsf allocator")
+		ctx.allocator = tlsf.allocator(tlsf_alloc)
+		defer if !ok {
+		    tlsf.destroy(tlsf_alloc)
+			free(tlsf_alloc, allocator)
+		}
+	} else {
+    	arena := new(mem.Dynamic_Arena, allocator)
+    	mem.dynamic_arena_init(
+    		arena,
+    		block_allocator=allocator,
+    		array_allocator=allocator,
+    	)
+    	// TODO: individual frees are not supported, are we slowly leaking memory?
+    	ctx.allocator = mem.dynamic_arena_allocator(arena)
+    	defer if !ok {
+    	    mem.dynamic_arena_destroy(arena)
+    		free(arena, allocator)
+    	}
 	}
 
 	_install_accept_handler(&ctx) or_return
@@ -152,9 +174,15 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 	win32.CloseHandle(ctx.completion_port)
 	_ = win32.CloseHandle(win32.HANDLE(ctx.accept_sock))
 
-	arena := cast(^mem.Dynamic_Arena) ctx.allocator.data
-	mem.dynamic_arena_destroy(arena)
-	free(arena, allocator)
+	when USE_TLSF {
+	    tlsf_alloc := cast(^tlsf.Allocator) ctx.allocator.data
+		tlsf.destroy(tlsf_alloc)
+		free(tlsf_alloc, allocator)
+	} else {
+	    arena := cast(^mem.Dynamic_Arena) ctx.allocator.data
+    	mem.dynamic_arena_destroy(arena)
+    	free(arena, allocator)
+	}
 }
 
 @(private)
