@@ -21,6 +21,8 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: setup tracy lib
+        run: cp ./lib/tracy.lib ./lib/tracy/
       - name: make release build
         run: make
 
