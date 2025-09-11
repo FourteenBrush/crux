@@ -54,6 +54,10 @@ IOContext :: _IOContext
 // Inputs:
 // - `server_sock`: the non-blocking server socket that is already listening.
 // Will use `context.logger` to log error messages.
+//
+// Any connections accepted from the server socket will be implicitly registered, upon registration
+// `EventOperation.Read` events may immediately be emitted whenever the client sends data. Write completions
+// only occur after calling `submit_write_*` procedures.
 create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (IOContext, bool) {
     return _create_io_context(server_sock, allocator)
 }
@@ -61,12 +65,6 @@ create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator)
 // Destroys the given `IOContext`, the passed allocator must be the same as the one used in `create_io_context`.
 destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
     _destroy_io_context(ctx, allocator)
-}
-
-// Registers a client to this subsystem, upon registration `EventOperation.Read` events may immediately
-// be emitted whenever the client sends data. Write completions only occur after calling `submit_write_*` procedures.
-register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
-    return _register_client(ctx, client)
 }
 
 // Unregisters a client from the IO context, after this call, the client will no longer produce new events.
