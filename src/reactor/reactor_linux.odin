@@ -48,7 +48,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
     nready, errno := linux.epoll_wait(ctx.epoll_fd, &events[0], 32(len(events)), timeout=i32(timeout_ms))
     if errno != .NONE do return
 
-    #no_bounds_check comp = completions_out[i]
+    #no_bounds_check comp := completions_out[i]
     comp.socket = net.TCP_Socket(event.data.fd)
 
     for event, i in events[:nready] {
