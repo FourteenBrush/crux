@@ -49,7 +49,7 @@ _IOContext :: struct {
 	allocator: mem.Allocator,
 
 	// Client socket on which to accept connections (`AcceptEx` style).
-	accept_sock: win32.SOCKET,
+	accepted_sock: win32.SOCKET,
 	// Buf where local and remote addr are placed.
 	accept_buf: [ADDR_BUF_SIZE * 2]u8,
 }
@@ -135,7 +135,7 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
     tracy.Zone()
 
 	// socket that AcceptEx will use to bind the accepted client to
-	ctx.accept_sock = _create_accept_client_socket() or_return
+	ctx.accepted_sock = _create_accept_client_socket() or_return
 	comp := _alloc_completion(ctx^, .Read, ctx.server_sock, {})
 
 	// FIXME: we "know" clients will always send initial data after connecting (handshake packets and such),
@@ -143,7 +143,7 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 	// by clients connecting and not sending data?
 	accept_ok := _accept_ex(
 		ctx.server_sock,
-		ctx.accept_sock,
+		ctx.accepted_sock,
 		&ctx.accept_buf[0],
 		ACCEPTEX_RECEIVE_DATA_LENGTH,
 		ADDR_BUF_SIZE, /* local addr len */
@@ -174,7 +174,7 @@ _create_accept_client_socket :: proc() -> (win32.SOCKET, bool) {
 _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 	// NOTE: refcounted, no socket handles must be associated with this iocp
 	win32.CloseHandle(ctx.completion_port)
-	_ = win32.CloseHandle(win32.HANDLE(ctx.accept_sock))
+	_ = win32.CloseHandle(win32.HANDLE(ctx.accepted_sock))
 
 	when USE_TLSF {
 	    tlsf_alloc := cast(^tlsf.Allocator) ctx.allocator.data
@@ -190,9 +190,9 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 // Inputs:
 // - `recv_buf`: a preallocated recv buffer which will be used for the whole lifetime of the connection.
 @(private="file")
-_register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket, recv_buf: []u8) -> bool {
+_register_client :: proc(ctx: ^IOContext, client: win32.SOCKET) -> bool {
     tracy.Zone()
-    handle := win32.HANDLE(uintptr(client))
+    handle := win32.HANDLE(client)
 
     register_result := win32.CreateIoCompletionPort(
         handle,
@@ -210,14 +210,19 @@ _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket, recv_buf: []u8
         _log_error(win32.GetLastError(), "failed to set FILE_SKIP_SET_EVENT bit")
     }
 
-    return _initiate_recv(ctx, win32.SOCKET(client), recv_buf)
+    return _initiate_recv(ctx, client)
 }
 
 // Initiate async recv call to emit an iocp event whenever data can be read
 @(private="file")
-_initiate_recv :: proc(ctx: ^IOContext, client: win32.SOCKET, recv_buf: []u8) -> bool {
+_initiate_recv :: proc(ctx: ^IOContext, client: win32.SOCKET) -> bool {
     tracy.Zone()
 
+    recv_buf: []u8
+    {
+        tracy.ZoneN("ALLOC_RECV")
+        recv_buf = make([]u8, RECV_BUF_SIZE, ctx.allocator) or_else panic("OOM")
+    }
     comp := _alloc_completion(ctx^, .Read, win32.SOCKET(client), recv_buf)
 
     flags: u32
@@ -329,18 +334,13 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 			    // newly accepted client stored in io context
 			    accept_success := false
 				defer if !accept_success {
-				    net.close(net.TCP_Socket(ctx.accept_sock))
+				    net.close(net.TCP_Socket(ctx.accepted_sock))
 				}
 
 				_configure_accepted_client(ctx) or_continue
-				recv_buf: []u8
-				{
-				    tracy.ZoneN("ALLOC_RECV")
-					recv_buf = make([]u8, RECV_BUF_SIZE, ctx.allocator) or_else panic("OOM")
-				}
-				_register_client(ctx, net.TCP_Socket(ctx.accept_sock), recv_buf) or_continue
+				_register_client(ctx, ctx.accepted_sock) or_continue
 				comp.operations = {.NewConnection}
-				comp.socket = net.TCP_Socket(ctx.accept_sock)
+				comp.socket = net.TCP_Socket(ctx.accepted_sock)
 				accept_success = true
 
 				// re-arm accept handler
@@ -355,8 +355,8 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
     			comp.operations = {.Read}
     			comp.recv_buf = op_data.transport_buf[:entry.dwNumberOfBytesTransferred]
 
-    			// re-arm recv handler, reuse same recv buffer
-    			_initiate_recv(ctx, op_data.source, op_data.transport_buf) or_continue
+    			// re-arm recv handler
+    			_initiate_recv(ctx, op_data.source) or_continue
 			}
 		case .Write:
 		    total_transfer := entry.dwNumberOfBytesTransferred + op_data.write_already_transfered
@@ -434,7 +434,7 @@ _configure_accepted_client :: proc(ctx: ^IOContext) -> bool {
 	// accepted socket is in the default state, update it to make
 	// setsockopt among other functions work
 	result := win32.setsockopt(
-		ctx.accept_sock,
+		ctx.accepted_sock,
         win32.SOL_SOCKET,
         win32.SO_UPDATE_ACCEPT_CONTEXT,
         &ctx.server_sock, size_of(ctx.server_sock),
@@ -443,10 +443,10 @@ _configure_accepted_client :: proc(ctx: ^IOContext) -> bool {
 	    return false
 	}
 
-	if net.set_blocking(net.TCP_Socket(ctx.accept_sock), false) != .None {
+	if net.set_blocking(net.TCP_Socket(ctx.accepted_sock), false) != .None {
 	    return false
 	}
-	if net.set_option(net.TCP_Socket(ctx.accept_sock), .TCP_Nodelay, true) != .None {
+	if net.set_option(net.TCP_Socket(ctx.accepted_sock), .TCP_Nodelay, true) != .None {
 	    return false
 	}
 	return true
