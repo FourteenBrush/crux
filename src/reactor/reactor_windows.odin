@@ -329,8 +329,6 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 			continue
         }
 
-        comp.nr_of_bytes_affected = entry.dwNumberOfBytesTransferred
-
 		switch op_data.op {
 		case .Read:
 			if op_data.source == ctx.server_sock {
@@ -357,7 +355,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 			    comp.operation = .PeerHangup
 			} else {
     			comp.operation = .Read
-    			comp.recv_buf = op_data.transport_buf[:entry.dwNumberOfBytesTransferred]
+    			comp.buf = op_data.transport_buf[:entry.dwNumberOfBytesTransferred]
 
     			// re-arm recv handler
     			_initiate_recv(ctx, op_data.source) or_continue
@@ -375,6 +373,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 			}
 
 		    comp.operation = .Write
+			comp.buf = op_data.transport_buf
 			assert(int(entry.dwNumberOfBytesTransferred) == len(op_data.transport_buf), "partial writes should be handled above")
 		}
 	}
@@ -385,7 +384,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 @(private)
 _release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
     tracy.Zone()
-    delete(comp.recv_buf, ctx.allocator)
+    delete(comp.buf, ctx.allocator)
 }
 
 // TODO: don't actually flush on every call

@@ -91,10 +91,12 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
                 log.warn("client socket hangup")
                 _disconnect_client(&state, comp.socket)
             case .Read:
-                buf_write_bytes(&client_conn.rx_buf, comp.recv_buf) // copies
+                buf_write_bytes(&client_conn.rx_buf, comp.buf) // copies
                 reactor.release_recv_buf(&state.io_ctx, comp)
                 _drain_serverbound_packets(&state, client_conn, state.threadsafe_alloc)
             case .Write:
+                // must be freed using the same allocator the reactor write call was made with
+                delete(comp.buf, state.threadsafe_alloc)
                 if client_conn.close_after_flushing {
                     log.debug("disconnecting client as requested")
                     _disconnect_client(&state, client_conn.socket)
@@ -122,6 +124,8 @@ _network_worker_atexit :: proc(state: ^NetworkWorkerState) {
 }
 
 _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection, packet_alloc: mem.Allocator) {
+    tracy.Zone()
+
     loop: for {
         packet, err := read_serverbound(&client_conn.rx_buf, client_conn.state, allocator=packet_alloc)
         switch err {

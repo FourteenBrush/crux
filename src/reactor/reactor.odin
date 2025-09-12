@@ -17,16 +17,19 @@ ERROR_LOG_LEVEL :: log.Level(9)
 
 // Completion emitted by polling the IOContext, indicating the outcome of an IO operation.
 Completion :: struct {
-    // The buffer where received data is stored in, only applicable to a read operations.
-    // Allocated using an internal allocator, this must be freed by calling `release_recv_buf`.
-    recv_buf: []u8 `fmt:"-"`,
+    // The buffer where associated data is stored in, for `operation=.Read`, this contains the data
+    // received from the socket, this must be freed by calling `release_recv_buf` after the client is done
+    // processing this data, as it is allocated internally.
+    //
+    // For `operation=.Write`, this contains the exact buffer that was submitted to a `submit_write_*` procedure,
+    // in order to let the client deallocate this written data.
+    buf: []u8 `fmt:"-"`,
     // The affected socket, this is always the socket that emitted the completion, except
     // for cases where the server socket accepts new clients, then this stores the newly accepted client
     // and `Operation.NewConnection` is set in `operations`.
     // Always configured to be non-blocking.
     socket: net.TCP_Socket,
     // The number of bytes affected for the read or write operation as a whole.
-    nr_of_bytes_affected: u32, // assuming no more than ~4GiB
     operation: Operation,
 }
 
@@ -89,7 +92,7 @@ await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, tim
     return _await_io_completions(ctx, completions_out, timeout_ms)
 }
 
-// Releases the ´recv_buf´ of the given completion, must be called on completions of type ´.Read´ after
+// Releases the ´buf´ of the given completion, must be called on completions of type ´.Read´ after
 // the application processed the data, this data cannot be used afterwards.
 release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
     assert(comp.operation == .Read)
