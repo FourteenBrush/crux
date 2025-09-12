@@ -27,7 +27,7 @@ Server :: struct {
 
 // Inputs:
 // - `execution_permit`: an atomic bool indicating whether to continue running
-run :: proc(threadsafe_alloc: mem.Allocator, execution_permit: ^bool) -> bool {
+run :: proc(execution_permit: ^bool) -> bool {
     endpoint := net.Endpoint {
         address = net.IP4_Loopback,
         port = 25565,
@@ -39,34 +39,33 @@ run :: proc(threadsafe_alloc: mem.Allocator, execution_permit: ^bool) -> bool {
     io_ctx := _setup_io_context(server_sock, os.heap_allocator()) or_return
     defer reactor.destroy_io_context(&io_ctx, os.heap_allocator())
 
-    g_server = _setup_server(threadsafe_alloc) or_return
+    g_server._client_connections_guarded = make(map[net.TCP_Socket]ClientConnection)
     defer _destroy_server(g_server)
 
-    packet_receiver, alloc_err := chan.create_buffered(chan.Chan(Packet, .Both), 512, allocator=threadsafe_alloc)
+    packet_receiver, alloc_err := chan.create_buffered(chan.Chan(Packet, .Both), 512, context.allocator)
     if alloc_err != .None {
         return fatal("failed to create packet channel", alloc_err)
     }
+    defer chan.destroy(packet_receiver)
     g_server.packet_receiver = chan.as_recv(packet_receiver)
 
     net_worker_state := NetworkWorkerSharedData {
        io_ctx = io_ctx,
        server_sock = server_sock,
-       threadsafe_alloc = threadsafe_alloc,
        execution_permit = execution_permit,
        packet_bridge = chan.as_send(packet_receiver),
     }
 
     net_worker_thread: ^thread.Thread
-    {
-        // because thread.create implicitly uses context.allocator
-        context.allocator = threadsafe_alloc
-        init_context := context
-        init_context.allocator = mem.panic_allocator()
-        net_worker_thread = thread.create_and_start_with_poly_data(&net_worker_state, _network_worker_proc, init_context=init_context)
-        if net_worker_thread == nil {
-            return fatal("failed to start worker thread")
-        }
+    init_context := context
+    init_context.allocator = mem.panic_allocator()
+    net_worker_thread = thread.create_and_start_with_poly_data(&net_worker_state, _network_worker_proc, init_context=init_context)
+    if net_worker_thread == nil {
+        return fatal("failed to start worker thread")
     }
+
+    // ensure all allocators are explicitly used
+    context.allocator = mem.panic_allocator()
 
     for sync.atomic_load_explicit(execution_permit, .Acquire) {
         defer tracy.FrameMark()
@@ -141,14 +140,7 @@ _setup_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator)
 }
 
 @(private="file")
-_setup_server :: proc(allocator: mem.Allocator) -> (server: Server, ok: bool) {
-    server._client_connections_guarded = make(map[net.TCP_Socket]ClientConnection, 8, allocator)
-    return server, true
-}
-
-@(private="file")
 _destroy_server :: proc(server: Server) {
-    chan.destroy(server.packet_receiver)
     // TODO: do we need to acquire some mutex here just to be sure?
     delete(server._client_connections_guarded)
 }

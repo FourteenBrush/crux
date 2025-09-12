@@ -2,6 +2,7 @@
 // IO on client sockets, (de)serialization and transmission of packets.
 package crux
 
+import "core:os"
 import "core:time"
 import "core:log"
 import "core:mem"
@@ -21,8 +22,6 @@ NetworkWorkerSharedData :: struct {
     io_ctx: reactor.IOContext,
     // Non-blocking server socket.
     server_sock: net.TCP_Socket,
-    // An allocator to be used by this thread, must be owned by this thread or be thread safe.
-    threadsafe_alloc: mem.Allocator,
     // Ptr to atomic bool, indicating whether to continue running, modified upstream
     execution_permit: ^bool,
     packet_bridge: chan.Chan(Packet, .Send),
@@ -40,7 +39,7 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
     tracy.SetThreadName("crux-NetWorker")
     state := NetworkWorkerState {
         shared = shared^,
-        connections = make(map[net.TCP_Socket]ClientConnection, 16, shared.threadsafe_alloc),
+        connections = make(map[net.TCP_Socket]ClientConnection, 16, os.heap_allocator()),
     }
 
     defer cleanup: {
@@ -86,6 +85,10 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
             switch comp.operation {
             case .Error:
                 log.warn("client socket error")
+                // if caused by a write operation, free our allocated submission
+                if comp.buf != nil {
+                    delete(comp.buf, os.heap_allocator())
+                }
                 _disconnect_client(&state, comp.socket)
             case .PeerHangup:
                 log.warn("client socket hangup")
@@ -93,10 +96,11 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
             case .Read:
                 buf_write_bytes(&client_conn.rx_buf, comp.buf) // copies
                 reactor.release_recv_buf(&state.io_ctx, comp)
-                _drain_serverbound_packets(&state, client_conn, state.threadsafe_alloc)
+                // TODO: change allocator, we can do better than this
+                _drain_serverbound_packets(&state, client_conn, os.heap_allocator())
             case .Write:
                 // must be freed using the same allocator the reactor write call was made with
-                delete(comp.buf, state.threadsafe_alloc)
+                delete(comp.buf, os.heap_allocator())
                 if client_conn.close_after_flushing {
                     log.debug("disconnecting client as requested")
                     _disconnect_client(&state, client_conn.socket)
@@ -105,8 +109,8 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
                 state.connections[comp.socket] = ClientConnection {
                     socket = comp.socket,
                     state  = .Handshake,
-                    rx_buf = create_network_buf(allocator=state.threadsafe_alloc),
-                    tx_buf = create_network_buf(allocator=state.threadsafe_alloc),
+                    rx_buf = create_network_buf(allocator=os.heap_allocator()),
+                    tx_buf = create_network_buf(allocator=os.heap_allocator()),
                 }
 
                 log.debugf("client connected (fd %d)", comp.socket)
@@ -185,12 +189,12 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
             favicon = "data:image/png;base64,<data>",
             enforces_secure_chat = false,
         }
-        enqueue_packet(&state.io_ctx, client_conn, status_response, allocator=state.threadsafe_alloc)
+        enqueue_packet(&state.io_ctx, client_conn, status_response, allocator=os.heap_allocator())
     case PingRequestPacket:
         response := PongResponsePacket {
             payload = packet.payload,
         }
-        enqueue_packet(&state.io_ctx, client_conn, response, allocator=state.threadsafe_alloc)
+        enqueue_packet(&state.io_ctx, client_conn, response, allocator=os.heap_allocator())
         client_conn.close_after_flushing = true
     case LoginStartPacket:
         response := LoginSuccessPacket {
@@ -200,7 +204,7 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
             value = "",
             signature = nil,
         }
-        enqueue_packet(&state.io_ctx, client_conn, response, allocator=state.threadsafe_alloc)
+        enqueue_packet(&state.io_ctx, client_conn, response, allocator=os.heap_allocator())
     case LoginAcknowledgedPacket:
         client_conn.state = .Configuration
     }

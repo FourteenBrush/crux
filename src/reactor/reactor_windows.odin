@@ -6,6 +6,7 @@ import "core:net"
 import "core:mem/tlsf"
 import win32 "core:sys/windows"
 
+import "lib:back"
 import "lib:tracy"
 
 _ :: tlsf
@@ -111,6 +112,15 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
     		free(arena, allocator)
     	}
 	}
+	when ODIN_DEBUG && !tracy.TRACY_ENABLE {
+	    tracking_alloc := new(back.Tracking_Allocator, allocator)
+		back.tracking_allocator_init(
+		    tracking_alloc,
+		    backing_allocator=allocator,
+			internals_allocator=allocator,
+		)
+		ctx.allocator = back.tracking_allocator(tracking_alloc)
+	}
 
 	_install_accept_handler(&ctx) or_return
 
@@ -136,6 +146,7 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 
 	// socket that AcceptEx will use to bind the accepted client to
 	ctx.accepted_sock = _create_accept_client_socket() or_return
+	// TODO: free completion when destroying ctx
 	comp := _alloc_completion(ctx^, .Read, ctx.server_sock, {})
 
 	// FIXME: we "know" clients will always send initial data after connecting (handshake packets and such),
@@ -176,6 +187,13 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 	win32.CloseHandle(ctx.completion_port)
 	_ = win32.CloseHandle(win32.HANDLE(ctx.accepted_sock))
 
+	when ODIN_DEBUG && !tracy.TRACY_ENABLE {
+	    tracking_alloc := cast(^back.Tracking_Allocator) ctx.allocator.data
+		back.tracking_allocator_print_results(tracking_alloc)
+		back.tracking_allocator_destroy(tracking_alloc)
+		ctx.allocator = tracking_alloc.backing
+		free(tracking_alloc, allocator)
+	}
 	when USE_TLSF {
 	    tlsf_alloc := cast(^tlsf.Allocator) ctx.allocator.data
 		tlsf.destroy(tlsf_alloc)
@@ -309,23 +327,36 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 	i := 0
 	for entry in completion_entries[:nready] {
 	    tracy.ZoneN("CompletionEntry")
-		defer i += 1
 
 		op_data: ^IOOperationData = container_of(entry.lpOverlapped, IOOperationData, "overlapped")
 		#no_bounds_check comp := &completions_out[i]
   		comp.socket = net.TCP_Socket(op_data.source)
 
+        discard_entry := false
+		defer if discard_entry {
+		    nready -= 1
+			// free allocated recv buffer (comp entry for server sock contains zero initialized one)
+			if op_data.op == .Read && op_data.source != ctx.server_sock {
+                _release_recv_buf(ctx, comp^)
+			}
+		} else {
+		    i += 1
+		}
+
         // map NTSTATUS to win32 error
-        status := RtlNtStatusToDosError(i32(entry.Internal))
-        if status == u32(win32.ERROR_OPERATION_ABORTED) {
+        status := RtlNtStatusToDosError(win32.NTSTATUS(entry.Internal))
+        if status == win32.ERROR_OPERATION_ABORTED {
             tracy.ZoneN("Stale Completion")
-            // incoming completion packet for already unregistered connection, ignore
-            i -= 1 // reuse same entry
-            nready -= 1
+
+            discard_entry = true
             continue
-        } else if status != 0 {
-            _log_error(status, "completion entry failed with error")
+        } else if status != win32.ERROR_SUCCESS {
+            // NOTE: when this entry refers to a write, it still holds an user allocated buffer
+            // return this, so the application can free it
             comp.operation = .Error
+            if op_data.op == .Write {
+                comp.buf = op_data.transport_buf
+            }
 			continue
         }
 
@@ -335,7 +366,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 			    // newly accepted client stored in io context
 			    accept_success := false
 				defer if !accept_success {
-				    // TODO: what happens with this entry?
+                    discard_entry = true
 				    net.close(net.TCP_Socket(ctx.accepted_sock))
 				}
 
@@ -365,14 +396,14 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 		    partial_write := int(total_transfer) != len(op_data.transport_buf)
 			if partial_write {
 			    // ignore this entry, query another send with the remaining part of the buffer
-				i -= 1
-				nready -= 1
+				discard_entry = true
 
 				_initiate_send(ctx, op_data.source, op_data.transport_buf, partial_write_off=total_transfer) or_continue
 				continue
 			}
 
 		    comp.operation = .Write
+			// for caller to deallocate
 			comp.buf = op_data.transport_buf
 			assert(int(entry.dwNumberOfBytesTransferred) == len(op_data.transport_buf), "partial writes should be handled above")
 		}

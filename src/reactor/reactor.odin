@@ -38,6 +38,10 @@ Operation :: enum u8 {
     // The downstream may probably want to check this first before checking other completions.
     // Additional error information might be logged on the `context.logger` on the call to `await_io_completions`,
     // with a log level of `ERROR_LOG_LEVEL`.
+    //
+    // Due to the fact that write operations may also cause an error, there is a subtlety where the application
+    // has to check whether `Completion.buf` is not `nil`. As this may contain the submitted write data in the
+    // case of a write operation, this to give the application the chance to release this data.
     Error,
     // Data was read from the client socket and is now available in the `Completion.recv_buf`.
     // This always indicates a successful read, an EOF condition is handled with `.PeerHangup` instead.
