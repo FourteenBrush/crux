@@ -55,10 +55,10 @@ partial_write_arrives_in_one_completion :: proc(t: ^testing.T) {
         testing.expect(t, ok, "failed to await io events") or_break thread
 
         for comp in completions[:nready] {
-            testing.expect(t, .Error not_in comp.operations, "event with .Error flag was returned") or_break thread
-            testing.expect(t, .Read not_in comp.operations, "unexpected .Read event")
+            testing.expect(t, comp.operation != .Error, "event with .Error flag was returned") or_break thread
+            testing.expect(t, comp.operation != .Read, "unexpected .Read event")
 
-            if .NewConnection in comp.operations {
+            if comp.operation == .NewConnection {
                 testing.expectf(t, client_state == .AwaitingConn, "received .NewConnection event in state %s", client_state) or_break thread
                 client_state = .Idle
 
@@ -70,11 +70,11 @@ partial_write_arrives_in_one_completion :: proc(t: ^testing.T) {
                 submission_ok := reactor.submit_write_copy(&io, comp.socket, data)
                 testing.expect(t, submission_ok, "failed to submit chunked write to client") or_break thread
             }
-            if .Write in comp.operations {
+            if comp.operation == .Write {
                 testing.expectf(t, client_state == .Idle, "received .Write event in state %s", client_state) or_break thread
                 client_state = .ReceivedWrite
             }
-            if .PeerHangup in comp.operations {
+            if comp.operation == .PeerHangup {
                 testing.expectf(t, client_state == .ReceivedWrite, "received .PeerHangup event in state %s", client_state) or_break thread
                 client_state = .ReceivedHangup
                 break thread
