@@ -53,17 +53,17 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
         comp.socket = net.TCP_Socket(event.data.fd)
 
         if .IN in event.events {
-            comp.operations += {.Read}
+            comp.operation = .Read
         }
         if .OUT in event.events {
-            comp.operations += {.Write}
+            comp.operation = .Write
         }
         if .ERR in event.events {
-            comp.operations += {.Error}
+            comp.operation = .Error
         }
         // handle abrupt disconnection and read hangup the same way
         if .HUP in event.events || .RDHUP in event.events {
-            comp.operations += {.PeerHangup}
+            comp.operation = .PeerHangup
         }
     }
     return int(nready), true

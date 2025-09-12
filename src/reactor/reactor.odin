@@ -27,12 +27,7 @@ Completion :: struct {
     socket: net.TCP_Socket,
     // The number of bytes affected for the read or write operation as a whole.
     nr_of_bytes_affected: u32, // assuming no more than ~4GiB
-    // Multiple flags might be present at the same time, as to batch multiple completions.
-    // For example, a read or write might be combined with an error or peer hangup.
-    // Reads and writes are never combined.
-    // TODO: does it actually make sense to combine them, whats the point of emitting IO completions
-    // when the peer errored out or hang up?
-    operations: bit_set[Operation; u8],
+    operation: Operation,
 }
 
 Operation :: enum u8 {

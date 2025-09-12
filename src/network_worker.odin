@@ -76,33 +76,28 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
 
         for event in completions[:nready] {
             client_conn := &state.connections[event.socket]
-            if client_conn == nil && .NewConnection not_in event.operations {
+            if client_conn == nil && event.operation != .NewConnection {
                 // stale event arrived after a disconnect was issued (peer hangup confirmation or io completion
                 // that could not be canceled in time)
                 continue
             }
 
-            if .Error in event.operations {
+            switch event.operation {
+            case .Error:
                 log.warn("client socket error")
                 _disconnect_client(&state, event.socket)
-                continue
-            } else if .PeerHangup in event.operations {
+            case .PeerHangup:
                 log.warn("client socket hangup")
                 _disconnect_client(&state, event.socket)
-                continue
-            }
-
-            if .Read in event.operations {
+            case .Read:
                 buf_write_bytes(&client_conn.rx_buf, event.recv_buf)
                 _drain_serverbound_packets(&state, client_conn, state.threadsafe_alloc)
-            }
-            if .Write in event.operations {
+            case .Write:
                 if client_conn.close_after_flushing {
                     log.debug("disconnecting client as requested")
                     _disconnect_client(&state, client_conn.socket)
                 }
-            }
-            if .NewConnection in event.operations {
+            case .NewConnection:
                 state.connections[event.socket] = ClientConnection {
                     socket = event.socket,
                     state  = .Handshake,

@@ -218,6 +218,8 @@ _register_client :: proc(ctx: ^IOContext, client: win32.SOCKET) -> bool {
 _initiate_recv :: proc(ctx: ^IOContext, client: win32.SOCKET) -> bool {
     tracy.Zone()
 
+    // alloc a new recv buffer per recv operation, we could in theory use two buffers per client
+    // and rotate them, but a pool/slab allocator works good enough for this
     recv_buf: []u8
     {
         tracy.ZoneN("ALLOC_RECV")
@@ -322,7 +324,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
             continue
         } else if status != 0 {
             _log_error(status, "completion entry failed with error")
-            comp.operations = {.Error}
+            comp.operation = .Error
 			continue
         }
 
@@ -334,12 +336,13 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 			    // newly accepted client stored in io context
 			    accept_success := false
 				defer if !accept_success {
+				    // TODO: what happens with this entry?
 				    net.close(net.TCP_Socket(ctx.accepted_sock))
 				}
 
 				_configure_accepted_client(ctx) or_continue
 				_register_client(ctx, ctx.accepted_sock) or_continue
-				comp.operations = {.NewConnection}
+				comp.operation = .NewConnection
 				comp.socket = net.TCP_Socket(ctx.accepted_sock)
 				accept_success = true
 
@@ -350,9 +353,9 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 			}
 
 			if entry.dwNumberOfBytesTransferred == 0 {
-			    comp.operations = {.PeerHangup}
+			    comp.operation = .PeerHangup
 			} else {
-    			comp.operations = {.Read}
+    			comp.operation = .Read
     			comp.recv_buf = op_data.transport_buf[:entry.dwNumberOfBytesTransferred]
 
     			// re-arm recv handler
@@ -370,7 +373,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 				continue
 			}
 
-		    comp.operations = {.Write}
+		    comp.operation = .Write
 			assert(int(entry.dwNumberOfBytesTransferred) == len(op_data.transport_buf), "partial writes should be handled above")
 		}
 	}
