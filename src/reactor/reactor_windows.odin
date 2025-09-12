@@ -266,6 +266,7 @@ IOOperation :: enum u8 {
 
 @(private)
 _unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
+    tracy.Zone()
     // cancel outstanding io operations, yet to arrive completions will have a ERROR_OPERATION_ABORTED status.
     // this is the only way to unregister clients, there is no real "iocp unregister" procedure
     ok := CancelIoEx(win32.HANDLE(win32.SOCKET(client)), /*cancel all*/ nil)
@@ -381,6 +382,12 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 	return int(nready), true
 }
 
+@(private)
+_release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
+    tracy.Zone()
+    delete(comp.recv_buf, ctx.allocator)
+}
+
 // TODO: don't actually flush on every call
 @(private)
 _submit_write_copy :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) -> bool {
@@ -391,6 +398,8 @@ _submit_write_copy :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) 
 
 @(private="file")
 _initiate_send :: proc(ctx: ^IOContext, client: win32.SOCKET, data: []u8, partial_write_off: u32 = 0) -> bool {
+    tracy.Zone()
+
     comp := _alloc_completion(ctx^, .Write, client, data)
     comp.write_already_transfered = partial_write_off
 

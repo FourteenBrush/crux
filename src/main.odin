@@ -1,5 +1,3 @@
-// TODO: remove after lib/back makes init procs contextless
-#+feature global-context
 package crux
 
 import "core:fmt"
@@ -76,6 +74,7 @@ main :: proc() {
     }
 
     back.register_segfault_handler()
+    context.assertion_failure_proc = back.assertion_failure_proc
 
     log_opts := log.Options {.Level, .Terminal_Color}
 

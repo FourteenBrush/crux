@@ -18,7 +18,7 @@ ERROR_LOG_LEVEL :: log.Level(9)
 // Completion emitted by polling the IOContext, indicating the outcome of an IO operation.
 Completion :: struct {
     // The buffer where received data is stored in, only applicable to a read operations.
-    // The number of bytes affected in the io operation, only used for read and write operations.
+    // Allocated using an internal allocator, this must be freed by calling `release_recv_buf`.
     recv_buf: []u8 `fmt:"-"`,
     // The affected socket, this is always the socket that emitted the completion, except
     // for cases where the server socket accepts new clients, then this stores the newly accepted client
@@ -87,6 +87,13 @@ unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 // - `timeout_ms`: the waiting timeout in ms, 0 means return immediately if no completions can be awaited.
 await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, timeout_ms: int) -> (n: int, ok: bool) {
     return _await_io_completions(ctx, completions_out, timeout_ms)
+}
+
+// Releases the ´recv_buf´ of the given completion, must be called on completions of type ´.Read´ after
+// the application processed the data, this data cannot be used afterwards.
+release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
+    assert(comp.operation == .Read)
+    _release_recv_buf(ctx, comp)
 }
 
 submit_write_copy :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) -> bool {

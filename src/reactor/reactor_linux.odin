@@ -70,6 +70,11 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 }
 
 @(private)
+_release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
+    // TODO
+}
+
+@(private)
 _submit_write_copy :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) -> bool {
     // TODO: append iovec to userspace queue
     return false

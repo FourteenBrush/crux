@@ -74,23 +74,25 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
         nready, ok := reactor.await_io_completions(&state.io_ctx, completions[:], timeout_ms=REACTOR_TIMEOUT_MS)
         assert(ok, "failed to await io events") // TODO: proper error handling
 
-        for event in completions[:nready] {
-            client_conn := &state.connections[event.socket]
-            if client_conn == nil && event.operation != .NewConnection {
+        for comp in completions[:nready] {
+            client_conn := &state.connections[comp.socket]
+            if client_conn == nil && comp.operation != .NewConnection {
                 // stale event arrived after a disconnect was issued (peer hangup confirmation or io completion
                 // that could not be canceled in time)
                 continue
             }
+            tracy.ZoneN("ProcessCompletion")
 
-            switch event.operation {
+            switch comp.operation {
             case .Error:
                 log.warn("client socket error")
-                _disconnect_client(&state, event.socket)
+                _disconnect_client(&state, comp.socket)
             case .PeerHangup:
                 log.warn("client socket hangup")
-                _disconnect_client(&state, event.socket)
+                _disconnect_client(&state, comp.socket)
             case .Read:
-                buf_write_bytes(&client_conn.rx_buf, event.recv_buf)
+                buf_write_bytes(&client_conn.rx_buf, comp.recv_buf) // copies
+                reactor.release_recv_buf(&state.io_ctx, comp)
                 _drain_serverbound_packets(&state, client_conn, state.threadsafe_alloc)
             case .Write:
                 if client_conn.close_after_flushing {
@@ -98,14 +100,14 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
                     _disconnect_client(&state, client_conn.socket)
                 }
             case .NewConnection:
-                state.connections[event.socket] = ClientConnection {
-                    socket = event.socket,
+                state.connections[comp.socket] = ClientConnection {
+                    socket = comp.socket,
                     state  = .Handshake,
                     rx_buf = create_network_buf(allocator=state.threadsafe_alloc),
                     tx_buf = create_network_buf(allocator=state.threadsafe_alloc),
                 }
 
-                log.debugf("client connected (fd %d)", event.socket)
+                log.debugf("client connected (fd %d)", comp.socket)
             }
         }
     }

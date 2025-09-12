@@ -5,9 +5,12 @@ import "core:mem"
 import "base:runtime"
 import "core:encoding/json"
 
+import "lib:tracy"
+
 import "src:reactor"
 
 enqueue_packet :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnection, packet: ClientBoundPacket, allocator: mem.Allocator) {
+    tracy.Zone()
     runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
     log.log(LOG_LEVEL_OUTBOUND, "Sending packet", packet)
     _serialize_clientbound(packet, &client_conn.tx_buf, allocator=allocator)
