@@ -35,7 +35,6 @@ main :: proc() {
     // NOTE: must be put before all other deferred statements
     defer os.exit(0 if exit_success else 1)
 
-    allocator := os.heap_allocator()
     // pool: mem.Dynamic_Arena
     // mem.dynamic_arena_init(
     //   &pool, context.allocator, context.allocator,
@@ -48,17 +47,17 @@ main :: proc() {
     // in debug mode, wrap a tracking allocator around the dynamic arena
     when ODIN_DEBUG && !tracy.TRACY_ENABLE {
         tracking_alloc: back.Tracking_Allocator
-        back.tracking_allocator_init(&tracking_alloc, allocator, os.heap_allocator())
+        back.tracking_allocator_init(&tracking_alloc, context.allocator)
         defer back.tracking_allocator_destroy(&tracking_alloc)
-        allocator = back.tracking_allocator(&tracking_alloc)
+        context.allocator = back.tracking_allocator(&tracking_alloc)
         defer back.tracking_allocator_print_results(&tracking_alloc, .Both)
     }
 
     when tracy.TRACY_ENABLE {
-        allocator = tracy.MakeProfiledAllocator(
+        context.allocator = tracy.MakeProfiledAllocator(
             self = &tracy.ProfiledAllocatorData{},
             callstack_size = 14,
-            backing_allocator = allocator,
+            backing_allocator = context.allocator,
         )
     }
 
@@ -83,27 +82,25 @@ main :: proc() {
         sync.atomic_store_explicit(&g_continue_running, false, .Release)
     })
 
-    defer if fmt._user_formatters == nil {
+    alloc_formatters := fmt._user_formatters == nil
+    defer if alloc_formatters {
         delete(fmt._user_formatters^)
     }
-    if fmt._user_formatters == nil {
+    if alloc_formatters {
         formatters := make(map[typeid]fmt.User_Formatter)
         fmt.set_user_formatters(&formatters)
     }
     _register_user_formatters()
 
-    // ensure all allocators are explicitly used
-    // context.allocator = mem.panic_allocator()
-
     // TODO
     // args, ok := parse_cli_args(allocator)
 
-    context.logger = log.create_console_logger(.Debug when ODIN_DEBUG else .Warning, log_opts, allocator=allocator)
-    defer log.destroy_console_logger(context.logger, allocator=allocator)
+    context.logger = log.create_console_logger(.Debug when ODIN_DEBUG else .Warning, log_opts)
+    defer log.destroy_console_logger(context.logger)
 
     tracy.SetThreadName("main")
 
-    exit_success = run(allocator, execution_permit=&g_continue_running)
+    exit_success = run(execution_permit=&g_continue_running)
 }
 
 @(private="file")
