@@ -46,7 +46,6 @@ run :: proc(threadsafe_alloc: mem.Allocator, execution_permit: ^bool) -> bool {
     if alloc_err != .None {
         return fatal("failed to create packet channel", alloc_err)
     }
-    defer chan.destroy(&packet_receiver)
     g_server.packet_receiver = chan.as_recv(packet_receiver)
 
     net_worker_state := NetworkWorkerSharedData {

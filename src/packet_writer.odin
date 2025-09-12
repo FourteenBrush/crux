@@ -2,7 +2,6 @@ package crux
 
 import "core:log"
 import "core:mem"
-import "base:runtime"
 import "core:encoding/json"
 
 import "lib:tracy"
@@ -11,11 +10,11 @@ import "src:reactor"
 
 enqueue_packet :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnection, packet: ClientBoundPacket, allocator: mem.Allocator) {
     tracy.Zone()
-    runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
     log.log(LOG_LEVEL_OUTBOUND, "Sending packet", packet)
+
     _serialize_clientbound(packet, &client_conn.tx_buf, allocator=allocator)
 
-    // TODO: figure out when to free this
+    // freed by io worker after receiving write completion
     outb := make([]u8, buf_length(client_conn.tx_buf), allocator)
     read_err := buf_copy_into(&client_conn.tx_buf, outb)
     assert(read_err == .None, "invariant, copied full length")
@@ -41,8 +40,8 @@ _serialize_clientbound :: proc(packet: ClientBoundPacket, outb: ^NetworkBuffer, 
     switch packet in packet {
     case StatusResponsePacket:
         // json serializer does not return allocator errors, so there should be no reason this fails
-        bytes := json.marshal(packet, allocator=allocator) or_else panic("error serializing status response")
-        werr := buf_write_string(outb, string(bytes))
+        bytes := json.marshal(packet, allocator=context.temp_allocator) or_else panic("error serializing status response")
+        werr := buf_write_string(outb, string(bytes)) // copied
         assert(werr == .None, "max string length exceeded") // TODO
     case PongResponsePacket:
         buf_write_long(outb, packet.payload)

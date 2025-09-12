@@ -22,9 +22,6 @@ _ :: time
 _ :: spall
 _ :: runtime
 
-@(private="file")
-CRUX_PROFILE :: #config(CRUX_PROFILE, false)
-
 // log levels for logging packet transfer, these values are bigger than .Debug (1)
 @(private) LOG_LEVEL_INBOUND :: log.Level(7)
 @(private) LOG_LEVEL_OUTBOUND :: log.Level(8)
@@ -38,31 +35,23 @@ main :: proc() {
     // NOTE: must be put before all other deferred statements
     defer os.exit(0 if exit_success else 1)
 
-    pool: mem.Dynamic_Arena
-    mem.dynamic_arena_init(
-      &pool, context.allocator, context.allocator,
-      block_size=spall.BUFFER_DEFAULT_SIZE when CRUX_PROFILE else mem.DYNAMIC_ARENA_BLOCK_SIZE_DEFAULT,
-      alignment=runtime.MAP_CACHE_LINE_SIZE,
-    )
-    allocator := mem.dynamic_arena_allocator(&pool)
-    defer mem.dynamic_arena_destroy(&pool)
+    allocator := os.heap_allocator()
+    // pool: mem.Dynamic_Arena
+    // mem.dynamic_arena_init(
+    //   &pool, context.allocator, context.allocator,
+    //   block_size=mem.DYNAMIC_ARENA_BLOCK_SIZE_DEFAULT,
+    //   alignment=runtime.MAP_CACHE_LINE_SIZE,
+    // )
+    // allocator := mem.dynamic_arena_allocator(&pool)
+    // defer mem.dynamic_arena_destroy(&pool)
 
     // in debug mode, wrap a tracking allocator around the dynamic arena
-    when ODIN_DEBUG && !CRUX_PROFILE {
-        tracking_alloc: mem.Tracking_Allocator
-        mem.tracking_allocator_init(&tracking_alloc, allocator, os.heap_allocator())
-        tracking_alloc.bad_free_callback = mem.tracking_allocator_bad_free_callback_add_to_array
-        defer mem.tracking_allocator_destroy(&tracking_alloc)
-        allocator = mem.tracking_allocator(&tracking_alloc)
-
-        defer {
-            for _, leak in tracking_alloc.allocation_map {
-                fmt.eprintfln("%v leaked %m", leak.location, leak.size)
-            }
-            for bad_free in tracking_alloc.bad_free_array {
-                fmt.eprintfln("%v allocation %p was freed badly", bad_free.location, bad_free.memory)
-            }
-        }
+    when ODIN_DEBUG && !tracy.TRACY_ENABLE {
+        tracking_alloc: back.Tracking_Allocator
+        back.tracking_allocator_init(&tracking_alloc, allocator, os.heap_allocator())
+        defer back.tracking_allocator_destroy(&tracking_alloc)
+        allocator = back.tracking_allocator(&tracking_alloc)
+        defer back.tracking_allocator_print_results(&tracking_alloc, .Both)
     }
 
     when tracy.TRACY_ENABLE {
@@ -104,17 +93,16 @@ main :: proc() {
     _register_user_formatters()
 
     // ensure all allocators are explicitly used
-    context.allocator = mem.panic_allocator()
+    // context.allocator = mem.panic_allocator()
+
+    // TODO
+    // args, ok := parse_cli_args(allocator)
 
     context.logger = log.create_console_logger(.Debug when ODIN_DEBUG else .Warning, log_opts, allocator=allocator)
     defer log.destroy_console_logger(context.logger, allocator=allocator)
 
     tracy.SetThreadName("main")
 
-    // TODO
-    // args, ok := parse_cli_args(allocator)
-
-    exit_success = true
     exit_success = run(allocator, execution_permit=&g_continue_running)
 }
 
