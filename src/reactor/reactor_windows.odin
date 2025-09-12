@@ -1,9 +1,9 @@
 package reactor
 
-import "core:mem/tlsf"
 import "core:log"
 import "core:mem"
 import "core:net"
+import "core:mem/tlsf"
 import win32 "core:sys/windows"
 
 import "lib:tracy"
@@ -44,6 +44,8 @@ _accept_ex_sock_addrs := win32.LPFN_GETACCEPTEXSOCKADDRS(nil)
 _IOContext :: struct {
 	completion_port: win32.HANDLE,
 	server_sock: win32.SOCKET,
+	// TODO: separate into two allocators, one for per client recv bufs/write bufs (maybe) and
+	// one for completion entries, freelist block based, or perhaps even epoch based recycling (assuming no iocp stalls occur)
 	allocator: mem.Allocator,
 
 	// Client socket on which to accept connections (`AcceptEx` style).
@@ -85,8 +87,8 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 		init_err := tlsf.init_from_allocator(
 		    tlsf_alloc,
 			backing=allocator,
-			initial_pool_size=2 * RECV_BUF_SIZE,
-			new_pool_size=4 * RECV_BUF_SIZE,
+			initial_pool_size=6 * RECV_BUF_SIZE,
+			new_pool_size=120 * RECV_BUF_SIZE,
 		)
 		assert(init_err == .None, "failed to init tlsf allocator")
 		ctx.allocator = tlsf.allocator(tlsf_alloc)
@@ -100,6 +102,7 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
     		arena,
     		block_allocator=allocator,
     		array_allocator=allocator,
+            block_size=120 * RECV_BUF_SIZE,
     	)
     	// TODO: individual frees are not supported, are we slowly leaking memory?
     	ctx.allocator = mem.dynamic_arena_allocator(arena)
@@ -131,10 +134,9 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
     tracy.Zone()
 
-    comp := _alloc_completion(ctx^, .Read, ctx.server_sock, {})
-
 	// socket that AcceptEx will use to bind the accepted client to
 	ctx.accept_sock = _create_accept_client_socket() or_return
+	comp := _alloc_completion(ctx^, .Read, ctx.server_sock, {})
 
 	// FIXME: we "know" clients will always send initial data after connecting (handshake packets and such),
 	// can we specify a recv buffer length > 0, while also defending against denial of service attacks
@@ -185,8 +187,10 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 	}
 }
 
-@(private)
-_register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
+// Inputs:
+// - `recv_buf`: a preallocated recv buffer which will be used for the whole lifetime of the connection.
+@(private="file")
+_register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket, recv_buf: []u8) -> bool {
     tracy.Zone()
     handle := win32.HANDLE(uintptr(client))
 
@@ -206,25 +210,20 @@ _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
         _log_error(win32.GetLastError(), "failed to set FILE_SKIP_SET_EVENT bit")
     }
 
-    return _initiate_recv(ctx, win32.SOCKET(client))
+    return _initiate_recv(ctx, win32.SOCKET(client), recv_buf)
 }
 
 // Initiate async recv call to emit an iocp event whenever data can be read
 @(private="file")
-_initiate_recv :: proc(ctx: ^IOContext, client: win32.SOCKET) -> bool {
+_initiate_recv :: proc(ctx: ^IOContext, client: win32.SOCKET, recv_buf: []u8) -> bool {
     tracy.Zone()
 
-    buf: []u8
-    {
-        tracy.ZoneN("ALLOC RECV")
-        buf = make([]u8, RECV_BUF_SIZE, ctx.allocator)
-    }
-    comp := _alloc_completion(ctx^, .Read, win32.SOCKET(client), buf)
+    comp := _alloc_completion(ctx^, .Read, win32.SOCKET(client), recv_buf)
 
     flags: u32
 	result := win32.WSARecv(
 		win32.SOCKET(client),
-		&win32.WSABUF { u32(len(buf)), raw_data(buf) },
+		&win32.WSABUF { u32(len(recv_buf)), raw_data(recv_buf) },
 		1,      /* buffer count */
 		nil,    /* nr of bytes received */
 		&flags,
@@ -334,8 +333,12 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 				}
 
 				_configure_accepted_client(ctx) or_continue
-				// TODO: reuse recv buffers per connection
-				_register_client(ctx, net.TCP_Socket(ctx.accept_sock)) or_continue
+				recv_buf: []u8
+				{
+				    tracy.ZoneN("ALLOC_RECV")
+					recv_buf = make([]u8, RECV_BUF_SIZE, ctx.allocator) or_else panic("OOM")
+				}
+				_register_client(ctx, net.TCP_Socket(ctx.accept_sock), recv_buf) or_continue
 				comp.operations = {.NewConnection}
 				comp.socket = net.TCP_Socket(ctx.accept_sock)
 				accept_success = true
@@ -352,8 +355,8 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
     			comp.operations = {.Read}
     			comp.recv_buf = op_data.transport_buf[:entry.dwNumberOfBytesTransferred]
 
-    			// re-arm recv handler
-    			_initiate_recv(ctx, op_data.source) or_continue
+    			// re-arm recv handler, reuse same recv buffer
+    			_initiate_recv(ctx, op_data.source, op_data.transport_buf) or_continue
 			}
 		case .Write:
 		    total_transfer := entry.dwNumberOfBytesTransferred + op_data.write_already_transfered

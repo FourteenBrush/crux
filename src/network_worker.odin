@@ -35,6 +35,7 @@ NetworkWorkerState :: struct {
     connections: map[net.TCP_Socket]ClientConnection,
 }
 
+// TODO: logger is not threadsafe
 _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
     tracy.SetThreadName("crux-NetWorker")
     state := NetworkWorkerState {
@@ -58,6 +59,7 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
             target_tick_time := WORKER_TARGET_MSPT * time.Millisecond
             if tick_duration < target_tick_time {
                 tracy.ZoneNC("Worker Sleep", color=0x9c4433)
+                // TODO: dynamically scale, if theres nothing to do, just sleep a bit longer
                 time.sleep(target_tick_time - tick_duration)
             }
             free_all(context.temp_allocator)

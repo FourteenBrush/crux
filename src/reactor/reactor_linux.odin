@@ -23,7 +23,7 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
     linux.close(ctx.epoll_fd)
 }
 
-@(private)
+@(private="file")
 _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
     event := linux.EPoll_Event {
         // NOTE: .HUP and .ERR are implicit
