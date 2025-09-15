@@ -1,6 +1,5 @@
 package test
 
-import "core:log"
 import "core:net"
 import "core:testing"
 import win32 "core:sys/windows"
@@ -19,10 +18,11 @@ foreign kernel32 {
 @(test, disabled=ODIN_OS != .Windows)
 io_cancelation :: proc(t: ^testing.T) {
     // initialize server socket
-    server_sock_, listen_err := net.listen_tcp(net.Endpoint { address = net.IP4_Loopback })
+    server_sock, listen_err := net.listen_tcp(net.Endpoint { address = net.IP4_Loopback })
     if !testing.expect(t, listen_err == nil) do return
-    server_endp, info_err := net.bound_endpoint(net.TCP_Socket(server_sock_))
+    server_endp, info_err := net.bound_endpoint(net.TCP_Socket(server_sock))
     if !testing.expect(t, info_err == .None) do return
+    defer net.close(server_sock)
 
     // create completion port
     iocp := win32.CreateIoCompletionPort(win32.INVALID_HANDLE_VALUE, win32.HANDLE(nil), 0, 1)
@@ -34,6 +34,7 @@ io_cancelation :: proc(t: ^testing.T) {
     if !testing.expect(t, dial_err == nil, "failed to connect client to server") do return
     set_blocking_err := net.set_blocking(net.TCP_Socket(client_sock), false)
     if !testing.expect(t, set_blocking_err == .None, "failed to configure client socket as non-blocking") do return
+    defer net.close(client_sock)
 
     // associate iocp to client socket
     port := win32.CreateIoCompletionPort(win32.HANDLE(uintptr(client_sock)), iocp, 0, 1)
@@ -68,7 +69,6 @@ io_cancelation :: proc(t: ^testing.T) {
 
     entry_status := RtlNtStatusToDosError(win32.NTSTATUS(entries[0].Internal))
     if !testing.expect_value(t, entry_status, win32.ERROR_OPERATION_ABORTED) do return
-    log.warn(win32.System_Error(entry_status))
 }
 
 poll_iocp :: proc(t: ^testing.T, iocp: win32.HANDLE, entries_out: ^[$N]win32.OVERLAPPED_ENTRY) -> (n: u32, ok: bool) {
