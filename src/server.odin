@@ -40,7 +40,7 @@ run :: proc(execution_permit: ^bool) -> bool {
     defer reactor.destroy_io_context(&io_ctx, os.heap_allocator())
 
     g_server._client_connections_guarded = make(map[net.TCP_Socket]ClientConnection)
-    defer _destroy_server(g_server)
+    defer delete(g_server._client_connections_guarded)
 
     packet_receiver, alloc_err := chan.create_buffered(chan.Chan(Packet, .Both), 512, context.allocator)
     if alloc_err != .None {
@@ -56,10 +56,9 @@ run :: proc(execution_permit: ^bool) -> bool {
        packet_bridge = chan.as_send(packet_receiver),
     }
 
-    net_worker_thread: ^thread.Thread
     init_context := context
     init_context.allocator = mem.panic_allocator()
-    net_worker_thread = thread.create_and_start_with_poly_data(&net_worker_state, _network_worker_proc, init_context=init_context)
+    net_worker_thread := thread.create_and_start_with_poly_data(&net_worker_state, _network_worker_proc, init_context=init_context)
     if net_worker_thread == nil {
         return fatal("failed to start worker thread")
     }
@@ -139,15 +138,9 @@ _setup_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator)
     return io_ctx, true
 }
 
-@(private="file")
-_destroy_server :: proc(server: Server) {
-    // TODO: do we need to acquire some mutex here just to be sure?
-    delete(server._client_connections_guarded)
-}
-
 ClientConnection :: struct {
-    // Non blocking socket
-    socket: net.TCP_Socket,
+    // Stores non blocking socket
+    using handle: reactor.ConnectionHandle,
     state: ClientState,
 
     // Whether this connection needs to be closed after flushing all packets

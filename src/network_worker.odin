@@ -76,6 +76,7 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
         for comp in completions[:nready] {
             client_conn := &state.connections[comp.socket]
             if client_conn == nil && comp.operation != .NewConnection {
+                log.debug("stale completion:", comp)
                 // stale event arrived after a disconnect was issued (peer hangup confirmation or io completion
                 // that could not be canceled in time)
                 continue
@@ -85,14 +86,14 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
             switch comp.operation {
             case .Error:
                 log.warn("client socket error")
-                // if caused by a write operation, free our allocated submission
+                // if caused by a write operation, free our allocated submission which the reactor gave back to us
                 if comp.buf != nil {
                     delete(comp.buf, os.heap_allocator())
                 }
-                _disconnect_client(&state, comp.socket)
+                _disconnect_client(&state, client_conn^)
             case .PeerHangup:
                 log.warn("client socket hangup")
-                _disconnect_client(&state, comp.socket)
+                _disconnect_client(&state, client_conn^)
             case .Read:
                 buf_write_bytes(&client_conn.rx_buf, comp.buf) // copies
                 reactor.release_recv_buf(&state.io_ctx, comp)
@@ -103,11 +104,11 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
                 delete(comp.buf, os.heap_allocator())
                 if client_conn.close_after_flushing {
                     log.debug("disconnecting client as requested")
-                    _disconnect_client(&state, client_conn.socket)
+                    _disconnect_client(&state, client_conn^)
                 }
             case .NewConnection:
                 state.connections[comp.socket] = ClientConnection {
-                    socket = comp.socket,
+                    handle = comp.handle,
                     state  = .Handshake,
                     rx_buf = create_network_buf(allocator=os.heap_allocator()),
                     tx_buf = create_network_buf(allocator=os.heap_allocator()),
@@ -121,8 +122,8 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
 
 @(private="file")
 _network_worker_atexit :: proc(state: ^NetworkWorkerState) {
-    for socket in state.connections {
-        _disconnect_client(state, socket)
+    for _, client_conn in state.connections {
+        _disconnect_client(state, client_conn)
     }
     delete(state.connections)
 }
@@ -141,13 +142,13 @@ _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^Cli
         case .InvalidData:
             log.debug("client sent malformed packet, kicking; buf=")
             buf_dump(client_conn.rx_buf)
-            _disconnect_client(state, client_conn.socket)
+            _disconnect_client(state, client_conn^)
             break loop
         case .None:
             packet_desc := get_serverbound_packet_descriptor(packet)
             if packet_desc.expected_client_state != client_conn.state {
                 log.debugf("client sent packet in wrong client state (%v != %v): %v", client_conn.state, packet_desc.expected_client_state, packet)
-                _disconnect_client(state, client_conn.socket)
+                _disconnect_client(state, client_conn^)
                 break loop
             }
 
@@ -169,7 +170,7 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
         client_conn.state = ClientState(packet.intent) // safe to cast
     case LegacyServerListPingPacket:
         log.debugf("kicking client due to LegacyServerPingEvent")
-        _disconnect_client(state, client_conn.socket)
+        _disconnect_client(state, client_conn^)
         return
 
     // TODO: move to main thread
@@ -211,14 +212,14 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
 }
 
 // Unregisters a client and shuts down the connection without transmissing any more data.
-_disconnect_client :: proc(state: ^NetworkWorkerState, client_sock: net.TCP_Socket) {
+_disconnect_client :: proc(state: ^NetworkWorkerState, client_conn: ClientConnection) {
     tracy.Zone()
 
     // FIXME: probably want to handle error
-    reactor.unregister_client(&state.io_ctx, client_sock)
-    _delete_client_connection(client_sock)
+    reactor.unregister_client(&state.io_ctx, client_conn.handle)
+    _delete_client_connection(client_conn.socket)
 
-    _, client_conn := delete_key(&state.connections, client_sock)
+    _, client_conn := delete_key(&state.connections, client_conn.socket)
     destroy_network_buf(client_conn.tx_buf)
     destroy_network_buf(client_conn.rx_buf)
 }

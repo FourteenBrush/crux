@@ -19,7 +19,7 @@ enqueue_packet :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnectio
     read_err := buf_copy_into(&client_conn.tx_buf, outb)
     assert(read_err == .None, "invariant, copied full length")
 
-    submission_ok := reactor.submit_write_copy(io_ctx, client_conn.socket, outb)
+    submission_ok := reactor.submit_write_copy(io_ctx, client_conn.handle, outb)
     assert(submission_ok, "TODO: submission errors")
     buf_advance_pos_unchecked(&client_conn.tx_buf, len(outb))
 }

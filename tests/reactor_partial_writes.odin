@@ -67,7 +67,7 @@ partial_write_arrives_in_one_completion :: proc(t: ^testing.T) {
                 testing.expect(t, opt_err == nil, "failed to configure send buffer size") or_break thread
 
                 data := make([]u8, RECV_BUF_SIZE * 3, context.temp_allocator)
-                submission_ok := reactor.submit_write_copy(&io, comp.socket, data)
+                submission_ok := reactor.submit_write_copy(&io, comp.handle, data)
                 testing.expect(t, submission_ok, "failed to submit chunked write to client") or_break thread
             }
             if comp.operation == .Write {

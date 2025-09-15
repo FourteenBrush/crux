@@ -17,20 +17,33 @@ ERROR_LOG_LEVEL :: log.Level(9)
 
 // Completion emitted by polling the IOContext, indicating the outcome of an IO operation.
 Completion :: struct {
-    // The buffer where associated data is stored in, for `operation=.Read`, this contains the data
+    // The handle referring to the client connection which emitted this completion. To simplify this structure, the application
+    // can only use this member when `operation == .NewConnection`, only at that point it stores a newly created connection handle,
+    // which the application is supposed to store, as it serves as a key into this subsystem. It is however always safe to access
+    // the `socket` member of this handle structure.
+    using handle: ConnectionHandle,
+    // The buffer where associated data is stored in, for `operation == .Read`, this contains the data
     // received from the socket, this must be freed by calling `release_recv_buf` after the client is done
     // processing this data, as it is allocated internally.
     //
-    // For `operation=.Write`, this contains the exact buffer that was submitted to a `submit_write_*` procedure,
+    // For `operation == .Write`, this contains the exact buffer that was submitted to a `submit_write_*` procedure,
     // in order to let the client deallocate this written data.
+    // Additionally, when `operation == .Error`, and this completion corresponds to a failed write operation, this also contains
+    // the exact written bytes, so they do not get leaked.
+    // In all other cases, this is `nil`.
     buf: []u8 `fmt:"-"`,
+    operation: Operation,
+}
+
+// A handle which corresponds to an accepted connection.
+ConnectionHandle :: struct {
     // The affected socket, this is always the socket that emitted the completion, except
     // for cases where the server socket accepts new clients, then this stores the newly accepted client
-    // and `Operation.NewConnection` is set in `operations`.
+    // and `operation` is being set as `.NewConnection`.
     // Always configured to be non-blocking.
     socket: net.TCP_Socket,
-    // The number of bytes affected for the read or write operation as a whole.
-    operation: Operation,
+    // Opaque data.
+    _impl: rawptr,
 }
 
 Operation :: enum u8 {
@@ -38,10 +51,6 @@ Operation :: enum u8 {
     // The downstream may probably want to check this first before checking other completions.
     // Additional error information might be logged on the `context.logger` on the call to `await_io_completions`,
     // with a log level of `ERROR_LOG_LEVEL`.
-    //
-    // Due to the fact that write operations may also cause an error, there is a subtlety where the application
-    // has to check whether `Completion.buf` is not `nil`. As this may contain the submitted write data in the
-    // case of a write operation, this to give the application the chance to release this data.
     Error,
     // Data was read from the client socket and is now available in the `Completion.recv_buf`.
     // This always indicates a successful read, an EOF condition is handled with `.PeerHangup` instead.
@@ -84,8 +93,8 @@ destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 // queued in the internal buffers before cancellation, may still be delivered.
 // As a result, some completions might still be delived after unregistering, even though
 // no new IO operations were issued. The application should safeguard against this behaviour.
-unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
-    return _unregister_client(ctx, client)
+unregister_client :: proc(ctx: ^IOContext, handle: ConnectionHandle) -> bool {
+    return _unregister_client(ctx, handle)
 }
 
 // Await IO completions for any of the registered clients (excluding the server socket).
@@ -103,6 +112,6 @@ release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
     _release_recv_buf(ctx, comp)
 }
 
-submit_write_copy :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) -> bool {
+submit_write_copy :: proc(ctx: ^IOContext, client: ConnectionHandle, data: []u8) -> bool {
     return _submit_write_copy(ctx, client, data)
 }
