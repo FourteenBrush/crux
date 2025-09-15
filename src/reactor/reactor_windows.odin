@@ -1,6 +1,5 @@
 package reactor
 
-import "core:fmt"
 import "core:os"
 import "core:log"
 import "core:mem"
@@ -53,10 +52,8 @@ _IOContext :: struct {
 	// one for completion entries, freelist block based, or perhaps even epoch based recycling (assuming no iocp stalls occur)
 	allocator: mem.Allocator,
 
-	// Operation data allocated in order for an AcceptEx to function, needs to be deallocated when destroying ctx.
+	// Operation data of accept handler that never completed, needs to be deallocated when destroying ctx.
 	accept_op_data: ^IOOperationData,
-	// Client socket which is populated by AcceptEx
-	accepted_sock: win32.SOCKET,
 	// Buf where local and remote addr are placed.
 	accept_buf: [ADDR_BUF_SIZE * 2]u8,
 }
@@ -141,11 +138,17 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
     tracy.Zone()
 
-	// socket that AcceptEx will use to bind the accepted client to
-	// TODO: put in IOOperationData union instead of storing in ctx
-	ctx.accepted_sock = _create_accept_client_socket() or_return
-	op_data := _alloc_operation_data(ctx^, .Read, ctx.server_sock, {})
-	// previous entry is already freed in _await_io_completions before a call to this procedure
+    // socket that AcceptEx will use to bind the accepted client to,
+    // implicitly configured for overlapped IO
+    client_sock := win32.socket(win32.AF_INET, win32.SOCK_STREAM, 0)
+	if client_sock == win32.INVALID_SOCKET {
+	    _log_error(win32.WSAGetLastError(), "could not create client socket")
+		return false
+	}
+
+	op_data := _alloc_operation_data(ctx^, .AcceptedConnection, ctx.server_sock, {})
+	op_data.accepted_conn.socket = client_sock
+	assert(ctx.accept_op_data == nil)
 	ctx.accept_op_data = op_data
 
 	// FIXME: we "know" clients will always send initial data after connecting (handshake packets and such),
@@ -153,7 +156,7 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 	// by clients connecting and not sending data? (probably something with SO_CONNECT_TIME)
 	accept_ok := _accept_ex(
 		ctx.server_sock,
-		ctx.accepted_sock,
+		client_sock,
 		&ctx.accept_buf[0],
 		ACCEPTEX_RECEIVE_DATA_LENGTH,
 		ADDR_BUF_SIZE, /* local addr len */
@@ -170,24 +173,14 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 	return true
 }
 
-// Create a socket implicitly configured for overlapping io.
-@(private="file")
-_create_accept_client_socket :: proc() -> (win32.SOCKET, bool) {
-    sock := win32.socket(win32.AF_INET, win32.SOCK_STREAM, 0)
-	if sock == win32.INVALID_SOCKET {
-	    _log_error(win32.WSAGetLastError(), "could not preconfigure client socket")
-		return sock, false
-	}
-	return sock, true
-}
-
 @(private)
 _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 	// NOTE: refcounted, no socket handles must be associated with this iocp
 	win32.CloseHandle(ctx.completion_port)
 	// _ = win32.CloseHandle(win32.HANDLE(ctx.accepted_sock))
-	assert(ctx.accept_op_data != nil)
-	free(ctx.accept_op_data, ctx.allocator)
+	if ctx.accept_op_data != nil {
+    	free(ctx.accept_op_data, ctx.allocator)
+	}
 
 	// destroy allocator
 	when tracy.TRACY_ENABLE {
@@ -207,8 +200,6 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 	free(tlsf_alloc, allocator)
 }
 
-// Inputs:
-// - `recv_buf`: a preallocated recv buffer which will be used for the whole lifetime of the connection.
 @(private="file")
 _register_client :: proc(ctx: ^IOContext, conn: _ConnectionHandle) -> bool {
     tracy.Zone()
@@ -249,7 +240,7 @@ _ConnectionHandle :: struct {
 }
 #assert(size_of(_ConnectionHandle) == size_of(ConnectionHandle))
 
-// Initiate async recv call to emit an iocp event whenever data can be read
+// Initiate async recv call to emit an iocp event with the read data.
 @(private="file")
 _initiate_recv :: proc(ctx: ^IOContext, handle: _ConnectionHandle) -> bool {
     tracy.Zone()
@@ -300,14 +291,17 @@ IOOperationData :: struct {
 		},
 		// Only applicable when `op == .Write`.
 		write: struct {
-    		// buffer for received data, in the case of partial writes, this always
-    		// contains the whole write buffer, and `write_already_transfered` is used to indicate
+		    // User allocated buffer that holds written data, its length is `buf_len`, in the case of partial writes, this always
+    		// contains the whole write buffer, and `already_transfered` is used to indicate
     		// which part actually still needs to be transferred. (we must store the whole buffer to avoid leaking it)
 			buf: [^]u8,
 			// Buf length as u32 to prevent inflating alignment.
 			// Assumes write buffers will never be > 4GiB.
 			buf_len: u32,
 			already_transfered: u32,
+		},
+		accepted_conn: struct {
+		    socket: win32.SOCKET,
 		},
 	},
 	op: IOOperation,
@@ -319,27 +313,34 @@ IOOperationData :: struct {
 IOOperation :: enum u8 {
 	Read,
 	Write,
+	AcceptedConnection,
 }
 
 @(private)
-_unregister_client :: proc(ctx: ^IOContext, handle: ConnectionHandle) -> bool {
+_unregister_client :: #force_no_inline proc(ctx: ^IOContext, handle: ConnectionHandle) -> bool {
     tracy.Zone()
     // cancel outstanding io operations, yet to arrive completions will have a ERROR_OPERATION_ABORTED status.
     // this is the only way to unregister clients, there is no real "iocp unregister" procedure
-    // This affects the installed WSARecv and potential WSASend
+    // This affects the installed WSARecv and potential WSASend operation
     ok := CancelIoEx(win32.HANDLE(win32.SOCKET(handle.socket)), /*cancel all*/ nil)
 
-    fmt.eprintln(win32.System_Error(win32.GetLastError()))
-    // GetLastError() must not have not be set to ERROR_NONE as there is always an active WSARecv
-    if !ok {
+    // NOTE: we cannot rely on CancelIoEx emitting new iocp completions with an OPERATION_ABORTED status,
+    // as this unregister is mosty only called after a peer has already hung up, thus the corresponding WSARecv has already completed
+    // with an EOF before we even got here to call CancelIoEx, leaving us with an ERROR_NOT_FOUND indicating nothing could be canceled.
+    // For this reason we use the ConnectionHandle struct, to still be able to track allocations
+    // that would otherwise become unreachable.
+    //
+    // Of course the cancelation is still applicable to write operations or cases where this unregister procedure
+    // is called before the peer has hang up.
+    if !ok && win32.System_Error(win32.GetLastError()) != win32.System_Error.NOT_FOUND {
         _log_error(win32.GetLastError(), "failed to cancel outstanding io operations")
     }
     net.close(handle.socket)
-    // free last recv buffer
-    conn := transmute(_ConnectionHandle) handle
-    fmt.println(conn.last_recv_buf, conn.last_recv_buf^)
-    mem.free_with_size(conn.last_recv_buf^, RECV_BUF_SIZE, os.heap_allocator())
-    free(handle._impl, os.heap_allocator())
+
+    // free last recv buffer and slot where it is stored
+    handle := transmute(_ConnectionHandle) handle
+    mem.free_with_size(handle.last_recv_buf^, RECV_BUF_SIZE, ctx.allocator)
+    free(handle.last_recv_buf, os.heap_allocator())
 
 	return true
 }
@@ -396,6 +397,8 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
         status := RtlNtStatusToDosError(win32.NTSTATUS(entry.Internal))
         if status == win32.ERROR_OPERATION_ABORTED {
             tracy.ZoneN("Stale Completion")
+            // TODO: what happens with last write operation, this contains an user allocated buffer, how do we pass it
+            // back to them in order to free it?
 
             discard_entry = true
             continue
@@ -410,40 +413,41 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
         }
 
 		switch op_data.op {
+		case .AcceptedConnection:
+		    client_sock := op_data.accepted_conn.socket
+            accept_success := false
+            defer if !accept_success {
+                discard_entry = true
+                _ = win32.closesocket(client_sock)
+            }
+
+            ctx.accept_op_data = nil // points to op_data
+            _configure_accepted_client(ctx, client_sock) or_continue
+
+            new_handle := _ConnectionHandle {
+                socket = client_sock,
+                last_recv_buf = new([^]u8, os.heap_allocator()),
+            }
+
+            if !_register_client(ctx, new_handle) {
+                free(new_handle.last_recv_buf, os.heap_allocator())
+                continue
+            }
+            comp.operation = .NewConnection
+            // TODO: instead of using the heap allocation, cant we use a double ended stack allocator,
+            // where we allocate these pointers on one side (as they live for the whole connection lifecycle), and
+            // recv buffers on the other side (more frequent freeing).
+            //
+            // TODO: also instead of using an opaque last_recv_buf passed to the client, cant we just "tag" recv buffers in our
+            // double ended stack, and search for the one represented by this connection (this wont be a perf issue with "lots" of clients right?)
+            comp.handle = transmute(ConnectionHandle) new_handle // layout compatible
+            accept_success = true
+
+            // re-arm accept handler
+            // TODO: consider this as being fatal, no more new clients can be accepted..
+            _install_accept_handler(ctx) or_break
 		case .Read:
 			if op_data.source == ctx.server_sock {
-			    // newly accepted client stored in io context
-			    accept_success := false
-				defer if !accept_success {
-                    discard_entry = true
-				    net.close(net.TCP_Socket(ctx.accepted_sock))
-				}
-
-				_configure_accepted_client(ctx) or_continue
-
-				new_handle := _ConnectionHandle {
-				    socket = ctx.accepted_sock,
-					last_recv_buf = new([^]u8, os.heap_allocator()),
-				}
-
-				if !_register_client(ctx, new_handle) {
-				    free(new_handle.last_recv_buf, os.heap_allocator())
-					continue
-				}
-				comp.operation = .NewConnection
-				// TODO: instead of using the heap allocation, cant we use a double ended stack allocator,
-				// where we allocate these pointers on one side (as they live for the whole connection lifecycle), and
-				// recv buffers on the other side (more frequent freeing).
-				//
-				// TODO: also instead of using an opaque last_recv_buf passed to the client, cant we just "tag" recv buffers in our
-				// double ended stack, and search for the one represented by this connection (this wont be a perf issue with "lots" of clients right?)
-				comp.handle = transmute(ConnectionHandle) new_handle // layout compatible
-				accept_success = true
-
-				// re-arm accept handler
-				// TODO: consider this as being fatal, no more new clients can be accepted..
-				_install_accept_handler(ctx) or_break
-				continue
 			}
 
 			if entry.dwNumberOfBytesTransferred == 0 {
@@ -525,9 +529,8 @@ _initiate_send :: proc(ctx: ^IOContext, client: win32.SOCKET, data: []u8, partia
     return true
 }
 
-// Accepts a new client on the server socket, and stores it in `ctx.accept_sock`.
 @(private="file")
-_configure_accepted_client :: proc(ctx: ^IOContext) -> bool {
+_configure_accepted_client :: proc(ctx: ^IOContext, client_sock: win32.SOCKET) -> bool {
     tracy.Zone()
 
     // parse AcceptEx buffer to find addresses (unused) and unblock socket
@@ -549,7 +552,7 @@ _configure_accepted_client :: proc(ctx: ^IOContext) -> bool {
 	// accepted socket is in the default state, update it to make
 	// setsockopt among other functions work
 	result := win32.setsockopt(
-		ctx.accepted_sock,
+		client_sock,
         win32.SOL_SOCKET,
         win32.SO_UPDATE_ACCEPT_CONTEXT,
         &ctx.server_sock, size_of(ctx.server_sock),
@@ -558,10 +561,10 @@ _configure_accepted_client :: proc(ctx: ^IOContext) -> bool {
 	    return false
 	}
 
-	if net.set_blocking(net.TCP_Socket(ctx.accepted_sock), false) != .None {
+	if net.set_blocking(net.TCP_Socket(client_sock), false) != .None {
 	    return false
 	}
-	if net.set_option(net.TCP_Socket(ctx.accepted_sock), .TCP_Nodelay, true) != .None {
+	if net.set_option(net.TCP_Socket(client_sock), .TCP_Nodelay, true) != .None {
 	    return false
 	}
 	return true
@@ -580,8 +583,6 @@ _alloc_operation_data :: proc(ctx: IOContext, $Op: IOOperation, source: win32.SO
         op_data.write.buf_len = u32(len(buf))
     } else when Op == .Read {
         op_data.read.buf = raw_data(buf)
-    } else {
-        #panic()
     }
 
     return op_data
