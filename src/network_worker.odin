@@ -75,9 +75,8 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
 
         for comp in completions[:nready] {
             client_conn := &state.connections[comp.socket]
-            if client_conn == nil && comp.operation != .NewConnection {
-                log.debug("stale completion:", comp)
-                // stale event arrived after a disconnect was issued (peer hangup confirmation or io completion
+            if client_conn == nil && comp.operation != .NewConnection && comp.operation != .PeerHangup {
+                // stale completion arrived after a disconnect was issued (peer hangup confirmation or io completion
                 // that could not be canceled in time)
                 continue
             }
@@ -93,7 +92,10 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
                 _disconnect_client(&state, client_conn^)
             case .PeerHangup:
                 log.warn("client socket hangup")
-                _disconnect_client(&state, client_conn^)
+                reactor.release_recv_buf(&state.io_ctx, comp)
+                if client_conn != nil {
+                    _disconnect_client(&state, client_conn^)
+                }
             case .Read:
                 buf_write_bytes(&client_conn.rx_buf, comp.buf) // copies
                 reactor.release_recv_buf(&state.io_ctx, comp)

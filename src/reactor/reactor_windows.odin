@@ -35,8 +35,8 @@ ADDR_BUF_SIZE :: size_of(win32.sockaddr_in) + 16
 ACCEPTEX_RECEIVE_DATA_LENGTH :: 0
 
 // Max size of a write buffer limited by datatype that stores the length of it in IOOperationData.
-@(private)
-MAX_SUBMITTED_BUF_SIZE :: int(max(u32))
+@(private="file")
+MAX_SUBMITTED_WRITE_SIZE :: int(max(u32))
 
 // both dynamically loaded by an WsaIoctl call
 @(private="file")
@@ -54,7 +54,7 @@ _IOContext :: struct {
 
 	// Operation data of accept handler that never completed, needs to be deallocated when destroying ctx.
 	accept_op_data: ^IOOperationData,
-	// Buf where local and remote addr are placed.
+	// Buf where local and remote addr are placed on an accept call.
 	accept_buf: [ADDR_BUF_SIZE * 2]u8,
 }
 
@@ -140,7 +140,7 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 
     // socket that AcceptEx will use to bind the accepted client to,
     // implicitly configured for overlapped IO
-    client_sock := win32.socket(win32.AF_INET, win32.SOCK_STREAM, 0)
+    client_sock := win32.socket(win32.AF_INET, win32.SOCK_STREAM, win32.IPPROTO_TCP)
 	if client_sock == win32.INVALID_SOCKET {
 	    _log_error(win32.WSAGetLastError(), "could not create client socket")
 		return false
@@ -148,7 +148,7 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 
 	op_data := _alloc_operation_data(ctx^, .AcceptedConnection, ctx.server_sock, {})
 	op_data.accepted_conn.socket = client_sock
-	assert(ctx.accept_op_data == nil)
+	// assert(ctx.accept_op_data == nil)
 	ctx.accept_op_data = op_data
 
 	// FIXME: we "know" clients will always send initial data after connecting (handshake packets and such),
@@ -175,18 +175,21 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 
 @(private)
 _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
+    // cancel AcceptEx to avoid kernel side use after free
+	_ = CancelIoEx(win32.HANDLE(ctx.server_sock), &ctx.accept_op_data.overlapped)
 	// NOTE: refcounted, no socket handles must be associated with this iocp
+	// TODO: close server socket here?
 	win32.CloseHandle(ctx.completion_port)
-	// _ = win32.CloseHandle(win32.HANDLE(ctx.accepted_sock))
+	// TODO: bad free here ???
 	if ctx.accept_op_data != nil {
-    	free(ctx.accept_op_data, ctx.allocator)
+    	// free(ctx.accept_op_data, ctx.allocator)
 	}
 
 	// destroy allocator
 	when tracy.TRACY_ENABLE {
 	    profiler_data := cast(^tracy.ProfiledAllocatorData) ctx.allocator.data
-	    free(profiler_data, allocator)
 		ctx.allocator = profiler_data.backing_allocator
+        free(profiler_data, allocator)
 	}
 	when ODIN_DEBUG && !tracy.TRACY_ENABLE && !ODIN_TEST {
 	    tracking_alloc := cast(^back.Tracking_Allocator) ctx.allocator.data
@@ -236,7 +239,7 @@ _ConnectionHandle :: struct {
     // A buffer is stored at this address when a new connection handle is created, and is renewed every time a new recv buffer
     // is allocated. This way we always retain the last allocation, especially useful when disconnecting a client,
     // at this point no new iocp event will be emitted to confirm the disconnect, where we could simply grab the last allocated buf.
-    last_recv_buf: ^[^]u8,
+    last_recv_op: ^[^]u8,
 }
 #assert(size_of(_ConnectionHandle) == size_of(ConnectionHandle))
 
@@ -253,7 +256,7 @@ _initiate_recv :: proc(ctx: ^IOContext, handle: _ConnectionHandle) -> bool {
         recv_buf = make([]u8, RECV_BUF_SIZE, ctx.allocator) or_else panic("OOM")
     }
     op_data := _alloc_operation_data(ctx^, .Read, handle.socket, recv_buf)
-    op_data.read.last_recv_buf = handle.last_recv_buf
+    op_data.read.last_recv_op = handle.last_recv_op
 
     flags: u32
 	result := win32.WSARecv(
@@ -282,12 +285,13 @@ IOOperationData :: struct {
     using _: struct #raw_union {
         // Only applicable when `op == .Read`.
 	    read: struct {
-			// Pointer to dynamically allocated recv buffer data, the capacity of this buffer
+			// Pointer to dynamically allocated recv buffer data, the size of this buffer
 			// is always `RECV_BUFFER_SIZE`. This is specified as a multipointer instead of a slice to save space.
 			buf: [^]u8,
-			// ConnectionHandle opaque data, this is attached upon allocation of this IO
-			// operation data and is populated with `buf`, to always record the latest allocated recv buffer.
-			last_recv_buf: ^[^]u8,
+			// ConnectionHandle opaque data, points to a heap allocated slot where the address of the last
+			// IOOperationData for a read operation is allocated.
+			// TODO: single pointer indirection possible?
+			last_recv_op: ^[^]u8,
 		},
 		// Only applicable when `op == .Write`.
 		write: struct {
@@ -300,6 +304,7 @@ IOOperationData :: struct {
 			buf_len: u32,
 			already_transfered: u32,
 		},
+		// Only applicable when `op == .AcceptedConnection`.
 		accepted_conn: struct {
 		    socket: win32.SOCKET,
 		},
@@ -321,26 +326,29 @@ _unregister_client :: #force_no_inline proc(ctx: ^IOContext, handle: ConnectionH
     tracy.Zone()
     // cancel outstanding io operations, yet to arrive completions will have a ERROR_OPERATION_ABORTED status.
     // this is the only way to unregister clients, there is no real "iocp unregister" procedure
-    // This affects the installed WSARecv and potential WSASend operation
+    // This affects the installed WSARecv and potential WSASend operations
     ok := CancelIoEx(win32.HANDLE(win32.SOCKET(handle.socket)), /*cancel all*/ nil)
 
-    // NOTE: we cannot rely on CancelIoEx emitting new iocp completions with an OPERATION_ABORTED status,
+    // NOTE: we cannot actively rely on CancelIoEx emitting new iocp completions with an OPERATION_ABORTED status,
     // as this unregister is mosty only called after a peer has already hung up, thus the corresponding WSARecv has already completed
     // with an EOF before we even got here to call CancelIoEx, leaving us with an ERROR_NOT_FOUND indicating nothing could be canceled.
     // For this reason we use the ConnectionHandle struct, to still be able to track allocations
-    // that would otherwise become unreachable.
+    // that would have otherwise become unreachable.
     //
     // Of course the cancelation is still applicable to write operations or cases where this unregister procedure
     // is called before the peer has hang up.
-    if !ok && win32.System_Error(win32.GetLastError()) != win32.System_Error.NOT_FOUND {
+    if !ok && win32.System_Error(win32.GetLastError()) != .NOT_FOUND {
         _log_error(win32.GetLastError(), "failed to cancel outstanding io operations")
     }
     net.close(handle.socket)
 
     // free last recv buffer and slot where it is stored
     handle := transmute(_ConnectionHandle) handle
-    mem.free_with_size(handle.last_recv_buf^, RECV_BUF_SIZE, ctx.allocator)
-    free(handle.last_recv_buf, os.heap_allocator())
+    if handle.last_recv_op^ != nil {
+        // free last recv buffer and corresponding operation data
+        // mem.free_with_size(handle.last_recv_op^, RECV_BUF_SIZE, ctx.allocator)
+    }
+    free(handle.last_recv_op, os.heap_allocator())
 
 	return true
 }
@@ -385,9 +393,9 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
         discard_entry := false
 		defer if discard_entry {
 		    nready -= 1
-			// free allocated recv buffer (comp entry for server sock contains zero initialized one)
-			if op_data.op == .Read && op_data.source != ctx.server_sock {
-                _release_recv_buf(ctx, comp^)
+			if op_data.op == .Read {
+			    // TODO: get rid of this nonsense and emit an .Error comp instead
+                // _release_recv_buf(ctx, comp^)
 			}
 		} else {
 		    i += 1
@@ -417,20 +425,20 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 		    client_sock := op_data.accepted_conn.socket
             accept_success := false
             defer if !accept_success {
-                discard_entry = true
                 _ = win32.closesocket(client_sock)
+                discard_entry = true
             }
 
-            ctx.accept_op_data = nil // points to op_data
+            // ctx.accept_op_data = nil // points to op_data
             _configure_accepted_client(ctx, client_sock) or_continue
 
             new_handle := _ConnectionHandle {
                 socket = client_sock,
-                last_recv_buf = new([^]u8, os.heap_allocator()),
+                last_recv_op = new([^]u8, os.heap_allocator()),
             }
 
             if !_register_client(ctx, new_handle) {
-                free(new_handle.last_recv_buf, os.heap_allocator())
+                free(new_handle.last_recv_op, os.heap_allocator())
                 continue
             }
             comp.operation = .NewConnection
@@ -438,7 +446,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
             // where we allocate these pointers on one side (as they live for the whole connection lifecycle), and
             // recv buffers on the other side (more frequent freeing).
             //
-            // TODO: also instead of using an opaque last_recv_buf passed to the client, cant we just "tag" recv buffers in our
+            // TODO: also instead of using an opaque last_recv_op passed to the client, cant we just "tag" recv buffers in our
             // double ended stack, and search for the one represented by this connection (this wont be a perf issue with "lots" of clients right?)
             comp.handle = transmute(ConnectionHandle) new_handle // layout compatible
             accept_success = true
@@ -447,21 +455,20 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
             // TODO: consider this as being fatal, no more new clients can be accepted..
             _install_accept_handler(ctx) or_break
 		case .Read:
-			if op_data.source == ctx.server_sock {
-			}
-
 			if entry.dwNumberOfBytesTransferred == 0 {
 			    comp.operation = .PeerHangup
+				comp.buf = op_data.read.buf[:RECV_BUF_SIZE]
 			} else {
     			comp.operation = .Read
                 comp.buf = op_data.read.buf[:entry.dwNumberOfBytesTransferred]
-                op_data.read.last_recv_buf^ = op_data.read.buf
+                op_data.read.last_recv_op^ = op_data.read.buf
 
-    			// re-arm recv handler, pass recv buf ptr to next IO operation data
+    			// re-arm recv handler
                 handle := _ConnectionHandle {
                     socket = op_data.source,
-                    last_recv_buf = op_data.read.last_recv_buf,
+                    last_recv_op = op_data.read.last_recv_op,
                 }
+                // TODO: emit .Error instead of simply discarding this entry?
                 discard_entry = !_initiate_recv(ctx, handle)
 			}
 		case .Write:
@@ -476,10 +483,10 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 				continue
 			}
 
+			assert(entry.dwNumberOfBytesTransferred == op_data.write.buf_len, "partial writes should be handled above")
 		    comp.operation = .Write
 			// for caller to deallocate
 			comp.buf = transport_buf
-			assert(entry.dwNumberOfBytesTransferred == op_data.write.buf_len, "partial writes should be handled above")
 		}
 	}
 
@@ -489,17 +496,18 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 @(private)
 _release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
     tracy.Zone()
+    assert(raw_data(comp.buf) != nil)
     delete(comp.buf, ctx.allocator)
 }
 
 // TODO: don't actually flush on every call
 @(private)
-_submit_write_copy :: proc(ctx: ^IOContext, conn_: ConnectionHandle, data: []u8) -> bool {
+_submit_write_copy :: proc(ctx: ^IOContext, handle: ConnectionHandle, data: []u8) -> bool {
     tracy.Zone()
-    assert(len(data) <= MAX_SUBMITTED_BUF_SIZE, #procedure + " submitted buffer is too big")
-    conn := transmute(_ConnectionHandle) conn_
+    assert(len(data) <= MAX_SUBMITTED_WRITE_SIZE, #procedure + " submitted buffer is too big")
+    handle := transmute(_ConnectionHandle) handle
 
-    return _initiate_send(ctx, conn.socket, data)
+    return _initiate_send(ctx, handle.socket, data)
 }
 
 @(private="file")
@@ -550,7 +558,7 @@ _configure_accepted_client :: proc(ctx: ^IOContext, client_sock: win32.SOCKET) -
 	)
 
 	// accepted socket is in the default state, update it to make
-	// setsockopt among other functions work
+	// setsockopt among other procedures work
 	result := win32.setsockopt(
 		client_sock,
         win32.SOL_SOCKET,
@@ -577,7 +585,6 @@ _alloc_operation_data :: proc(ctx: IOContext, $Op: IOOperation, source: win32.SO
     op_data := new(IOOperationData, ctx.allocator)
     op_data.op = Op
     op_data.source = source
-    // FIXME: is this really the way?
     when Op == .Write {
         op_data.write.buf = raw_data(buf)
         op_data.write.buf_len = u32(len(buf))

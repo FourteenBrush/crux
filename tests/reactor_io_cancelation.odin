@@ -68,7 +68,7 @@ io_cancelation :: proc(t: ^testing.T) {
     if !testing.expect(t, n == 1 && poll_ok, "expected an aborted completion") do return
 
     entry_status := RtlNtStatusToDosError(win32.NTSTATUS(entries[0].Internal))
-    if !testing.expect_value(t, entry_status, win32.ERROR_OPERATION_ABORTED) do return
+    if !testing.expect_value(t, win32.System_Error(entry_status), win32.System_Error.OPERATION_ABORTED) do return
 }
 
 poll_iocp :: proc(t: ^testing.T, iocp: win32.HANDLE, entries_out: ^[$N]win32.OVERLAPPED_ENTRY) -> (n: u32, ok: bool) {

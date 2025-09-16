@@ -108,7 +108,7 @@ await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, tim
 // Releases the ´buf´ of the given completion, must be called on completions of type ´.Read´ after
 // the application processed the data, this data cannot be used afterwards.
 release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
-    assert(comp.operation == .Read)
+    assert(comp.operation == .Read || comp.operation == .PeerHangup)
     _release_recv_buf(ctx, comp)
 }
 
