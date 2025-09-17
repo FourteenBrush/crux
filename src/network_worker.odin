@@ -19,7 +19,7 @@ import "lib:tracy"
 WORKER_TARGET_MSPT :: 5
 
 NetworkWorkerSharedData :: struct {
-    io_ctx: reactor.IOContext,
+    io_ctx: ^reactor.IOContext,
     // Non-blocking server socket.
     server_sock: net.TCP_Socket,
     // Ptr to atomic bool, indicating whether to continue running, modified upstream
@@ -70,7 +70,7 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
 
         completions: [512]reactor.Completion
         // NOTE: do not indefinitely block or this thread can't be joined
-        nready, ok := reactor.await_io_completions(&state.io_ctx, completions[:], timeout_ms=REACTOR_TIMEOUT_MS)
+        nready, ok := reactor.await_io_completions(state.io_ctx, completions[:], timeout_ms=REACTOR_TIMEOUT_MS)
         assert(ok, "failed to await io events") // TODO: proper error handling
 
         for comp in completions[:nready] {
@@ -92,14 +92,14 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
                 _disconnect_client(&state, client_conn^)
             case .PeerHangup:
                 log.debug("client socket hangup")
-                reactor.release_recv_buf(&state.io_ctx, comp)
+                reactor.release_recv_buf(state.io_ctx, comp)
                 // client_conn may be nil when we disconnected from the peer first, thus only serving as a confirmation
                 if client_conn != nil {
                     _disconnect_client(&state, client_conn^)
                 }
             case .Read:
                 buf_write_bytes(&client_conn.rx_buf, comp.buf) // copies
-                reactor.release_recv_buf(&state.io_ctx, comp)
+                reactor.release_recv_buf(state.io_ctx, comp)
                 // TODO: change allocator, we can do better than this
                 _drain_serverbound_packets(&state, client_conn, os.heap_allocator())
             case .Write:
@@ -193,12 +193,12 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
             favicon = "data:image/png;base64,<data>",
             enforces_secure_chat = false,
         }
-        enqueue_packet(&state.io_ctx, client_conn, status_response, allocator=os.heap_allocator())
+        enqueue_packet(state.io_ctx, client_conn, status_response, allocator=os.heap_allocator())
     case PingRequestPacket:
         response := PongResponsePacket {
             payload = packet.payload,
         }
-        enqueue_packet(&state.io_ctx, client_conn, response, allocator=os.heap_allocator())
+        enqueue_packet(state.io_ctx, client_conn, response, allocator=os.heap_allocator())
         client_conn.close_after_flushing = true
     case LoginStartPacket:
         response := LoginSuccessPacket {
@@ -208,7 +208,7 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
             value = "",
             signature = nil,
         }
-        enqueue_packet(&state.io_ctx, client_conn, response, allocator=os.heap_allocator())
+        enqueue_packet(state.io_ctx, client_conn, response, allocator=os.heap_allocator())
     case LoginAcknowledgedPacket:
         client_conn.state = .Configuration
     }
@@ -219,7 +219,7 @@ _disconnect_client :: proc(state: ^NetworkWorkerState, client_conn: ClientConnec
     tracy.Zone()
 
     // FIXME: probably want to handle error
-    reactor.unregister_client(&state.io_ctx, client_conn.handle)
+    reactor.unregister_client(state.io_ctx, client_conn.handle)
     _delete_client_connection(client_conn.socket)
 
     _, client_conn := delete_key(&state.connections, client_conn.socket)

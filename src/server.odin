@@ -52,7 +52,7 @@ run :: proc() -> bool {
     g_server.packet_receiver = chan.as_recv(packet_receiver)
 
     net_worker_state := NetworkWorkerSharedData {
-       io_ctx = io_ctx,
+       io_ctx = &io_ctx,
        server_sock = server_sock,
        execution_permit = &g_continue_running,
        packet_bridge = chan.as_send(packet_receiver),

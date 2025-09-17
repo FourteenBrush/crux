@@ -53,7 +53,7 @@ _IOContext :: struct {
 	allocator: mem.Allocator,
 
 	// Operation data of accept handler that never completed, needs to be deallocated when destroying ctx.
-	accept_op_data: ^IOOperationData,
+	last_accept_op_data: ^IOOperationData,
 	// Buf where local and remote addr are placed on an accept call.
 	accept_buf: [ADDR_BUF_SIZE * 2]u8,
 }
@@ -147,11 +147,10 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 		return false
 	}
 
+	assert(ctx.last_accept_op_data == nil, "storing freed data")
 	op_data := _alloc_operation_data(ctx^, .AcceptedConnection, ctx.server_sock, {})
 	op_data.accepted_conn.socket = client_sock
-	log.warnf("ALLOC ACCEPT: %p", op_data)
-	assert(ctx.accept_op_data == nil)
-	ctx.accept_op_data = op_data
+	ctx.last_accept_op_data = op_data
 
 	// FIXME: we "know" clients will always send initial data after connecting (handshake packets and such),
 	// can we specify a recv buffer length > 0, while also defending against denial of service attacks
@@ -170,7 +169,6 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 	if accept_ok != win32.TRUE && win32.WSAGetLastError() != i32(win32.ERROR_IO_PENDING) {
 	    _log_error(win32.WSAGetLastError(), "could not setup accept handler")
 	    free(op_data, ctx.allocator)
-		ctx.accept_op_data = nil
 		return false
 	}
 	return true
@@ -179,14 +177,11 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 @(private)
 _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
     // cancel AcceptEx to avoid kernel side use after free
-	_ = CancelIoEx(win32.HANDLE(ctx.server_sock), &ctx.accept_op_data.overlapped)
 	// NOTE: refcounted, no socket handles must be associated with this iocp
 	// TODO: close server socket here?
 	win32.CloseHandle(ctx.completion_port)
-	// TODO: bad free here ???
-	if ctx.accept_op_data != nil {
-	    log.warnf("ALLOC DESTROY: %p", ctx.accept_op_data)
-    	free(ctx.accept_op_data, ctx.allocator)
+	if ctx.last_accept_op_data != nil {
+	    free(ctx.last_accept_op_data, ctx.allocator)
 	}
 
 	// destroy allocator
@@ -390,9 +385,6 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 
 		op_data: ^IOOperationData = container_of(entry.lpOverlapped, IOOperationData, "overlapped")
 		defer free(op_data, ctx.allocator)
-		if op_data == ctx.accept_op_data {
-		    log.warnf("ALLOC FREED: %p", op_data)
-		}
 		#no_bounds_check comp := &completions_out[i]
 		emitter := win32.SOCKET(entry.lpCompletionKey)
   		comp.socket = net.TCP_Socket(emitter)
@@ -431,6 +423,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 
 		switch op_data.op {
 		case .AcceptedConnection:
+    		ctx.last_accept_op_data = nil
 		    client_sock := op_data.accepted_conn.socket
             accept_success := false
             defer if !accept_success {
@@ -438,7 +431,6 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
                 discard_entry = true
             }
 
-            // ctx.accept_op_data = nil // points to op_data
             _configure_accepted_client(ctx, client_sock) or_continue
 
             new_handle := _ConnectionHandle {
@@ -462,7 +454,6 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 
             // re-arm accept handler
             // TODO: consider this as being fatal, no more new clients can be accepted..
-            ctx.accept_op_data = nil // freed at the end of this iteration
             _install_accept_handler(ctx) or_break
 		case .Read:
 			if entry.dwNumberOfBytesTransferred == 0 {
