@@ -27,9 +27,6 @@ _ :: runtime
 @(private) LOG_LEVEL_OUTBOUND :: log.Level(8)
 @(private) LOG_LEVEL_REACTOR_ERROR :: reactor.ERROR_LOG_LEVEL
 
-@(private="file")
-g_continue_running := true
-
 main :: proc() {
     exit_success: bool
     // NOTE: must be put before all other deferred statements
@@ -62,7 +59,7 @@ main :: proc() {
     }
 
     back.register_segfault_handler()
-    context.assertion_failure_proc = back.assertion_failure_proc
+    // context.assertion_failure_proc = back.assertion_failure_proc
 
     log_opts := log.Options {.Level, .Terminal_Color}
 
@@ -77,10 +74,6 @@ main :: proc() {
     	30..<40 = "[ERROR] ",
     	40..<50 = "[FATAL] ",
     }
-
-    libc.signal(libc.SIGINT, proc "c" (_sig: i32) {
-        sync.atomic_store_explicit(&g_continue_running, false, .Release)
-    })
 
     alloc_formatters := fmt._user_formatters == nil
     defer if alloc_formatters {
@@ -100,7 +93,7 @@ main :: proc() {
 
     tracy.SetThreadName("main")
 
-    exit_success = run(execution_permit=&g_continue_running)
+    exit_success = run()
 }
 
 @(private="file")

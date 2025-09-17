@@ -1,5 +1,6 @@
 package crux
 
+import "core:c/libc"
 import "core:os"
 import "core:log"
 import "core:mem"
@@ -19,15 +20,16 @@ TARGET_TPS :: 20
 g_server: Server
 
 @(private="file")
+g_continue_running := true
+
+@(private="file")
 Server :: struct {
     _client_connections_guarded: map[net.TCP_Socket]ClientConnection,
     _client_connections_mtx: sync.Ticket_Mutex,
     packet_receiver: chan.Chan(Packet, .Recv),
 }
 
-// Inputs:
-// - `execution_permit`: an atomic bool indicating whether to continue running
-run :: proc(execution_permit: ^bool) -> bool {
+run :: proc() -> bool {
     endpoint := net.Endpoint {
         address = net.IP4_Loopback,
         port = 25565,
@@ -52,7 +54,7 @@ run :: proc(execution_permit: ^bool) -> bool {
     net_worker_state := NetworkWorkerSharedData {
        io_ctx = io_ctx,
        server_sock = server_sock,
-       execution_permit = execution_permit,
+       execution_permit = &g_continue_running,
        packet_bridge = chan.as_send(packet_receiver),
     }
 
@@ -66,7 +68,10 @@ run :: proc(execution_permit: ^bool) -> bool {
     // ensure all allocators are explicitly used
     context.allocator = mem.panic_allocator()
 
-    for sync.atomic_load_explicit(execution_permit, .Acquire) {
+    libc.signal(libc.SIGINT, sig_handler)
+    libc.signal(libc.SIGTERM, sig_handler)
+
+    for sync.atomic_load_explicit(&g_continue_running, .Acquire) {
         defer tracy.FrameMark()
         start := time.tick_now()
 
@@ -156,6 +161,13 @@ ClientState :: enum VarInt {
     Login         = auto_cast HandshakeIntent.Login,
     Transfer      = auto_cast HandshakeIntent.Transfer,
     Configuration,
+}
+
+@(private="file")
+sig_handler :: proc "c" (_sig: i32) {
+    @(static) shutting_down := false
+    if sync.atomic_compare_exchange_strong(&shutting_down, false, true) do return
+    sync.atomic_store_explicit(&g_continue_running, false, .Release)
 }
 
 // Logs a fatal condition, which we cannot recover from.

@@ -122,7 +122,7 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 	result := win32.CreateIoCompletionPort(
 	    win32.HANDLE(ctx.server_sock),
 		ctx.completion_port,
-		0,
+		win32.ULONG_PTR(ctx.server_sock),
 		IOCP_CONCURRENT_THREADS,
 	)
 	if result != win32.HANDLE(ctx.server_sock) && win32.GetLastError() != win32.ERROR_IO_PENDING {
@@ -140,6 +140,7 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 
     // socket that AcceptEx will use to bind the accepted client to,
     // implicitly configured for overlapped IO
+    // TODO: close on cancellation
     client_sock := win32.socket(win32.AF_INET, win32.SOCK_STREAM, win32.IPPROTO_TCP)
 	if client_sock == win32.INVALID_SOCKET {
 	    _log_error(win32.WSAGetLastError(), "could not create client socket")
@@ -148,7 +149,8 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 
 	op_data := _alloc_operation_data(ctx^, .AcceptedConnection, ctx.server_sock, {})
 	op_data.accepted_conn.socket = client_sock
-	// assert(ctx.accept_op_data == nil)
+	log.warnf("ALLOC ACCEPT: %p", op_data)
+	assert(ctx.accept_op_data == nil)
 	ctx.accept_op_data = op_data
 
 	// FIXME: we "know" clients will always send initial data after connecting (handshake packets and such),
@@ -168,6 +170,7 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 	if accept_ok != win32.TRUE && win32.WSAGetLastError() != i32(win32.ERROR_IO_PENDING) {
 	    _log_error(win32.WSAGetLastError(), "could not setup accept handler")
 	    free(op_data, ctx.allocator)
+		ctx.accept_op_data = nil
 		return false
 	}
 	return true
@@ -182,7 +185,8 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 	win32.CloseHandle(ctx.completion_port)
 	// TODO: bad free here ???
 	if ctx.accept_op_data != nil {
-    	// free(ctx.accept_op_data, ctx.allocator)
+	    log.warnf("ALLOC DESTROY: %p", ctx.accept_op_data)
+    	free(ctx.accept_op_data, ctx.allocator)
 	}
 
 	// destroy allocator
@@ -311,6 +315,7 @@ IOOperationData :: struct {
 	},
 	op: IOOperation,
 }
+// xi : [size_of(IOOperationData)]u8 = {9}
 #assert(size_of(IOOperationData) == 64 - 8)
 
 // IO operation as seen from our side.
@@ -385,6 +390,9 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 
 		op_data: ^IOOperationData = container_of(entry.lpOverlapped, IOOperationData, "overlapped")
 		defer free(op_data, ctx.allocator)
+		if op_data == ctx.accept_op_data {
+		    log.warnf("ALLOC FREED: %p", op_data)
+		}
 		#no_bounds_check comp := &completions_out[i]
 		emitter := win32.SOCKET(entry.lpCompletionKey)
   		comp.socket = net.TCP_Socket(emitter)
@@ -454,6 +462,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 
             // re-arm accept handler
             // TODO: consider this as being fatal, no more new clients can be accepted..
+            ctx.accept_op_data = nil // freed at the end of this iteration
             _install_accept_handler(ctx) or_break
 		case .Read:
 			if entry.dwNumberOfBytesTransferred == 0 {
@@ -512,17 +521,17 @@ _submit_write_copy :: proc(ctx: ^IOContext, handle: ConnectionHandle, data: []u8
 }
 
 @(private="file")
-_initiate_send :: proc(ctx: ^IOContext, client: win32.SOCKET, data: []u8, partial_write_off: u32 = 0) -> bool {
+_initiate_send :: proc(ctx: ^IOContext, socket: win32.SOCKET, data: []u8, partial_write_off: u32 = 0) -> bool {
     tracy.Zone()
 
-    op_data := _alloc_operation_data(ctx^, .Write, client, data)
+    op_data := _alloc_operation_data(ctx^, .Write, socket, data)
     op_data.write.already_transfered = partial_write_off
 
     // handle potential partial writes, send this buffer while we keep storing the original in order to free it later
     data := data[partial_write_off:]
     // this returns WSAENOTSOCK when the socket is already closed
     result := win32.WSASend(
-        client,
+        socket,
         &win32.WSABUF { u32(len(data)), raw_data(data) },
         1, /* buffer count */
         nil,
@@ -583,7 +592,7 @@ _configure_accepted_client :: proc(ctx: ^IOContext, client_sock: win32.SOCKET) -
 _alloc_operation_data :: proc(ctx: IOContext, $Op: IOOperation, source: win32.SOCKET, buf: []u8) -> ^IOOperationData {
     tracy.Zone()
 
-    op_data := new(IOOperationData, ctx.allocator)
+    op_data := new(IOOperationData, ctx.allocator) or_else panic("OOM")
     op_data.op = Op
     when Op == .Write {
         op_data.write.buf = raw_data(buf)

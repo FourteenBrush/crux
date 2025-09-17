@@ -91,7 +91,7 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
                 }
                 _disconnect_client(&state, client_conn^)
             case .PeerHangup:
-                log.warn("client socket hangup")
+                log.debug("client socket hangup")
                 reactor.release_recv_buf(&state.io_ctx, comp)
                 // client_conn may be nil when we disconnected from the peer first, thus only serving as a confirmation
                 if client_conn != nil {
