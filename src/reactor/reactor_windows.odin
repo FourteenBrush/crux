@@ -211,7 +211,7 @@ _register_client :: proc(ctx: ^IOContext, conn: _ConnectionHandle) -> bool {
     register_result := win32.CreateIoCompletionPort(
         handle,
         ctx.completion_port,
-        0, /* completion key (unused) */
+        win32.ULONG_PTR(conn.socket),
         IOCP_CONCURRENT_THREADS,
     )
     if register_result != ctx.completion_port {
@@ -219,9 +219,11 @@ _register_client :: proc(ctx: ^IOContext, conn: _ConnectionHandle) -> bool {
         return false
     }
 
-    // don't bother setting up OVERLAPPED.hEvent, we are using iocp for notifications, not WaitForSingleObject and related logic
+    // don't bother setting up and signaling OVERLAPPED.hEvent, we are using iocp for notifications, not WaitForSingleObject and related logic
+    // although this still doesnt let us repurpose hEvent to store user data, as winsock treats a non-zero value as an explicit event, regardless of this flag
     if !win32.SetFileCompletionNotificationModes(handle, win32.FILE_SKIP_SET_EVENT_ON_HANDLE) {
         _log_error(win32.GetLastError(), "failed to set FILE_SKIP_SET_EVENT bit")
+        return false
     }
 
     return _initiate_recv(ctx, conn)
@@ -281,16 +283,14 @@ _initiate_recv :: proc(ctx: ^IOContext, handle: _ConnectionHandle) -> bool {
 @(private="file")
 IOOperationData :: struct {
     overlapped: win32.OVERLAPPED,
-    source: win32.SOCKET,
     using _: struct #raw_union {
         // Only applicable when `op == .Read`.
 	    read: struct {
-			// Pointer to dynamically allocated recv buffer data, the size of this buffer
+			// Raw data of dynamically allocated recv buffer data, the size of this buffer
 			// is always `RECV_BUFFER_SIZE`. This is specified as a multipointer instead of a slice to save space.
 			buf: [^]u8,
 			// ConnectionHandle opaque data, points to a heap allocated slot where the address of the last
 			// IOOperationData for a read operation is allocated.
-			// TODO: single pointer indirection possible?
 			last_recv_op: ^[^]u8,
 		},
 		// Only applicable when `op == .Write`.
@@ -311,7 +311,7 @@ IOOperationData :: struct {
 	},
 	op: IOOperation,
 }
-#assert(size_of(IOOperationData) == 64)
+#assert(size_of(IOOperationData) == 64 - 8)
 
 // IO operation as seen from our side.
 @(private="file")
@@ -386,7 +386,8 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 		op_data: ^IOOperationData = container_of(entry.lpOverlapped, IOOperationData, "overlapped")
 		defer free(op_data, ctx.allocator)
 		#no_bounds_check comp := &completions_out[i]
-  		comp.socket = net.TCP_Socket(op_data.source)
+		emitter := win32.SOCKET(entry.lpCompletionKey)
+  		comp.socket = net.TCP_Socket(emitter)
 
         // NOTE: care must be taken with or_continue to ensure this does not accidentely emit a completion
         // in a zeroed out state
@@ -465,7 +466,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 
     			// re-arm recv handler
                 handle := _ConnectionHandle {
-                    socket = op_data.source,
+                    socket = emitter,
                     last_recv_op = op_data.read.last_recv_op,
                 }
                 // TODO: emit .Error instead of simply discarding this entry?
@@ -479,7 +480,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 			    // ignore this entry, query another send with the remaining part of the buffer
 				discard_entry = true
 
-				_initiate_send(ctx, op_data.source, transport_buf, partial_write_off=total_transfer) or_continue
+				_initiate_send(ctx, emitter, transport_buf, partial_write_off=total_transfer) or_continue
 				continue
 			}
 
@@ -521,7 +522,7 @@ _initiate_send :: proc(ctx: ^IOContext, client: win32.SOCKET, data: []u8, partia
     data := data[partial_write_off:]
     // this returns WSAENOTSOCK when the socket is already closed
     result := win32.WSASend(
-        op_data.source,
+        client,
         &win32.WSABUF { u32(len(data)), raw_data(data) },
         1, /* buffer count */
         nil,
@@ -584,7 +585,6 @@ _alloc_operation_data :: proc(ctx: IOContext, $Op: IOOperation, source: win32.SO
 
     op_data := new(IOOperationData, ctx.allocator)
     op_data.op = Op
-    op_data.source = source
     when Op == .Write {
         op_data.write.buf = raw_data(buf)
         op_data.write.buf_len = u32(len(buf))

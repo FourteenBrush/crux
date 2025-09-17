@@ -85,7 +85,7 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
             switch comp.operation {
             case .Error:
                 log.warn("client socket error")
-                // if caused by a write operation, free our allocated submission which the reactor gave back to us
+                // if caused by a write operation, free our allocated submission which was returned back to us
                 if comp.buf != nil {
                     delete(comp.buf, os.heap_allocator())
                 }
@@ -93,6 +93,7 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
             case .PeerHangup:
                 log.warn("client socket hangup")
                 reactor.release_recv_buf(&state.io_ctx, comp)
+                // client_conn may be nil when we disconnected from the peer first, thus only serving as a confirmation
                 if client_conn != nil {
                     _disconnect_client(&state, client_conn^)
                 }
