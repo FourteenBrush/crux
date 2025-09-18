@@ -279,6 +279,7 @@ _initiate_recv :: proc(ctx: ^IOContext, handle: _ConnectionHandle) -> bool {
 	return true
 }
 
+// Cache line aligned IO operation data.
 @(private="file")
 IOOperationData :: struct {
     overlapped: win32.OVERLAPPED,
@@ -294,13 +295,10 @@ IOOperationData :: struct {
 		},
 		// Only applicable when `op == .Write`.
 		write: struct {
-		    // User allocated buffer that holds written data, its length is `buf_len`, in the case of partial writes, this always
+		    // User allocated buffer that holds written data, in the case of partial writes, this always
     		// contains the whole write buffer, and `already_transfered` is used to indicate
     		// which part actually still needs to be transferred. (we must store the whole buffer to avoid leaking it)
-			buf: [^]u8,
-			// Buf length as u32 to prevent inflating alignment.
-			// Assumes write buffers will never be > 4GiB.
-			buf_len: u32,
+			buf: []u8,
 			already_transfered: u32,
 		},
 		// Only applicable when `op == .AcceptedConnection`.
@@ -309,9 +307,10 @@ IOOperationData :: struct {
 		},
 	},
 	op: IOOperation,
+	// TODO
+	aborted: bool,
 }
-// xi : [size_of(IOOperationData)]u8 = {9}
-#assert(size_of(IOOperationData) == 64 - 8)
+#assert(size_of(IOOperationData) == 64)
 
 // IO operation as seen from our side.
 @(private="file")
@@ -416,7 +415,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
             // return this, so the application can free it
             comp.operation = .Error
             if op_data.op == .Write {
-                comp.buf = op_data.write.buf[:op_data.write.buf_len]
+                comp.buf = op_data.write.buf
             }
 			continue
         }
@@ -474,8 +473,8 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 			}
 		case .Write:
 		    total_transfer := entry.dwNumberOfBytesTransferred + op_data.write.already_transfered
-		    partial_write := total_transfer != op_data.write.buf_len
-			transport_buf := op_data.write.buf[:op_data.write.buf_len]
+		    partial_write := int(total_transfer) != len(op_data.write.buf)
+			transport_buf := op_data.write.buf
 			if partial_write {
 			    // ignore this entry, query another send with the remaining part of the buffer
 				discard_entry = true
@@ -484,7 +483,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 				continue
 			}
 
-			assert(entry.dwNumberOfBytesTransferred == op_data.write.buf_len, "partial writes should be handled above")
+			assert(int(entry.dwNumberOfBytesTransferred) == len(op_data.write.buf), "partial writes should be handled above")
 		    comp.operation = .Write
 			// for caller to deallocate
 			comp.buf = transport_buf
@@ -586,8 +585,7 @@ _alloc_operation_data :: proc(ctx: IOContext, $Op: IOOperation, source: win32.SO
     op_data := new(IOOperationData, ctx.allocator) or_else panic("OOM")
     op_data.op = Op
     when Op == .Write {
-        op_data.write.buf = raw_data(buf)
-        op_data.write.buf_len = u32(len(buf))
+        op_data.write.buf = buf
     } else when Op == .Read {
         op_data.read.buf = raw_data(buf)
     }
