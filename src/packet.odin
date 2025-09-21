@@ -63,6 +63,7 @@ get_serverbound_packet_descriptor :: proc(packet: ServerBoundPacket) -> ServerBo
 @(rodata, private="file")
 serverbound_packet_descriptors := [intrinsics.type_union_variant_count(ServerBoundPacket)]ServerBoundPacketDescriptor {
     // TODO: is this packet allowed in multiple states?
+    // TODO: make expected_client_state Maybe(ClientState) (this can be a constant since around 19/09 as Maybe has only one variant); wait for release dev-10
     VARIANT_IDX_OF(ServerBoundPacket, LegacyServerListPingPacket) = { .Handshake },
     VARIANT_IDX_OF(ServerBoundPacket, HandshakePacket)            = { .Handshake },
     VARIANT_IDX_OF(ServerBoundPacket, StatusRequestPacket)        = { .Status },
@@ -93,7 +94,7 @@ LegacyServerListPingPacket :: struct {
     v1_6_extension: Maybe(LegacyServerListPingV1_6Extension),
 }
 
-// TODO: use string16 type when odin tagged release appears
+// TODO: use string16 type when odin tagged release appears (actually dont and revision if this is even a utf16 string)
 LegacyServerListPingV1_6Extension :: struct {
     plugin_msg_packet_id: u8,
     channel: Utf16String,

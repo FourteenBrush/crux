@@ -30,15 +30,6 @@ main :: proc() {
     // NOTE: must be put before all other deferred statements
     defer os.exit(0 if exit_success else 1)
 
-    // pool: mem.Dynamic_Arena
-    // mem.dynamic_arena_init(
-    //   &pool, context.allocator, context.allocator,
-    //   block_size=mem.DYNAMIC_ARENA_BLOCK_SIZE_DEFAULT,
-    //   alignment=runtime.MAP_CACHE_LINE_SIZE,
-    // )
-    // allocator := mem.dynamic_arena_allocator(&pool)
-    // defer mem.dynamic_arena_destroy(&pool)
-
     // in debug mode, wrap a tracking allocator around the dynamic arena
     when ODIN_DEBUG && !tracy.TRACY_ENABLE {
         tracking_alloc: back.Tracking_Allocator
