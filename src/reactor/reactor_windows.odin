@@ -1,6 +1,5 @@
 package reactor
 
-import "core:os"
 import "core:log"
 import "core:mem"
 import "core:net"
@@ -33,10 +32,6 @@ ADDR_BUF_SIZE :: size_of(win32.sockaddr_in) + 16
 // How many bytes of actual data to receive into the AcceptEx buffer
 @(private="file")
 ACCEPTEX_RECEIVE_DATA_LENGTH :: 0
-
-// Max size of a write buffer limited by datatype that stores the length of it in IOOperationData.
-@(private="file")
-MAX_SUBMITTED_WRITE_SIZE :: int(max(u32))
 
 // both dynamically loaded by an WsaIoctl call
 @(private="file")
@@ -147,7 +142,7 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 		return false
 	}
 
-	assert(ctx.last_accept_op_data == nil, "storing freed data")
+	assert(ctx.last_accept_op_data == nil)
 	op_data := _alloc_operation_data(ctx^, .AcceptedConnection, ctx.server_sock, {})
 	op_data.accepted_conn.socket = client_sock
 	ctx.last_accept_op_data = op_data
@@ -166,9 +161,10 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 		&op_data.overlapped,
 	)
 	// on ERROR_IO_PENDING, the operation was successfully initiated and is still in progress
-	if accept_ok != win32.TRUE && win32.WSAGetLastError() != i32(win32.ERROR_IO_PENDING) {
+	if !accept_ok && win32.System_Error(win32.WSAGetLastError()) != .IO_PENDING {
 	    _log_error(win32.WSAGetLastError(), "could not setup accept handler")
 	    free(op_data, ctx.allocator)
+		ctx.last_accept_op_data = nil
 		return false
 	}
 	return true
@@ -176,12 +172,19 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 
 @(private)
 _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
-    // cancel AcceptEx to avoid kernel side use after free
+    // cancel AcceptEx call
+    overlapped := &ctx.last_accept_op_data.overlapped if ctx.last_accept_op_data != nil else nil
+    _ = CancelIoEx(win32.HANDLE(ctx.server_sock), overlapped)
+
 	// NOTE: refcounted, no socket handles must be associated with this iocp
 	// TODO: close server socket here?
 	win32.CloseHandle(ctx.completion_port)
+	ctx.completion_port = win32.INVALID_HANDLE_VALUE
+	// TODO: we must actually wait for a completion (poll again?)
+	// https://stackoverflow.com/questions/79769834/winsock-can-an-overlapped-to-wsarecv-be-freed-immediately-after-calling-canceli
 	if ctx.last_accept_op_data != nil {
-	    free(ctx.last_accept_op_data, ctx.allocator)
+	    // FIXME: test whether its correct to free OVERLAPPED for AcceptEx without waiting for completion on real network conditions
+        free(ctx.last_accept_op_data, ctx.allocator)
 	}
 
 	// destroy allocator
@@ -220,6 +223,7 @@ _register_client :: proc(ctx: ^IOContext, conn: _ConnectionHandle) -> bool {
 
     // don't bother setting up and signaling OVERLAPPED.hEvent, we are using iocp for notifications, not WaitForSingleObject and related logic
     // although this still doesnt let us repurpose hEvent to store user data, as winsock treats a non-zero value as an explicit event, regardless of this flag
+    // (only if we also specify a lpCompletionRoutine, we are allowed to do this)
     if !win32.SetFileCompletionNotificationModes(handle, win32.FILE_SKIP_SET_EVENT_ON_HANDLE) {
         _log_error(win32.GetLastError(), "failed to set FILE_SKIP_SET_EVENT bit")
         return false
@@ -240,7 +244,9 @@ _ConnectionHandle :: struct {
     // A buffer is stored at this address when a new connection handle is created, and is renewed every time a new recv buffer
     // is allocated. This way we always retain the last allocation, especially useful when disconnecting a client,
     // at this point no new iocp event will be emitted to confirm the disconnect, where we could simply grab the last allocated buf.
-    last_recv_op: ^[^]u8,
+    // TODO
+    last_read_op: ^IOOperationData,
+    last_write_op: ^IOOperationData,
 }
 #assert(size_of(_ConnectionHandle) == size_of(ConnectionHandle))
 
@@ -257,7 +263,6 @@ _initiate_recv :: proc(ctx: ^IOContext, handle: _ConnectionHandle) -> bool {
         recv_buf = make([]u8, RECV_BUF_SIZE, ctx.allocator) or_else panic("OOM")
     }
     op_data := _alloc_operation_data(ctx^, .Read, handle.socket, recv_buf)
-    op_data.read.last_recv_op = handle.last_recv_op
 
     flags: u32
 	result := win32.WSARecv(
@@ -269,7 +274,7 @@ _initiate_recv :: proc(ctx: ^IOContext, handle: _ConnectionHandle) -> bool {
 		cast(win32.LPWSAOVERLAPPED) &op_data.overlapped,
 		nil, /* completion routine */
 	)
-	if result != 0 && win32.WSAGetLastError() != i32(win32.ERROR_IO_PENDING) {
+	if result != 0 && win32.System_Error(win32.WSAGetLastError()) != .IO_PENDING {
 	    _log_error(win32.WSAGetLastError(), "failed to initiate WSARecv")
 		delete(recv_buf, ctx.allocator)
 		free(op_data, ctx.allocator)
@@ -279,19 +284,15 @@ _initiate_recv :: proc(ctx: ^IOContext, handle: _ConnectionHandle) -> bool {
 	return true
 }
 
-// Cache line aligned IO operation data.
+// Cache line aligned IO operation data. The emitting socket is stored in lpCompletionKey of the OVERLAPPED_ENTRY.
 @(private="file")
 IOOperationData :: struct {
     overlapped: win32.OVERLAPPED,
     using _: struct #raw_union {
         // Only applicable when `op == .Read`.
 	    read: struct {
-			// Raw data of dynamically allocated recv buffer data, the size of this buffer
-			// is always `RECV_BUFFER_SIZE`. This is specified as a multipointer instead of a slice to save space.
+			// Raw data of dynamically allocated recv buffer data, the size of this buffer is always `RECV_BUFFER_SIZE`.
 			buf: [^]u8,
-			// ConnectionHandle opaque data, points to a heap allocated slot where the address of the last
-			// IOOperationData for a read operation is allocated.
-			last_recv_op: ^[^]u8,
 		},
 		// Only applicable when `op == .Write`.
 		write: struct {
@@ -307,8 +308,6 @@ IOOperationData :: struct {
 		},
 	},
 	op: IOOperation,
-	// TODO
-	aborted: bool,
 }
 #assert(size_of(IOOperationData) == 64)
 
@@ -320,14 +319,18 @@ IOOperation :: enum u8 {
 	AcceptedConnection,
 }
 
+// TODO: the issue with freeing IOOperationData after canceling IO is that the docs do not reliably tell us whether this is allowed
+// or if we need to await the completion first (iocp wait/GetOverlappedResult). Even if we awaited the completion, we would not know whether
+// we would poll again after this call.
 @(private)
-_unregister_client :: #force_no_inline proc(ctx: ^IOContext, handle: ConnectionHandle) -> bool {
+_unregister_client :: proc(ctx: ^IOContext, handle: ConnectionHandle) -> bool {
     tracy.Zone()
     // cancel outstanding io operations, yet to arrive completions will have a ERROR_OPERATION_ABORTED status.
     // this is the only way to unregister clients, there is no real "iocp unregister" procedure
     // This affects the installed WSARecv and potential WSASend operations
     ok := CancelIoEx(win32.HANDLE(win32.SOCKET(handle.socket)), /*cancel all*/ nil)
 
+    // TODO: keep track of nr_outstanding or something and wait for completions instead of using ConnectionHandle
     // NOTE: we cannot actively rely on CancelIoEx emitting new iocp completions with an OPERATION_ABORTED status,
     // as this unregister is mosty only called after a peer has already hung up, thus the corresponding WSARecv has already completed
     // with an EOF before we even got here to call CancelIoEx, leaving us with an ERROR_NOT_FOUND indicating nothing could be canceled.
@@ -340,14 +343,6 @@ _unregister_client :: #force_no_inline proc(ctx: ^IOContext, handle: ConnectionH
         _log_error(win32.GetLastError(), "failed to cancel outstanding io operations")
     }
     net.close(handle.socket)
-
-    // free last recv buffer and slot where it is stored
-    handle := transmute(_ConnectionHandle) handle
-    if handle.last_recv_op^ != nil {
-        // free last recv buffer and corresponding operation data
-        // mem.free_with_size(handle.last_recv_op^, RECV_BUF_SIZE, ctx.allocator)
-    }
-    free(handle.last_recv_op, os.heap_allocator())
 
 	return true
 }
@@ -369,10 +364,10 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
     		u32(len(completion_entries)),
     		&nready,
     		u32(timeout_ms),
-    		fAlertable=win32.FALSE,
+    		fAlertable=false,
     	)
     	// instead of returning TRUE, 0, WAIT_TIMEOUT is being set
-    	if result == win32.FALSE && win32.GetLastError() != win32.WAIT_TIMEOUT {
+    	if !result && win32.System_Error(win32.GetLastError()) != .WAIT_TIMEOUT {
             _log_error(win32.GetLastError(), "failed to queue completion entries")
     		return
     	}
@@ -382,42 +377,49 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 	for entry in completion_entries[:nready] {
 	    tracy.ZoneN("CompletionEntry")
 
-		op_data: ^IOOperationData = container_of(entry.lpOverlapped, IOOperationData, "overlapped")
-		defer free(op_data, ctx.allocator)
-		#no_bounds_check comp := &completions_out[i]
 		emitter := win32.SOCKET(entry.lpCompletionKey)
+		#no_bounds_check comp := &completions_out[i]
   		comp.socket = net.TCP_Socket(emitter)
 
-        // NOTE: care must be taken with or_continue to ensure this does not accidentely emit a completion
+        // NOTE: care must be taken with or_continue to ensure this does not accidentally emit a completion
         // in a zeroed out state
         discard_entry := false
-		defer if discard_entry {
-		    nready -= 1
-			if op_data.op == .Read {
-			    // TODO: get rid of this nonsense and emit an .Error comp instead
-                // _release_recv_buf(ctx, comp^)
-			}
-		} else {
-		    i += 1
-		}
+  		defer if discard_entry {
+  		    nready -= 1
+ 			// if op_data.op == .Read {
+ 			    // TODO: get rid of this nonsense and emit an .Error comp instead
+                    // _release_recv_buf(ctx, comp^)
+ 			// }
+  		} else {
+  		    i += 1
+  		}
 
         // map IO NTSTATUS to win32 error
-        status := RtlNtStatusToDosError(win32.NTSTATUS(entry.Internal))
-        if status == win32.ERROR_OPERATION_ABORTED {
+        // TODO: are we sure we need this translation?
+        status := cast(win32.System_Error) RtlNtStatusToDosError(win32.NTSTATUS(entry.Internal))
+        if status == .OPERATION_ABORTED {
             tracy.ZoneN("Stale Completion")
+            // OVERLAPPED and operation data is already deallocated here, must not access it
+
             // TODO: what happens with last write operation, this contains an user allocated buffer, how do we pass it
             // back to them in order to free it?
+            // TODO: reads are leaking here?
 
             discard_entry = true
             continue
-        } else if status != win32.ERROR_SUCCESS {
+        }
+
+        op_data: ^IOOperationData = container_of(entry.lpOverlapped, IOOperationData, "overlapped")
+		defer free(op_data, ctx.allocator)
+
+        if status != .SUCCESS {
             // NOTE: when this entry refers to a write, it still holds an user allocated buffer
             // return this, so the application can free it
             comp.operation = .Error
             if op_data.op == .Write {
                 comp.buf = op_data.write.buf
             }
-			continue
+ 			continue
         }
 
 		switch op_data.op {
@@ -434,11 +436,9 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 
             new_handle := _ConnectionHandle {
                 socket = client_sock,
-                last_recv_op = new([^]u8, os.heap_allocator()),
             }
 
             if !_register_client(ctx, new_handle) {
-                free(new_handle.last_recv_op, os.heap_allocator())
                 continue
             }
             comp.operation = .NewConnection
@@ -461,12 +461,10 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 			} else {
     			comp.operation = .Read
                 comp.buf = op_data.read.buf[:entry.dwNumberOfBytesTransferred]
-                op_data.read.last_recv_op^ = op_data.read.buf
 
     			// re-arm recv handler
                 handle := _ConnectionHandle {
                     socket = emitter,
-                    last_recv_op = op_data.read.last_recv_op,
                 }
                 // TODO: emit .Error instead of simply discarding this entry?
                 discard_entry = !_initiate_recv(ctx, handle)
@@ -504,7 +502,6 @@ _release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
 @(private)
 _submit_write_copy :: proc(ctx: ^IOContext, handle: ConnectionHandle, data: []u8) -> bool {
     tracy.Zone()
-    assert(len(data) <= MAX_SUBMITTED_WRITE_SIZE, #procedure + " submitted buffer is too big")
     handle := transmute(_ConnectionHandle) handle
 
     return _initiate_send(ctx, handle.socket, data)
@@ -523,13 +520,13 @@ _initiate_send :: proc(ctx: ^IOContext, socket: win32.SOCKET, data: []u8, partia
     result := win32.WSASend(
         socket,
         &win32.WSABUF { u32(len(data)), raw_data(data) },
-        1, /* buffer count */
+        1,  /* buffer count */
         nil,
-        0, /* flags */
+        0,  /* flags */
         cast(win32.LPWSAOVERLAPPED) &op_data.overlapped,
         nil, /* completion routine */
     )
-    if result != 0 && win32.WSAGetLastError() != i32(win32.ERROR_IO_PENDING) {
+    if result != 0 && win32.System_Error(win32.WSAGetLastError()) != .IO_PENDING {
         _log_error(win32.WSAGetLastError(), "failed to initiate WSASend")
         free(op_data, ctx.allocator)
         return false

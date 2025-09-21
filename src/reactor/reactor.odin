@@ -43,7 +43,8 @@ ConnectionHandle :: struct {
     // Always configured to be non-blocking.
     socket: net.TCP_Socket,
     // Opaque data.
-    _impl: rawptr,
+    _impl1: rawptr,
+    _impl2: rawptr,
 }
 
 Operation :: enum u8 {
