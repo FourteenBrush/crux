@@ -27,8 +27,10 @@ ServerBoundPacketId :: enum VarInt {
     StatusRequest     = 0x00,
     // To calculate the server's latency
     PingRequest       = 0x01,
+    
     LoginStart        = 0x00,
     LoginAcknowledged = 0x03,
+    LoginPluginResponse = 0x02,
 }
 
 ClientBoundPacketId :: enum VarInt {

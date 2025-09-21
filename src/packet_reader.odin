@@ -21,6 +21,7 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
 
     switch ServerBoundPacketId(id) {
     case .Handshake: // shared with .StatusRequest and LoginStart, blame the protocol
+        
         #partial switch client_state {
         case .Handshake:
             return HandshakePacket {
@@ -32,7 +33,6 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
         case .Status:
             return StatusRequestPacket {}, .None
         case .Login:
-
             return LoginStartPacket {
                 username = buf_read_string(b, 16, allocator) or_return,
                 uuid = buf_read_uuid(b) or_return,
@@ -46,6 +46,7 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
         return PingRequestPacket { payload }, .None
     case .LoginAcknowledged:
         return LoginAcknowledgedPacket {}, .None
+    case .LoginPluginResponse:
     case:
         log.warn("unhandled packet id:", ServerBoundPacketId(id), "kicking with .InvalidData")
         return p, .None

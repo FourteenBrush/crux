@@ -22,8 +22,11 @@ NetworkWorkerSharedData :: struct {
     io_ctx: ^reactor.IOContext,
     // Non-blocking server socket.
     server_sock: net.TCP_Socket,
-    // Ptr to atomic bool, indicating whether to continue running, modified upstream
+    // An allocator to be used by this thread, must be owned by this thread or be thread safe.
+    threadsafe_alloc: mem.Allocator,
+    // Ptr to atomic bool, indicating whether to continue running, modified upstream.
     execution_permit: ^bool,
+    // Packet channel back to main thread.
     packet_bridge: chan.Chan(Packet, .Send),
 }
 
@@ -204,8 +207,8 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
         response := LoginSuccessPacket {
             uuid = packet.uuid,
             username = packet.username,
-            name = "",
-            value = "",
+            name = "textures",
+            value = "somestringhere",
             signature = nil,
         }
         enqueue_packet(state.io_ctx, client_conn, response, allocator=os.heap_allocator())

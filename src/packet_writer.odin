@@ -1,5 +1,6 @@
 package crux
 
+import "base:intrinsics"
 import "core:log"
 import "core:mem"
 import "core:encoding/json"
