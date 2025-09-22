@@ -47,9 +47,10 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
     case .LoginAcknowledged:
         return LoginAcknowledgedPacket {}, .None
     case .LoginPluginResponse:
+        return p, .InvalidData
     case:
         log.warn("unhandled packet id:", ServerBoundPacketId(id), "kicking with .InvalidData")
-        return p, .None
+        return p, .InvalidData
     }
 }
 
