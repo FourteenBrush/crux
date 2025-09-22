@@ -55,8 +55,11 @@ _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 
 @(private)
 _unregister_client :: proc(ctx: ^IOContext, handle: ConnectionHandle) -> bool {
-    errno := linux.epoll_ctl(ctx.epoll_fd, .DEL, linux.Fd(handle.socket), nil)
-    return errno == .NONE
+    ok := linux.epoll_ctl(ctx.epoll_fd, .DEL, linux.Fd(handle.socket), nil) == .NONE
+    _, pending_writes := delete_key(&ctx.pending_writes, handle.socket)
+    delete(pending_writes)
+    // TODO: IO cancelation and such
+    return ok
 }
 
 // TODO: timeout: 0 handle returned bool correctly
