@@ -626,7 +626,7 @@ _load_wsa_fn_ptr :: proc(ctx: ^IOContext, guid: win32.GUID, $Sig: typeid) -> (fn
     return
 }
 
-@(private="file")
-_log_error :: proc(#any_int err: win32.DWORD, message: string) {
+@(private)
+_log_error_impl :: proc(#any_int err: win32.DWORD, message: string) {
     log.logf(ERROR_LOG_LEVEL, "%s: %s", message, win32.System_Error(err))
 }

@@ -77,6 +77,7 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
         assert(ok, "failed to await io events") // TODO: proper error handling
 
         for comp in completions[:nready] {
+            log.warn(comp)
             client_conn := &state.connections[comp.socket]
             if client_conn == nil && comp.operation != .NewConnection && comp.operation != .PeerHangup {
                 // stale completion arrived after a disconnect was issued (peer hangup confirmation or io completion

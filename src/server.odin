@@ -50,6 +50,7 @@ run :: proc() -> bool {
     }
     defer chan.destroy(packet_receiver)
     g_server.packet_receiver = chan.as_recv(packet_receiver)
+    log.infof("Listening on %s", net.endpoint_to_string(endpoint))
 
     net_worker_state := NetworkWorkerSharedData {
        io_ctx = &io_ctx,
