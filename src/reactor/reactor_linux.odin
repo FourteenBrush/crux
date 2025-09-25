@@ -59,6 +59,7 @@ _unregister_client :: proc(ctx: ^IOContext, handle: ConnectionHandle) -> bool {
     _, pending_writes := delete_key(&ctx.pending_writes, handle.socket)
     delete(pending_writes)
     // TODO: IO cancelation and such
+    net.close(handle.socket)
     return ok
 }
 
@@ -87,10 +88,10 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
         if .ERR in event.events {
             comp.operation = .Error
             
-            err: linux.Errno
-            _, opt_err := linux.getsockopt_base(linux.Fd(comp.socket), int(linux.SOL_SOCKET), .ERROR, &err)
-            if opt_err != .NONE {
-                _log_error_impl(opt_err, "failed to poll socket")
+            actual_err: linux.Errno
+            _, opt_err := linux.getsockopt_base(linux.Fd(comp.socket), int(linux.SOL_SOCKET), .ERROR, &actual_err)
+            if opt_err == .NONE {
+                _log_error(actual_err, "failed to poll socket")
             }
         } else if .IN in event.events {
             // accept client
@@ -137,7 +138,6 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
                 continue
             }
             
-            log.warn("sending things")
             comp.operation = .Write
             // TODO: returning only first buf for now
             comp.buf = mem.ptr_to_bytes(cast(^u8)pending_writes[0].base, cast(int)pending_writes[0].len)
@@ -163,11 +163,11 @@ _submit_write_copy :: proc(ctx: ^IOContext, handle: ConnectionHandle, data: []u8
     context.allocator = ctx.allocator
     _, pending_writes, _ := map_upsert(&ctx.pending_writes, handle.socket, [dynamic]linux.IO_Vec{})
     append(pending_writes, linux.IO_Vec { raw_data(data), len(data) })
-    log.warn(ctx.pending_writes, len(ctx.pending_writes))
+    // TODO: assert <= sysconf(._IOV_MAX)
     return true
 }
 
-@(private)
-_log_error_impl :: proc(#any_int err: u32, message: string) {
+@(private="file")
+_log_error :: proc(#any_int err: u32, message: string) {
     log.logf(ERROR_LOG_LEVEL, "%s: %s", message, linux.Errno(err))
 }

@@ -56,6 +56,8 @@ _IOContext :: struct {
 @(private)
 _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (ctx: IOContext, ok: bool) {
     tracy.Zone()
+    // TODO: only put timeBeginPeriod and timeEndPeriod surrounding a sleep call, we dont
+    // need this high precision timer in the rest of the processing code, also lowers power consumption
     _lower_timer_resolution()
 
     ctx.completion_port = win32.CreateIoCompletionPort(
@@ -626,7 +628,7 @@ _load_wsa_fn_ptr :: proc(ctx: ^IOContext, guid: win32.GUID, $Sig: typeid) -> (fn
     return
 }
 
-@(private)
-_log_error_impl :: proc(#any_int err: win32.DWORD, message: string) {
+@(private="file")
+_log_error :: proc(#any_int err: win32.DWORD, message: string) {
     log.logf(ERROR_LOG_LEVEL, "%s: %s", message, win32.System_Error(err))
 }

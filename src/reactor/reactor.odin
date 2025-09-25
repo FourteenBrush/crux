@@ -116,8 +116,3 @@ release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
 submit_write_copy :: proc(ctx: ^IOContext, client: ConnectionHandle, data: []u8) -> bool {
     return _submit_write_copy(ctx, client, data)
 }
-
-@(private="file")
-_log_error :: proc(#any_int err: u32, message: string) {
-    _log_error_impl(err, message)
-}
