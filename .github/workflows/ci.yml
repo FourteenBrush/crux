@@ -49,7 +49,7 @@ jobs:
           envs: PKGSRC_BRANCH
           usesh: true
           copyback: false
-          prepare:
+          prepare: |
             PKG_PATH="https://cdn.NetBSD.org/pub/pkgsrc/packages/NetBSD/amd64/$(uname -r | cut -d_ -f1)_${PKGSRC_BRANCH}/All" /usr/sbin/pkg_add pkgin
             pkgin -y in gmake
           run: |
@@ -74,7 +74,7 @@ jobs:
         with:
           usesh: true
           copyback: false
-          prepare:
+          prepare: |
             pkgin install -y gmake
           run: |
             set -e -x
