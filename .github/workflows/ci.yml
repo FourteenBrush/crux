@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, freebsd-latest, netbsd-latest]
+        os: [ubuntu-latest, windows-latest, macos-14]
 
     steps:
       - uses: actions/checkout@v4
@@ -31,3 +31,44 @@ jobs:
 
       - name: run tests
         run: make test
+
+  build_netbsd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+      - uses: laytan/setup-odin@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: vmactions/netbsd-vm@v1
+        with:
+          usesh: true
+          run: |
+            set -e -x
+            cp ./lib/tracy.lib ./lib/tracy/
+            cp ./lib/tracy.so ./lib/tracy/
+            make
+            make test
+
+
+  build_freebsd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+      - uses: laytan/setup-odin@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          run: |
+            set -e -x
+            cp ./lib/tracy.lib ./lib/tracy/
+            cp ./lib/tracy.so ./lib/tracy/
+            make
+            make test
