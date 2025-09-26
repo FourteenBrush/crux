@@ -50,7 +50,6 @@ jobs:
           usesh: true
           copyback: false
           prepare: |
-            PKG_PATH="https://cdn.NetBSD.org/pub/pkgsrc/packages/NetBSD/amd64/$(uname -r | cut -d_ -f1)_${PKGSRC_BRANCH}/All" /usr/sbin/pkg_add pkgin
             pkgin -y in gmake
           run: |
             set -e -x
@@ -75,7 +74,7 @@ jobs:
           usesh: true
           copyback: false
           prepare: |
-            pkgin install -y gmake
+            pkg install -y gmake
           run: |
             set -e -x
             cp ./lib/tracy.lib ./lib/tracy/
