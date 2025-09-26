@@ -47,7 +47,7 @@ jobs:
           usesh: true
           copyback: false
           prepare:
-            pkg install -y gmake
+            pkgin install -y gmake
           run: |
             set -e -x
             cp ./lib/tracy.lib ./lib/tracy/
@@ -71,7 +71,7 @@ jobs:
           usesh: true
           copyback: false
           prepare:
-            pkg install -y gmake
+            pkgin install -y gmake
           run: |
             set -e -x
             cp ./lib/tracy.lib ./lib/tracy/
