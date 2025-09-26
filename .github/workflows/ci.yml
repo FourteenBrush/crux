@@ -46,12 +46,14 @@ jobs:
         with:
           usesh: true
           copyback: false
+          prepare:
+            pkg install -y gmake
           run: |
             set -e -x
             cp ./lib/tracy.lib ./lib/tracy/
             cp ./lib/tracy.so ./lib/tracy/
-            make
-            make test
+            gmake
+            gmake test
 
 
   build_freebsd:
@@ -68,9 +70,11 @@ jobs:
         with:
           usesh: true
           copyback: false
+          prepare:
+            pkg install -y gmake
           run: |
             set -e -x
             cp ./lib/tracy.lib ./lib/tracy/
             cp ./lib/tracy.so ./lib/tracy/
-            make
-            make test
+            gmake
+            gmake test
