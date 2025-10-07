@@ -3,6 +3,10 @@ package crux
 import "core:log"
 import "core:mem"
 
+// Attempts to read a complete packet from the given buffer, this procedure is transactional and will only
+// consume bytes when a full packet can be read.
+// The only exception to this transactional behavior is when errors other than short reads occur (aka non-recoverable),
+// the internal state of the passed buffer will be modified there.
 read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator: mem.Allocator) -> (p: ServerBoundPacket, err: ReadError) {
     if buf_consume_byte(b, 0xfe) or_return {
         // NOTE: vanilla client attempts to send a legacy server list ping packet
