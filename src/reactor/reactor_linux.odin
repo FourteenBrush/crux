@@ -68,8 +68,14 @@ _unregister_client :: proc(ctx: ^IOContext, handle: ConnectionHandle) -> bool {
 _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, timeout_ms: int) -> (n: int, ok: bool) {
     tracy.Zone()
     events := make([]linux.EPoll_Event, len(completions_out), context.temp_allocator)
-
-    nready, errno := linux.epoll_wait(ctx.epoll_fd, &events[0], i32(len(events)), timeout=i32(timeout_ms))
+    
+    nready: i32
+    errno: linux.Errno
+    for {
+        tracy.ZoneN("epoll_wait")
+        nready, errno = linux.epoll_wait(ctx.epoll_fd, &events[0], i32(len(events)), i32(timeout_ms))
+        if errno != .EINTR do break
+    }
     if errno != .NONE do return
 
     i := 0
