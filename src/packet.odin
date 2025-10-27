@@ -93,6 +93,7 @@ HandshakePacket :: struct {
     intent: HandshakeIntent,
 }
 
+// IMPORTANT NOTE: values must match respective values from ConnectionState to allow casting
 HandshakeIntent :: enum VarInt {
     Status    = 1,
     Login     = 2,
