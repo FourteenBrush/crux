@@ -7,6 +7,7 @@ import "base:runtime"
 import "core:sys/linux"
 
 import "lib:tracy"
+import "lib:back"
 
 @(private)
 _IOContext :: struct {
@@ -15,19 +16,18 @@ _IOContext :: struct {
     allocator: mem.Allocator,
     
     // Yet to be sent writes per client.
-    // TODO: probably [dynamic][]u8
     pending_writes: map[net.TCP_Socket][dynamic]linux.IO_Vec,
 }
 
 @(private)
 _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (ctx: IOContext, ok: bool) {
-    // TODO: does timer resolution need to be fixed here?
     epoll_fd, errno := linux.epoll_create()
     if errno != .NONE do return
     
     ctx.epoll_fd = epoll_fd
     ctx.server_sock = server_sock
-    ctx.allocator = runtime.heap_allocator() // TODO: convert to pool based thing, together with reactor_windows
+    // TODO: convert to pool based thing, together with reactor_windows
+    ctx.allocator = _make_instrumented_alloc(backing=runtime.heap_allocator())
     ctx.pending_writes = make(map[net.TCP_Socket][dynamic]linux.IO_Vec, ctx.allocator)
     
     // register server sock to detect inbound connections
@@ -39,11 +39,17 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 @(private)
 _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
     linux.close(ctx.epoll_fd)
+    assert(len(ctx.pending_writes) == 0, "clients must be unregistered")
+    b := cast(^back.Tracking_Allocator)ctx.allocator.data
     delete(ctx.pending_writes)
+    log.warnf("%#v", b.allocation_map)
+    _destroy_instrumented_alloc(ctx.allocator, allocator)
 }
 
 @(private="file")
 _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
+    tracy.Zone()
+
     event := linux.EPoll_Event {
         // NOTE: .HUP and .ERR are implicit
         events = {.IN, .OUT, .RDHUP},
@@ -55,10 +61,11 @@ _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 
 @(private)
 _unregister_client :: proc(ctx: ^IOContext, handle: ConnectionHandle) -> bool {
+    tracy.Zone()
+
     ok := linux.epoll_ctl(ctx.epoll_fd, .DEL, linux.Fd(handle.socket), nil) == .NONE
     _, pending_writes := delete_key(&ctx.pending_writes, handle.socket)
     delete(pending_writes)
-    // TODO: IO cancelation and such
     net.close(handle.socket)
     return ok
 }
@@ -73,6 +80,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
     errno: linux.Errno
     for {
         tracy.ZoneN("epoll_wait")
+        // NOTE: timer resolution is already fine with CLOCK_MONOTONIC
         nready, errno = linux.epoll_wait(ctx.epoll_fd, &events[0], i32(len(events)), i32(timeout_ms))
         if errno != .EINTR do break
     }
@@ -97,25 +105,25 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
             actual_err: linux.Errno
             _, opt_err := linux.getsockopt_base(linux.Fd(comp.socket), int(linux.SOL_SOCKET), .ERROR, &actual_err)
             if opt_err == .NONE {
-                _log_error(actual_err, "failed to poll socket")
+                _log_error(actual_err, "failed to poll client socket")
             }
         } else if .IN in event.events {
-            // accept client
             if comp.socket == ctx.server_sock {
+                // accept client
                 client_sock, _, accept_err := net.accept_tcp(ctx.server_sock, /*client options*/{ no_delay=true })
                 if accept_err != .None {
                     discard_entry = true
-                    log.warn("failed to accept client")
+                    log.warn("failed to accept client:", accept_err)
                     continue
                 }
-                // configure client socket
-                if net.set_blocking(client_sock, false) != .None {
+                defer if discard_entry {
                     net.close(client_sock)
-                    discard_entry = true
-                    continue
                 }
+
+                // configure client socket
                 discard_entry = true
-                _register_client(ctx, client_sock) or_return
+                net.set_blocking(client_sock, false) or_continue
+                _register_client(ctx, client_sock) or_continue
                 discard_entry = false
                 comp.operation = .NewConnection
                 comp.socket = client_sock
@@ -130,6 +138,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
                 delete(recv_buf, ctx.allocator)
                 comp.operation = .PeerHangup
                 _ = _unregister_client(ctx, ConnectionHandle { socket=comp.socket })
+            // TODO: socket is non blocking, this cant even be possible?? (also change for win32 i suppose)
             case recv_err == net.TCP_Recv_Error.Would_Block: // uh sure?
                 delete(recv_buf, ctx.allocator)
                 discard_entry = true
@@ -138,6 +147,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
                 comp.buf = recv_buf[:n]
             }
         } else if .OUT in event.events {
+            // TODO: handle partial writes with cursor, potentially merge IO_Vec slices?
             pending_writes := &ctx.pending_writes[comp.socket]
             if pending_writes == nil || len(pending_writes) == 0 {
                 discard_entry = true
@@ -145,7 +155,10 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
             }
             
             comp.operation = .Write
-            // TODO: returning only first buf for now
+            // TODO: returning only first buf for now, would theoretically have to emit multiple .Write completions
+            assert(len(pending_writes) == 1, "TODO: handle writev multiple completions")
+
+            // TODO: use slice syntax after odin-dev-11
             comp.buf = mem.ptr_to_bytes(cast(^u8)pending_writes[0].base, cast(int)pending_writes[0].len)
             n, write_err := linux.writev(linux.Fd(comp.socket), pending_writes[:])
             assert(n > 0 && write_err == .NONE, "TODO: error handling")
@@ -166,10 +179,12 @@ _release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
 
 @(private)
 _submit_write_copy :: proc(ctx: ^IOContext, handle: ConnectionHandle, data: []u8) -> bool {
-    context.allocator = ctx.allocator
-    _, pending_writes, _ := map_upsert(&ctx.pending_writes, handle.socket, [dynamic]linux.IO_Vec{})
+    iovecs: [dynamic]linux.IO_Vec
+    iovecs.allocator = ctx.allocator
+    _, pending_writes, _ := map_upsert(&ctx.pending_writes, handle.socket, iovecs)
+
     append(pending_writes, linux.IO_Vec { raw_data(data), len(data) })
-    // TODO: assert <= sysconf(._IOV_MAX)
+    // FIXME: assert <= sysconf(._IOV_MAX)
     return true
 }
 

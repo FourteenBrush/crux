@@ -50,12 +50,16 @@ _serialize_clientbound :: proc(packet: ClientBoundPacket, outb: ^NetworkBuffer, 
         buf_write_uuid(outb, packet.uuid)
         _ = buf_write_string(outb, packet.username)
         // properties
-        buf_write_var_int(outb, VarInt(1))
+        buf_write_var_int(outb, VarInt(1)) // 1 property
         _ = buf_write_string(outb, packet.name)
         _ = buf_write_string(outb, packet.value)
-        buf_write_byte(outb, 1 if packet.signature != nil else 0) // optional
+        
+        // optional signature
+        buf_write_byte(outb, 1 if packet.signature != nil else 0)
         if signature, ok := packet.signature.?; ok {
             _ = buf_write_string(outb, signature)
         }
+    case DisconnectPacket:
+        // TODO
     }
 }

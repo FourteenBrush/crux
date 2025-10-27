@@ -1,5 +1,6 @@
 package crux
 
+import "core:strings"
 import "core:encoding/uuid"
 import "core:fmt"
 import "core:mem"
@@ -21,6 +22,14 @@ SEGMENT_BITS :: 0x7F
 CONTINUE_BIT :: 0x80
 MIN_STRING_LENGTH :: 1
 MAX_STRING_LENGTH :: 32767
+
+IDENTIFIER_MAX_LENGTH :: 32767
+
+@(init, private)
+_init :: proc "contextless" () {
+    context = {} // no actual context is used below
+    allowed_identifier_chars = strings.ascii_set_make("abcdefghijklmnopqrstuvwxyz0123456789.-_") or_else panic("invariant")
+}
 
 // Ringbuffer used for storing per client network data, may be dynamically reallocated.
 // Not thread-safe.
@@ -258,6 +267,36 @@ _buf_reserve_exact :: proc(buf: ^NetworkBuffer, new_cap: int) #no_bounds_check {
         intrinsics.mem_copy_non_overlapping(&buf.data[new_cap - to_copy], &buf.data[buf.r_offset], to_copy)
         buf.r_offset = new_cap - to_copy
     }
+}
+
+// Allowed Identifier chars, excluding the ones that are only exclusively used in either the namespace or value.
+@(private="file")
+allowed_identifier_chars: strings.Ascii_Set
+
+@(require_results)
+buf_read_identifier :: proc(buf: ^NetworkBuffer, allocator: mem.Allocator) -> (id: Identifier, err: ReadError) {
+    length := buf_read_var_int(buf) or_return
+    if length == 0 || length > IDENTIFIER_MAX_LENGTH {
+        return id, .InvalidData
+    }
+
+    bytes := make([]u8, length, allocator)
+    buf_read_bytes(buf, bytes) or_return
+    
+    seen_separator := false
+    for c, i in bytes {
+        if strings.ascii_set_contains(allowed_identifier_chars, c) do continue
+        
+        if c == ':' { // value separator
+            if seen_separator || len(bytes) == i + 1 {
+                return id, .InvalidData
+            }
+            seen_separator = true
+        } else if c == '/' && !seen_separator {
+            return id, .InvalidData
+        }
+    }
+    return Identifier(bytes), .None
 }
 
 @(require_results)

@@ -50,8 +50,11 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
         return PingRequestPacket { payload }, .None
     case .LoginAcknowledged:
         return LoginAcknowledgedPacket {}, .None
-    case .LoginPluginResponse:
-        return p, .InvalidData
+    case .PluginMessage:
+        channel := buf_read_identifier(b, allocator) or_return
+        payload, _ := mem.alloc_bytes_non_zeroed(int(length) - len(channel), allocator=allocator)
+        buf_read_bytes(b, payload[:]) or_return
+        return PluginMessagePacket { channel=channel, payload=payload }, .None
     case:
         log.warn("unhandled packet id:", ServerBoundPacketId(id), "kicking with .InvalidData")
         return p, .InvalidData

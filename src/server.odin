@@ -144,6 +144,8 @@ _setup_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator)
     return io_ctx, true
 }
 
+// TODO: store scratch buffer for allocated data from incoming packets, overwriting
+// itself if there is too much backpressure.
 ClientConnection :: struct {
     // Stores non blocking socket
     using handle: reactor.ConnectionHandle,

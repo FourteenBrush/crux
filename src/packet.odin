@@ -14,29 +14,34 @@ ServerBoundPacket :: union #no_nil {
     PingRequestPacket,
     LoginStartPacket,
     LoginAcknowledgedPacket,
+    PluginMessagePacket,
+}
+
+ServerBoundPacketId :: enum VarInt {
+    Handshake           = 0x00,
+    StatusRequest       = 0x00,
+    // To calculate the server's latency
+    PingRequest         = 0x01,
+    
+    LoginStart          = 0x00,
+    LoginAcknowledged   = 0x03,
+    PluginMessage       = 0x02,
 }
 
 ClientBoundPacket :: union #no_nil {
     StatusResponsePacket,
     PongResponsePacket,
     LoginSuccessPacket,
-}
-
-ServerBoundPacketId :: enum VarInt {
-    Handshake         = 0x00,
-    StatusRequest     = 0x00,
-    // To calculate the server's latency
-    PingRequest       = 0x01,
-    
-    LoginStart        = 0x00,
-    LoginAcknowledged = 0x03,
-    LoginPluginResponse = 0x02,
+    DisconnectPacket,
 }
 
 ClientBoundPacketId :: enum VarInt {
     StatusResponse = 0x00,
     PongResponse   = 0x01,
     LoginSuccess   = 0x02,
+    // sent in Login state
+    
+    Disconnect     = 0x00,
 }
 
 get_clientbound_packet_id :: proc(packet: ClientBoundPacket) -> ClientBoundPacketId {
@@ -54,11 +59,12 @@ clientbound_packet_id_lookup := [intrinsics.type_union_variant_count(ClientBound
     VARIANT_IDX_OF(ClientBoundPacket, StatusResponsePacket) = .StatusResponse,
     VARIANT_IDX_OF(ClientBoundPacket, PongResponsePacket)   = .PongResponse,
     VARIANT_IDX_OF(ClientBoundPacket, LoginSuccessPacket)   = .LoginSuccess,
+    VARIANT_IDX_OF(ClientBoundPacket, DisconnectPacket)     = .Disconnect,
 }
 
 get_serverbound_packet_descriptor :: proc(packet: ServerBoundPacket) -> ServerBoundPacketDescriptor {
     tag: i64 = reflect.get_union_variant_raw_tag(packet)
-    return serverbound_packet_descriptors[tag]
+    #no_bounds_check return serverbound_packet_descriptors[tag]
 }
 
 // IMPORTANT NOTE: ServerBoundPacket must be #no_nil or we need a +1 on the variant idx
@@ -72,6 +78,7 @@ serverbound_packet_descriptors := [intrinsics.type_union_variant_count(ServerBou
     VARIANT_IDX_OF(ServerBoundPacket, PingRequestPacket)          = { .Status },
     VARIANT_IDX_OF(ServerBoundPacket, LoginStartPacket)           = { .Login },
     VARIANT_IDX_OF(ServerBoundPacket, LoginAcknowledgedPacket)    = { .Login },
+    VARIANT_IDX_OF(ServerBoundPacket, PluginMessagePacket)        = { .Configuration },
 }
 
 ServerBoundPacketDescriptor :: struct {
@@ -118,11 +125,19 @@ LoginStartPacket :: struct {
 
 LoginAcknowledgedPacket :: struct {}
 
+PluginMessagePacket :: struct {
+    channel: Identifier,
+    payload: []u8 `fmt:"s"`,
+}
+
 ConnectionState :: enum VarInt {
     Status = 1,
     Login = 2,
     Transfer = 3,
 }
+
+// Namespaced location thing, in the form of `minecraft:thing`, when no namespace is provided, it defaults to `minecraft`.
+Identifier :: distinct string
 
 // Only the version.name field should be considered mandatory
 // TODO: place json:omitempty tags
@@ -146,10 +161,14 @@ PongResponsePacket :: struct {
 
 LoginSuccessPacket :: distinct GameProfile
 
+DisconnectPacket :: struct {
+    reason: string, // TODO: make TextComponent
+}
+
 GameProfile :: struct {
     uuid: uuid.Identifier,
     username: string,
-    // FIXME: use some kind of property map?
+    // FIXME: use some kind of property map? {textures: "value"}
     name: string,
     value: string,
     signature: Maybe(string),

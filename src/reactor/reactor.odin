@@ -7,6 +7,12 @@ import "core:net"
 import "core:mem"
 import "core:log"
 
+import "lib:back"
+import "lib:tracy"
+
+_ :: back
+_ :: tracy
+
 @(private)
 RECV_BUF_SIZE :: 2048
 
@@ -106,7 +112,7 @@ await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, tim
     return _await_io_completions(ctx, completions_out, timeout_ms)
 }
 
-// Releases the ´buf´ of the given completion, must be called on completions of type ´.Read´ after
+// Releases the ´buf´ of the given completion, must be called on completions of type ´.Read´ or `.PeerHangup` after
 // the application processed the data, this data cannot be used afterwards.
 release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
     assert(comp.operation == .Read || comp.operation == .PeerHangup)
@@ -115,4 +121,44 @@ release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
 
 submit_write_copy :: proc(ctx: ^IOContext, client: ConnectionHandle, data: []u8) -> bool {
     return _submit_write_copy(ctx, client, data)
+}
+
+@(private)
+_make_instrumented_alloc :: proc(backing: mem.Allocator) -> mem.Allocator {
+    backing := backing
+    when ODIN_DEBUG && !tracy.TRACY_ENABLE && !ODIN_TEST {
+        tracking_alloc := new(back.Tracking_Allocator, backing)
+        back.tracking_allocator_init(
+            tracking_alloc,
+            backing_allocator=backing,
+            internals_allocator=backing,
+        )
+        backing = back.tracking_allocator(tracking_alloc)
+    }
+    when tracy.TRACY_ENABLE {
+        backing = tracy.MakeProfiledAllocator(
+            new(tracy.ProfiledAllocatorData, backing),
+            callstack_size=14,
+            backing_allocator=backing,
+        )
+    }
+    return backing
+}
+
+@(private)
+_destroy_instrumented_alloc :: proc(instrumented: mem.Allocator, backing: mem.Allocator) -> (unwrapped: mem.Allocator) {
+    unwrapped = instrumented
+    when tracy.TRACY_ENABLE {
+        profiler_data := cast(^tracy.ProfiledAllocatorData) instrumented.data
+        unwrapped = profiler_data.backing_allocator
+        free(profiler_data, backing)
+    }
+    when ODIN_DEBUG && !tracy.TRACY_ENABLE && !ODIN_TEST {
+        tracking_alloc := cast(^back.Tracking_Allocator) instrumented.data
+        back.tracking_allocator_print_results(tracking_alloc)
+        back.tracking_allocator_destroy(tracking_alloc)
+        unwrapped = tracking_alloc.backing
+        free(tracking_alloc, backing)
+    }
+    return
 }

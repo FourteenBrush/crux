@@ -77,7 +77,6 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
         assert(ok, "failed to await io events") // TODO: proper error handling
 
         for comp in completions[:nready] {
-            log.warn(comp)
             client_conn := &state.connections[comp.socket]
             if client_conn == nil && comp.operation != .NewConnection && comp.operation != .PeerHangup {
                 // stale completion arrived after a disconnect was issued (peer hangup confirmation or io completion
@@ -97,7 +96,7 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
             case .PeerHangup:
                 log.debug("client socket hangup")
                 reactor.release_recv_buf(state.io_ctx, comp)
-                // client_conn may be nil when we disconnected from the peer first, thus only serving as a confirmation
+                // client_conn is nil when we disconnected from the peer first, thus only serving as a confirmation
                 if client_conn != nil {
                     _disconnect_client(&state, client_conn^)
                 }
@@ -205,6 +204,9 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
         enqueue_packet(state.io_ctx, client_conn, response, allocator=os.heap_allocator())
         client_conn.close_after_flushing = true
     case LoginStartPacket:
+        // FIXME: negotiate compression here
+
+        // TODO: fetch skin here
         response := LoginSuccessPacket {
             uuid = packet.uuid,
             username = packet.username,
@@ -215,6 +217,8 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
         enqueue_packet(state.io_ctx, client_conn, response, allocator=os.heap_allocator())
     case LoginAcknowledgedPacket:
         client_conn.state = .Configuration
+    case PluginMessagePacket:
+        // TODO
     }
 }
 
