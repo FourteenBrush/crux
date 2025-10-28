@@ -61,5 +61,8 @@ _serialize_clientbound :: proc(packet: ClientBoundPacket, outb: ^NetworkBuffer, 
         }
     case DisconnectPacket:
         // TODO
+    case PluginMessagePacket:
+        buf_write_identifier(outb, packet.channel)
+        buf_write_bytes(outb, packet.payload)
     }
 }

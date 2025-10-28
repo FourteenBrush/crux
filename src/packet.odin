@@ -48,15 +48,26 @@ ClientBoundPacket :: union #no_nil {
     PongResponsePacket,
     LoginSuccessPacket,
     DisconnectPacket,
+    PluginMessagePacket,
 }
 
 ClientBoundPacketId :: enum VarInt {
+    // sent in Status state
+    
     StatusResponse = 0x00,
     PongResponse   = 0x01,
+    
+    // sent in Login state
+    
     LoginSuccess   = 0x02,
+    
     // sent in Login state
     
     Disconnect     = 0x00,
+    
+    // sent in Configuration state
+
+    PluginMessage  = 0x01,
 }
 
 get_clientbound_packet_id :: proc(packet: ClientBoundPacket) -> ClientBoundPacketId {
@@ -75,6 +86,7 @@ clientbound_packet_id_lookup := [intrinsics.type_union_variant_count(ClientBound
     VARIANT_IDX_OF(ClientBoundPacket, PongResponsePacket)   = .PongResponse,
     VARIANT_IDX_OF(ClientBoundPacket, LoginSuccessPacket)   = .LoginSuccess,
     VARIANT_IDX_OF(ClientBoundPacket, DisconnectPacket)     = .Disconnect,
+    VARIANT_IDX_OF(ClientBoundPacket, PluginMessagePacket)  = .PluginMessage,
 }
 
 get_serverbound_packet_descriptor :: proc(packet: ServerBoundPacket) -> ServerBoundPacketDescriptor {

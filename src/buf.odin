@@ -90,6 +90,12 @@ buf_length :: proc(buf: NetworkBuffer) -> int {
     return len(buf.data)
 }
 
+// Returns the amount of bytes consumed since the last recorded read offset passed.
+@(require_results)
+buf_bytes_consumed_since :: proc(buf: NetworkBuffer, old_offset: int) -> int {
+    return (buf.r_offset - old_offset + len(buf.data)) % len(buf.data)
+}
+
 // Checks whether `n` bytes are readable, returns .ShortRead if not.
 @(require_results)
 buf_ensure_readable :: proc(buf: NetworkBuffer, #any_int n: int) -> ReadError {
@@ -299,6 +305,11 @@ buf_read_identifier :: proc(buf: ^NetworkBuffer, allocator: mem.Allocator) -> (i
     return Identifier(bytes), .None
 }
 
+buf_write_identifier :: proc(buf: ^NetworkBuffer, id: Identifier) {
+    err := buf_write_string(buf, string(id))
+    assert(err == .None, "valid Identifier was expected") // only triggered when exceeding max length
+}
+
 @(require_results)
 buf_read_flags :: proc(buf: ^NetworkBuffer, $T: typeid/bit_set[$F]) -> (flags: T, err: ReadError) {
     outb: [size_of(T)]u8
@@ -389,6 +400,24 @@ buf_read_int :: proc(buf: ^NetworkBuffer) -> (val: i32be, err: ReadError) {
         val = (val << 8) | cast(i32be) buf_unchecked_read_byte(buf)
     }
     return
+}
+
+@(require_results)
+buf_unchecked_read_var_int :: proc(buf: ^NetworkBuffer) -> (val: VarInt, err: ReadError) {
+    pos: u16
+
+    for {
+        curr := buf_unchecked_read_byte(buf)
+
+        val |= VarInt(curr & SEGMENT_BITS) << pos
+        if curr & CONTINUE_BIT == 0 do break
+
+        pos += 7
+        if pos >= 32 {
+            return 0, .InvalidData // too big
+        }
+    }
+    return val, .None
 }
 
 @(require_results)
@@ -524,7 +553,7 @@ buf_consume_byte :: proc(buf: ^NetworkBuffer, expected: u8) -> (match: bool, err
     return false, .None
 }
 
-buf_unchecked_read_bool :: proc(buf: ^NetworkBuffer) -> (bool, ReadError) {
+buf_unchecked_read_bool :: proc(buf: ^NetworkBuffer) -> (bool, ReadError) #no_bounds_check {
     (cast(^mem.Raw_Dynamic_Array)&buf.data).len -= 1
     defer buf.r_offset = (buf.r_offset + 1) % cap(buf.data)
     b := buf.data[buf.r_offset]

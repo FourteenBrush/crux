@@ -67,7 +67,7 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
     case .PluginMessage:
         channel := buf_read_identifier(b, allocator) or_return
         // TODO(urgent): we are assuming our r_offset will always be bigger than the previous one
-        payload, _ := mem.alloc_bytes_non_zeroed(int(length) - (b.r_offset - start_off), allocator=allocator)
+        payload, _ := mem.alloc_bytes_non_zeroed(int(length) - buf_bytes_consumed_since(b^, start_off), allocator=allocator)
         buf_read_bytes(b, payload[:]) or_return
         return PluginMessagePacket { channel=channel, payload=payload }, .None
     case:

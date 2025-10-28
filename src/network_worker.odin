@@ -220,7 +220,14 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
     case PluginMessagePacket:
         // TODO
     case ClientInformationPacket:
-        // TODO
+        response := PluginMessagePacket {
+            channel = "minecraft:brand",
+            // TODO: hand crafted for now, will we store the payload as a NetworkBuffer in the future?
+            // payload for minecraft:brand is a length prefixed string
+            payload = { len("crux"), 'c', 'r', 'u', 'x' },
+        }
+        
+        enqueue_packet(state.io_ctx, client_conn, response, allocator=os.heap_allocator())
     }
 }
 
