@@ -219,6 +219,8 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
         client_conn.state = .Configuration
     case PluginMessagePacket:
         // TODO
+    case ClientInformationPacket:
+        // TODO
     }
 }
 

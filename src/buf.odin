@@ -72,9 +72,9 @@ WriteError :: enum {
 BufWriteMark :: distinct int
 
 // Dumps a NetworkBuffer to stdout, for debugging purposes.
-buf_dump :: proc(buf: NetworkBuffer) {
+buf_dump :: proc(buf: NetworkBuffer) #no_bounds_check {
     fmt.printfln("NetworkBuffer{{len=%d, r_offset=%d, data=%2x (hex)}}",
-        len(buf.data), buf.r_offset, buf.data[:],
+        len(buf.data), buf.r_offset, buf.data[buf.r_offset:][:len(buf.data)],
     )
 }
 
@@ -300,6 +300,21 @@ buf_read_identifier :: proc(buf: ^NetworkBuffer, allocator: mem.Allocator) -> (i
 }
 
 @(require_results)
+buf_read_flags :: proc(buf: ^NetworkBuffer, $T: typeid/bit_set[$F]) -> (flags: T, err: ReadError) {
+    outb: [size_of(T)]u8
+    buf_read_bytes(buf, outb[:]) or_return
+    flags = transmute(T) outb
+    
+    check_bit: for flag in flags {
+        for f in F {
+            if flag == f do continue check_bit
+        }
+        return flags, .InvalidData
+    }
+    return flags, .None
+}
+
+@(require_results)
 buf_read_uuid :: proc(buf: ^NetworkBuffer) -> (id: uuid.Identifier, err: ReadError) {
     outb: [16]u8
     buf_read_bytes(buf, outb[:]) or_return
@@ -334,6 +349,25 @@ buf_read_var_int_enum :: proc(buf: ^NetworkBuffer, $E: typeid) -> (e: E, err: Re
 where
     intrinsics.type_is_enum(E) {
     e = cast(E) buf_read_var_int(buf) or_return
+    
+    when intrinsics.type_enum_is_contiguous(E) {
+        if e < min(E) || e > max(E) {
+            return e, .InvalidData
+        }
+        return e, .None
+    } else {
+        for constant in E do if constant == e {
+            return e, .None
+        }
+        return e, .InvalidData
+    }
+}
+
+@(require_results)
+buf_unchecked_read_var_int_enum :: proc(buf: ^NetworkBuffer, $E: typeid) -> (e: E, err: ReadError)
+where
+    intrinsics.type_is_enum(E) {
+    e = cast(E) buf_unchecked_read_var_int(buf) or_return
     
     when intrinsics.type_enum_is_contiguous(E) {
         if e < min(E) || e > max(E) {
@@ -488,6 +522,28 @@ buf_consume_byte :: proc(buf: ^NetworkBuffer, expected: u8) -> (match: bool, err
         return true, .None
     }
     return false, .None
+}
+
+buf_unchecked_read_bool :: proc(buf: ^NetworkBuffer) -> (bool, ReadError) {
+    (cast(^mem.Raw_Dynamic_Array)&buf.data).len -= 1
+    defer buf.r_offset = (buf.r_offset + 1) % cap(buf.data)
+    b := buf.data[buf.r_offset]
+    if b > 1 {
+        return false, .InvalidData
+    }
+    return bool(b), .None
+}
+
+@(require_results)
+buf_read_bool :: proc(buf: ^NetworkBuffer) -> (bool, ReadError) #no_bounds_check {
+    if len(buf.data) == 0 do return false, .ShortRead
+    (cast(^mem.Raw_Dynamic_Array)&buf.data).len -= 1
+    defer buf.r_offset = (buf.r_offset + 1) % cap(buf.data)
+    b := buf.data[buf.r_offset]
+    if b > 1 {
+        return false, .InvalidData
+    }
+    return bool(b), .None
 }
 
 @(require_results)

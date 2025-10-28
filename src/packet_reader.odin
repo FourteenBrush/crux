@@ -9,9 +9,8 @@ import "core:mem"
 // the internal state of the passed buffer will be modified there.
 read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator: mem.Allocator) -> (p: ServerBoundPacket, err: ReadError) {
     if buf_consume_byte(b, 0xfe) or_return {
-        // NOTE: vanilla client attempts to send a legacy server list ping packet
-        // when normal ping times out (30s), additionally older clients send this, which
-        // we are supposed to handle
+        // NOTE: vanilla client attempts to send a legacy server list ping packet when
+        // normal ping times out (30s), additionally older clients send this, which we are supposed to handle
         // TODO: directly kick after FE 01 FA
         return read_legacy_server_list_ping(b, allocator=allocator)
     }
@@ -21,12 +20,13 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
     buf_ensure_readable(b^, length) or_return
 
     buf_advance_pos_unchecked(b, length_nbytes)
+    start_off := b.r_offset
     id := buf_read_var_int(b) or_return
 
     switch ServerBoundPacketId(id) {
-    case .Handshake: // shared with .StatusRequest and LoginStart, blame the protocol
+    case .Handshake: // shared with .StatusRequest, LoginStart and ClientInformation, blame the protocol
         
-        #partial switch client_state {
+        switch client_state {
         case .Handshake:
             return HandshakePacket {
                 protocol_version = read_protocol_version(b) or_return,
@@ -41,8 +41,22 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
                 username = buf_read_string(b, 16, allocator) or_return,
                 uuid = buf_read_uuid(b) or_return,
             }, .None
-        case:
-            return p, .InvalidData
+        case .Configuration:
+            return ClientInformationPacket {
+                // TODO: unchecked reads
+                locale = buf_read_string(b, 16, allocator) or_return,
+                view_distance = buf_unchecked_read_byte(b),
+                chat_mode = buf_unchecked_read_var_int_enum(b, ChatMode) or_return,
+                chat_colors = buf_unchecked_read_bool(b) or_return,
+                skin_parts = buf_read_flags(b, SkinParts) or_return,
+                main_hand = buf_unchecked_read_var_int_enum(b, MainHand) or_return,
+                enable_text_filtering = buf_unchecked_read_bool(b) or_return,
+                allow_server_listings = buf_unchecked_read_bool(b) or_return,
+                particle_status = buf_unchecked_read_var_int_enum(b, ParticleStatus) or_return,
+            }, .None
+        case .Transfer:
+            return {}, .InvalidData
+        case: unreachable()
         }
 
     case .PingRequest:
@@ -52,7 +66,8 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
         return LoginAcknowledgedPacket {}, .None
     case .PluginMessage:
         channel := buf_read_identifier(b, allocator) or_return
-        payload, _ := mem.alloc_bytes_non_zeroed(int(length) - len(channel), allocator=allocator)
+        // TODO(urgent): we are assuming our r_offset will always be bigger than the previous one
+        payload, _ := mem.alloc_bytes_non_zeroed(int(length) - (b.r_offset - start_off), allocator=allocator)
         buf_read_bytes(b, payload[:]) or_return
         return PluginMessagePacket { channel=channel, payload=payload }, .None
     case:

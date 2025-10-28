@@ -8,24 +8,39 @@ import "core:encoding/uuid"
 Packet :: union { ClientBoundPacket, ServerBoundPacket }
 
 ServerBoundPacket :: union #no_nil {
+    // sent in .Handshake state
     LegacyServerListPingPacket,
     HandshakePacket,
+    // sent in .Status state
     StatusRequestPacket,
     PingRequestPacket,
+    // sent in .Login state
     LoginStartPacket,
     LoginAcknowledgedPacket,
+    // sent in .Configuration state
     PluginMessagePacket,
+    ClientInformationPacket,
 }
 
 ServerBoundPacketId :: enum VarInt {
+    // sent in .Handshake state
     Handshake           = 0x00,
+    
+    // sent in .Status state
+    
     StatusRequest       = 0x00,
     // To calculate the server's latency
     PingRequest         = 0x01,
     
+    // sent in .Login state
+    
     LoginStart          = 0x00,
     LoginAcknowledged   = 0x03,
+    
+    // send in .Configuration state
+    
     PluginMessage       = 0x02,
+    ClientInformation   = 0x00,
 }
 
 ClientBoundPacket :: union #no_nil {
@@ -79,6 +94,7 @@ serverbound_packet_descriptors := [intrinsics.type_union_variant_count(ServerBou
     VARIANT_IDX_OF(ServerBoundPacket, LoginStartPacket)           = { .Login },
     VARIANT_IDX_OF(ServerBoundPacket, LoginAcknowledgedPacket)    = { .Login },
     VARIANT_IDX_OF(ServerBoundPacket, PluginMessagePacket)        = { .Configuration },
+    VARIANT_IDX_OF(ServerBoundPacket, ClientInformationPacket)    = { .Configuration },
 }
 
 ServerBoundPacketDescriptor :: struct {
@@ -129,6 +145,47 @@ LoginAcknowledgedPacket :: struct {}
 PluginMessagePacket :: struct {
     channel: Identifier,
     payload: []u8 `fmt:"s"`,
+}
+
+ClientInformationPacket :: struct {
+    locale: string /*(16)*/,
+    view_distance: u8,
+    chat_mode: ChatMode,
+    chat_colors: bool,
+    skin_parts: SkinParts,
+    main_hand: MainHand,
+    enable_text_filtering: bool,
+    allow_server_listings: bool,
+    particle_status: ParticleStatus,
+}
+
+ChatMode :: enum VarInt {
+    Enabled      = 0,
+    CommandsOnly = 1,
+    Hidden       = 2,
+}
+
+SkinParts :: bit_set[SkinPart; u8]
+// Bit positions for a skin parts bit set
+SkinPart :: enum {
+    Cape          = 0,
+    Jacket        = 1,
+    LeftSleeve    = 2,
+    RightSleeve   = 3,
+    LeftPantsLeg  = 4,
+    RightPantsLeg = 5,
+    Hat           = 6,
+}
+
+MainHand :: enum VarInt {
+    Left  = 0,
+    Right = 1,
+}
+
+ParticleStatus :: enum VarInt {
+    All       = 0,
+    Decreased = 1,
+    Minimal   = 2,
 }
 
 ConnectionState :: enum VarInt {
