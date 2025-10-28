@@ -7,7 +7,6 @@ import "base:runtime"
 import "core:sys/linux"
 
 import "lib:tracy"
-import "lib:back"
 
 @(private)
 _IOContext :: struct {
@@ -40,9 +39,7 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
     linux.close(ctx.epoll_fd)
     assert(len(ctx.pending_writes) == 0, "clients must be unregistered")
-    b := cast(^back.Tracking_Allocator)ctx.allocator.data
     delete(ctx.pending_writes)
-    log.warnf("%#v", b.allocation_map)
     _destroy_instrumented_alloc(ctx.allocator, allocator)
 }
 
