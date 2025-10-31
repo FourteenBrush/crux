@@ -181,7 +181,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
         } else if .HUP in event.events || .RDHUP in event.events {
             // handle abrupt disconnection and read hangup the same way
             comp.operation = .PeerHangup
-            _ = _unregister_client(ctx, ConnectionHandle { socket=comp.socket })
+            net.close(comp.socket)
         }
     }
     return int(nready), true
