@@ -63,8 +63,8 @@ Operation :: enum u8 {
     // This always indicates a successful read, an EOF condition is handled with `.PeerHangup` instead.
     Read,
     Write,
-    // Read hangup or abrupt disconnection.
-    // The associated socket in the completion cannot be used for IO anymore.
+    // Read hangup or abrupt disconnection, the associated socket in the completion has been closed and cannot be used for IO anymore.
+    // The application is responsable for unregistering the client if it has not done that already.
     PeerHangup,
     // Represents a newly accepted client socket, stored in `Completion.socket`. The socket is configured
     // to be non-blocking and is already registered in this subsystem.
@@ -119,6 +119,8 @@ release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
     _release_recv_buf(ctx, comp)
 }
 
+// TODO: why dont we save the allocator the passed buffer was allocated with, so we can free it
+// ourselves instead of sending it back?
 submit_write_copy :: proc(ctx: ^IOContext, client: ConnectionHandle, data: []u8) -> bool {
     return _submit_write_copy(ctx, client, data)
 }
