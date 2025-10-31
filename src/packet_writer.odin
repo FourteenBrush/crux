@@ -1,22 +1,22 @@
 package crux
 
-import "base:intrinsics"
 import "core:log"
 import "core:mem"
+import "base:intrinsics"
 import "core:encoding/json"
 
 import "lib:tracy"
 
 import "src:reactor"
 
-enqueue_packet :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnection, packet: ClientBoundPacket, allocator: mem.Allocator) {
+enqueue_packet :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnection, packet: ClientBoundPacket) {
     tracy.Zone()
     log.log(LOG_LEVEL_OUTBOUND, "Sending packet", packet)
 
-    _serialize_clientbound(packet, &client_conn.tx_buf, allocator=allocator)
-
+    _serialize_clientbound(packet, &client_conn.tx_buf)
+    
     // freed by io worker after receiving write completion
-    outb := make([]u8, buf_length(client_conn.tx_buf), allocator)
+    outb := make([]u8, buf_length(client_conn.tx_buf), client_conn.packet_scratch_alloc)
     read_err := buf_copy_into(&client_conn.tx_buf, outb)
     assert(read_err == .None, "invariant, copied full length")
 
@@ -25,7 +25,7 @@ enqueue_packet :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnectio
     buf_advance_pos_unchecked(&client_conn.tx_buf, len(outb))
 }
 
-_serialize_clientbound :: proc(packet: ClientBoundPacket, outb: ^NetworkBuffer, allocator: mem.Allocator) {
+_serialize_clientbound :: proc(packet: ClientBoundPacket, outb: ^NetworkBuffer) {
     initial_len := buf_length(outb^)
     begin_payload_mark := buf_emit_write_mark(outb^)
     defer {

@@ -18,6 +18,11 @@ import "lib:tracy"
 @(private="file")
 WORKER_TARGET_MSPT :: 5
 
+// The capacity of the allocator that allocates per client packet specific data, if this allocator
+// fills up, old data will be overwritten.
+@(private="file")
+PACKET_SCRATCH_BUFFER_SIZE :: 256 * 1024
+
 NetworkWorkerSharedData :: struct {
     io_ctx: ^reactor.IOContext,
     // Non-blocking server socket.
@@ -90,7 +95,7 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
                 log.warn("client socket error")
                 // if caused by a write operation, free our allocated submission which was returned back to us
                 if comp.buf != nil {
-                    delete(comp.buf, os.heap_allocator())
+                    delete(comp.buf, client_conn.packet_scratch_alloc)
                 }
                 _disconnect_client(&state, client_conn^)
             case .PeerHangup:
@@ -104,18 +109,29 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
                 buf_write_bytes(&client_conn.rx_buf, comp.buf) // copies
                 reactor.release_recv_buf(state.io_ctx, comp)
                 // TODO: change allocator, we can do better than this
-                _drain_serverbound_packets(&state, client_conn, os.heap_allocator())
+                _drain_serverbound_packets(&state, client_conn, packet_alloc=client_conn.packet_scratch_alloc)
             case .Write:
                 // must be freed using the same allocator the reactor write call was made with
-                delete(comp.buf, os.heap_allocator())
+                delete(comp.buf, client_conn.packet_scratch_alloc)
                 if client_conn.close_after_flushing {
                     log.debug("disconnecting client as requested")
                     _disconnect_client(&state, client_conn^)
                 }
             case .NewConnection:
+                packet_scratch := new(mem.Scratch, os.heap_allocator())
+                mem.scratch_init(packet_scratch, PACKET_SCRATCH_BUFFER_SIZE, backup_allocator=os.heap_allocator())
+                log.warnf("addrof scratch=%p, addrof buf=%p", packet_scratch, raw_data(packet_scratch.data))
+                // NOTE: disallow out of band allocations larger than allocator cap, as they would be leaked either way
+                packet_scratch.backup_allocator = mem.panic_allocator()
+                packet_scratch.leaked_allocations.allocator = mem.panic_allocator()
+                
+                // NOTE: disallow out of band allocations larger than allocator cap, as they would be leaked
                 state.connections[comp.socket] = ClientConnection {
                     handle = comp.handle,
                     state  = .Handshake,
+                    
+                    packet_scratch_alloc = mem.scratch_allocator(packet_scratch),
+                    _scratch = packet_scratch,
                     rx_buf = create_network_buf(allocator=os.heap_allocator()),
                     tx_buf = create_network_buf(allocator=os.heap_allocator()),
                 }
@@ -196,12 +212,12 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
             favicon = "data:image/png;base64,<data>",
             enforces_secure_chat = false,
         }
-        enqueue_packet(state.io_ctx, client_conn, status_response, allocator=os.heap_allocator())
+        enqueue_packet(state.io_ctx, client_conn, status_response)
     case PingRequestPacket:
         response := PongResponsePacket {
             payload = packet.payload,
         }
-        enqueue_packet(state.io_ctx, client_conn, response, allocator=os.heap_allocator())
+        enqueue_packet(state.io_ctx, client_conn, response)
         client_conn.close_after_flushing = true
     case LoginStartPacket:
         // FIXME: negotiate compression here
@@ -214,7 +230,7 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
             value = "somestringhere",
             signature = nil,
         }
-        enqueue_packet(state.io_ctx, client_conn, response, allocator=os.heap_allocator())
+        enqueue_packet(state.io_ctx, client_conn, response)
     case LoginAcknowledgedPacket:
         client_conn.state = .Configuration
     case PluginMessagePacket:
@@ -227,11 +243,11 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
             payload = { len("crux"), 'c', 'r', 'u', 'x' },
         }
         
-        enqueue_packet(state.io_ctx, client_conn, response, allocator=os.heap_allocator())
+        enqueue_packet(state.io_ctx, client_conn, response)
     }
 }
 
-// Unregisters a client and shuts down the connection without transmissing any more data.
+// Unregisters a client and shuts down the connection without transmitting any more data.
 _disconnect_client :: proc(state: ^NetworkWorkerState, client_conn: ClientConnection) {
     tracy.Zone()
 
@@ -242,4 +258,9 @@ _disconnect_client :: proc(state: ^NetworkWorkerState, client_conn: ClientConnec
     _, client_conn := delete_key(&state.connections, client_conn.socket)
     destroy_network_buf(client_conn.tx_buf)
     destroy_network_buf(client_conn.rx_buf)
+    
+    // ensure right allocator is used to free buffer, instead of panic allocator
+    client_conn._scratch.backup_allocator = os.heap_allocator()
+    mem.scratch_destroy(client_conn._scratch)
+    free(client_conn._scratch, os.heap_allocator())
 }

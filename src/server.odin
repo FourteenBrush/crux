@@ -144,12 +144,15 @@ _setup_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator)
     return io_ctx, true
 }
 
-// TODO: store scratch buffer for allocated data from incoming packets, overwriting
-// itself if there is too much backpressure.
 ClientConnection :: struct {
     // Stores non blocking socket
     using handle: reactor.ConnectionHandle,
     state: ClientState,
+    
+    // Allocator to deal with all packet related allocations, overwriting itself
+    // if there is too much backpressure.
+    packet_scratch_alloc: mem.Allocator,
+    _scratch: ^mem.Scratch,
 
     // Whether this connection needs to be closed after flushing all packets
     close_after_flushing: bool,

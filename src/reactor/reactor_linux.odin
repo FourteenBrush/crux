@@ -12,6 +12,7 @@ import "lib:tracy"
 _IOContext :: struct {
     epoll_fd: linux.Fd,
     server_sock: net.TCP_Socket,
+    // Allocator used to allocate recv buffers, the pending writes map and iovecs.
     allocator: mem.Allocator,
     
     // Yet to be sent writes per client.
@@ -128,42 +129,59 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
             }
             
             comp.operation = .Read
-            recv_buf := make([]u8, RECV_BUF_SIZE, ctx.allocator) or_else panic("OOM")
+            recv_buf := mem.alloc_bytes_non_zeroed(RECV_BUF_SIZE, allocator=ctx.allocator) or_else panic("OOM")
             n, recv_err := net.recv_tcp(comp.socket, recv_buf)
             switch {
             case n == 0:
-                delete(recv_buf, ctx.allocator)
                 comp.operation = .PeerHangup
-                _ = _unregister_client(ctx, ConnectionHandle { socket=comp.socket })
-            // TODO: socket is non blocking, this cant even be possible?? (also change for win32 i suppose)
-            case recv_err == net.TCP_Recv_Error.Would_Block: // uh sure?
+                delete(recv_buf, ctx.allocator)
+            case recv_err == net.TCP_Recv_Error.Would_Block:
                 delete(recv_buf, ctx.allocator)
                 discard_entry = true
+            case recv_err != .None:
+                comp.operation = .Error
+                delete(recv_buf, ctx.allocator)
             case:
-                // successful read
+                // successful read, recv buffer will be freed downstream
                 comp.buf = recv_buf[:n]
             }
         } else if .OUT in event.events {
-            // TODO: handle partial writes with cursor, potentially merge IO_Vec slices?
             pending_writes := &ctx.pending_writes[comp.socket]
             if pending_writes == nil || len(pending_writes) == 0 {
                 discard_entry = true
                 continue
             }
             
-            comp.operation = .Write
             // TODO: returning only first buf for now, would theoretically have to emit multiple .Write completions
             assert(len(pending_writes) == 1, "TODO: handle writev multiple completions")
-
+            
+            // TODO: profile both
+            when true {
+                n, send_err := linux.sendmsg(linux.Fd(comp.socket), &linux.Msg_Hdr { iov = pending_writes[:] }, {.NOSIGNAL})
+            } else {
+                n, send_err := linux.writev(linux.Fd(comp.socket), pending_writes[:]) // missing NOSIGNAL flag
+            }
+            
+            comp.operation = .Write
             // TODO: use slice syntax after odin-dev-11
             comp.buf = mem.ptr_to_bytes(cast(^u8)pending_writes[0].base, cast(int)pending_writes[0].len)
-            n, write_err := linux.writev(linux.Fd(comp.socket), pending_writes[:])
-            assert(n > 0 && write_err == .NONE, "TODO: error handling")
+
+            // make downstream able to deallocate passed buffer
+            if send_err != .NONE {
+                comp.operation = .Error
+                continue
+            }
+
+            total_transfer_len: uint
+            for vec in pending_writes do total_transfer_len += vec.len
+            // TODO: handle partial writes with cursor, potentially merge IO_Vec slices?
+            assert(uint(n) == total_transfer_len, "TODO: handle partial writes")
             resize(pending_writes, 0)
+            
         } else if .HUP in event.events || .RDHUP in event.events {
             // handle abrupt disconnection and read hangup the same way
             comp.operation = .PeerHangup
-            net.close(comp.socket)
+            _ = _unregister_client(ctx, ConnectionHandle { socket=comp.socket })
         }
     }
     return int(nready), true
