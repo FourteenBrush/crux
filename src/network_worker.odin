@@ -92,7 +92,7 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
 
             switch comp.operation {
             case .Error:
-                log.warn("client socket error")
+                log.debug("client socket error")
                 // if caused by a write operation, free our allocated submission which was returned back to us
                 if comp.buf != nil {
                     delete(comp.buf, client_conn.packet_scratch_alloc)
@@ -120,12 +120,10 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
             case .NewConnection:
                 packet_scratch := new(mem.Scratch, os.heap_allocator())
                 mem.scratch_init(packet_scratch, PACKET_SCRATCH_BUFFER_SIZE, backup_allocator=os.heap_allocator())
-                log.warnf("addrof scratch=%p, addrof buf=%p", packet_scratch, raw_data(packet_scratch.data))
                 // NOTE: disallow out of band allocations larger than allocator cap, as they would be leaked either way
                 packet_scratch.backup_allocator = mem.panic_allocator()
                 packet_scratch.leaked_allocations.allocator = mem.panic_allocator()
                 
-                // NOTE: disallow out of band allocations larger than allocator cap, as they would be leaked
                 state.connections[comp.socket] = ClientConnection {
                     handle = comp.handle,
                     state  = .Handshake,
