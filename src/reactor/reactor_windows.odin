@@ -496,7 +496,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 @(private)
 _release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
     tracy.Zone()
-    assert(raw_data(comp.buf) != nil)
+    assert(comp.buf != nil)
     delete(comp.buf, ctx.allocator)
 }
 
