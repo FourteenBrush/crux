@@ -1,12 +1,14 @@
 package reactor
 
-import "core:log"
-import "core:net"
-import "core:mem"
-import "base:runtime"
-import "core:sys/linux"
+@(require) import "core:log"
+@(require) import "core:net"
+@(require) import "core:mem"
+@(require) import "base:runtime"
+@(require) import "core:sys/linux"
 
-import "lib:tracy"
+@(require) import "lib:tracy"
+
+when !USE_IO_URING {
 
 @(private)
 _IOContext :: struct {
@@ -27,7 +29,7 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
     ctx.epoll_fd = epoll_fd
     ctx.server_sock = server_sock
     // TODO: convert to pool based thing, together with reactor_windows
-    ctx.allocator = _make_instrumented_alloc(backing=runtime.heap_allocator())
+    ctx.allocator = _make_instrumented_alloc(runtime.heap_allocator(), meta_allocator=runtime.heap_allocator())
     ctx.pending_writes = make(map[net.TCP_Socket][dynamic]linux.IO_Vec, ctx.allocator)
     
     // register server sock to detect inbound connections
@@ -38,10 +40,10 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 
 @(private)
 _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
-    linux.close(ctx.epoll_fd)
     assert(len(ctx.pending_writes) == 0, "clients must be unregistered")
+    linux.close(ctx.epoll_fd)
     delete(ctx.pending_writes)
-    _destroy_instrumented_alloc(ctx.allocator, allocator)
+    _destroy_instrumented_alloc(ctx.allocator, meta_allocator=runtime.heap_allocator())
 }
 
 @(private="file")
@@ -206,4 +208,6 @@ _submit_write_copy :: proc(ctx: ^IOContext, handle: ConnectionHandle, data: []u8
 @(private="file")
 _log_error :: proc(#any_int err: u32, message: string) {
     log.logf(ERROR_LOG_LEVEL, "%s: %s", message, linux.Errno(err))
+}
+
 }

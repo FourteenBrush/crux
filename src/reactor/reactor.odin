@@ -14,6 +14,9 @@ _ :: back
 _ :: tracy
 
 @(private)
+USE_IO_URING :: #config(CRUX_USE_IO_URING, false)
+
+@(private)
 RECV_BUF_SIZE :: 2048
 
 // The log level used for error logs produced by the `IOContext`, specified in this package
@@ -126,10 +129,10 @@ submit_write_copy :: proc(ctx: ^IOContext, client: ConnectionHandle, data: []u8)
 }
 
 @(private)
-_make_instrumented_alloc :: proc(backing: mem.Allocator) -> mem.Allocator {
+_make_instrumented_alloc :: proc(backing: mem.Allocator, meta_allocator: mem.Allocator) -> mem.Allocator {
     backing := backing
     when ODIN_DEBUG && !tracy.TRACY_ENABLE && !ODIN_TEST {
-        tracking_alloc := new(back.Tracking_Allocator, backing)
+        tracking_alloc := new(back.Tracking_Allocator, meta_allocator)
         back.tracking_allocator_init(
             tracking_alloc,
             backing_allocator=backing,
@@ -139,7 +142,7 @@ _make_instrumented_alloc :: proc(backing: mem.Allocator) -> mem.Allocator {
     }
     when tracy.TRACY_ENABLE {
         backing = tracy.MakeProfiledAllocator(
-            new(tracy.ProfiledAllocatorData, backing),
+            new(tracy.ProfiledAllocatorData, meta_allocator),
             callstack_size=14,
             backing_allocator=backing,
         )
@@ -148,19 +151,19 @@ _make_instrumented_alloc :: proc(backing: mem.Allocator) -> mem.Allocator {
 }
 
 @(private)
-_destroy_instrumented_alloc :: proc(instrumented: mem.Allocator, backing: mem.Allocator) -> (unwrapped: mem.Allocator) {
+_destroy_instrumented_alloc :: proc(instrumented: mem.Allocator, meta_allocator: mem.Allocator) -> (unwrapped: mem.Allocator) {
     unwrapped = instrumented
     when tracy.TRACY_ENABLE {
         profiler_data := cast(^tracy.ProfiledAllocatorData) instrumented.data
         unwrapped = profiler_data.backing_allocator
-        free(profiler_data, backing)
+        free(profiler_data, meta_allocator)
     }
     when ODIN_DEBUG && !tracy.TRACY_ENABLE && !ODIN_TEST {
         tracking_alloc := cast(^back.Tracking_Allocator) instrumented.data
         back.tracking_allocator_print_results(tracking_alloc)
         back.tracking_allocator_destroy(tracking_alloc)
         unwrapped = tracking_alloc.backing
-        free(tracking_alloc, backing)
+        free(tracking_alloc, meta_allocator)
     }
     return
 }
