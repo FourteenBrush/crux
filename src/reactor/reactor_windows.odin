@@ -34,6 +34,7 @@ _accept_ex_sock_addrs := win32.LPFN_GETACCEPTEXSOCKADDRS(nil)
 _IOContext :: struct {
 	completion_port: win32.HANDLE,
 	server_sock: win32.SOCKET,
+	timer_resolution: u32,
 	// TODO: separate into two allocators, one for per client recv bufs/write bufs (maybe) and
 	// one for completion entries, freelist block based, or perhaps even epoch based recycling (assuming no iocp stalls occur)
 	allocator: mem.Allocator,
@@ -47,9 +48,16 @@ _IOContext :: struct {
 @(private)
 _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (ctx: IOContext, ok: bool) {
     tracy.Zone()
-    // TODO: only put timeBeginPeriod and timeEndPeriod surrounding a sleep call, we dont
-    // need this high precision timer in the rest of the processing code, also lowers power consumption
-    _lower_timer_resolution()
+    // NOTE: while it would be theoretically more interesting to only surround the timing critical GetQueuedCompletionStatusEx
+    // call with a timeBeginPeriod/timeEndPeriod (to save power etc..), this does not reliably affect the timer
+    // resolution (especially for code that only runs in this short period). For instance, switching power modes has a negative
+    // effect on the timer resolution, effectively bringing us back to the ~15ms default resolution time...
+    timecaps: win32.TIMECAPS
+    res := win32.timeGetDevCaps(&timecaps, size_of(timecaps))
+    assert(res == win32.MMSYSERR_NOERROR, "failed querying timer resolution")
+    ctx.timer_resolution = max(1, timecaps.wPeriodMin)
+    res = win32.timeBeginPeriod(ctx.timer_resolution)
+    assert(res == win32.TIMERR_NOERROR, "invariant, resolution should not be out of range")
 
     ctx.completion_port = win32.CreateIoCompletionPort(
 		win32.INVALID_HANDLE_VALUE,
@@ -168,6 +176,8 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
     // cancel AcceptEx call
     overlapped := &ctx.last_accept_op_data.overlapped if ctx.last_accept_op_data != nil else nil
     _ = win32.CancelIoEx(win32.HANDLE(ctx.server_sock), overlapped)
+    
+    win32.timeEndPeriod(ctx.timer_resolution)
 
 	// NOTE: refcounted, no socket handles must be associated with this iocp
 	// TODO: close server socket here?
@@ -583,14 +593,8 @@ _alloc_operation_data :: proc(ctx: IOContext, $Op: IOOperation, source: win32.SO
     return op_data
 }
 
-// Alters timer resolution, in order to obtain millisecond precision for the event loop (if possible).
 @(private="file")
 _lower_timer_resolution :: proc() {
-    caps: win32.TIMECAPS
-    res := win32.timeGetDevCaps(&caps, size_of(caps))
-    assert(res == win32.MMSYSERR_NOERROR, "failed querying timer resolution")
-    res = win32.timeBeginPeriod(max(1, caps.wPeriodMin))
-    assert(res == win32.MMSYSERR_NOERROR, "failed changing timer resolution")
 }
 
 // Dynamically loads a WSA function pointer, returns `nil` on failure.
