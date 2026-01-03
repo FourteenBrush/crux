@@ -131,7 +131,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
             }
             
             comp.operation = .Read
-            recv_buf := mem.alloc_bytes_non_zeroed(RECV_BUF_SIZE, allocator=ctx.allocator) or_else panic("OOM")
+            recv_buf := mem.alloc_bytes_non_zeroed(RECV_BUF_SIZE, align_of(u8), ctx.allocator) or_else panic("OOM")
             n, recv_err := net.recv_tcp(comp.socket, recv_buf)
             switch {
             case n == 0:

@@ -144,7 +144,7 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 	}
 
 	assert(ctx.last_accept_op_data == nil)
-	op_data := _alloc_operation_data(ctx^, .AcceptedConnection, ctx.server_sock, {})
+	op_data := _alloc_operation_data(ctx^, .AcceptedConnection, ctx.server_sock, nil)
 	op_data.accepted_conn.socket = client_sock
 	ctx.last_accept_op_data = op_data
 
@@ -263,7 +263,7 @@ _initiate_recv :: proc(ctx: ^IOContext, handle: _ConnectionHandle) -> bool {
     recv_buf: []u8
     {
         tracy.ZoneN("ALLOC_RECV")
-        recv_buf = make([]u8, RECV_BUF_SIZE, ctx.allocator) or_else panic("OOM")
+        recv_buf = mem.alloc_bytes_non_zeroed(RECV_BUF_SIZE, align_of(u8), ctx.allocator) or_else panic("OOM")
     }
     op_data := _alloc_operation_data(ctx^, .Read, handle.socket, recv_buf)
 
