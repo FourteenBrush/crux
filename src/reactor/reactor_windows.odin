@@ -12,15 +12,6 @@ import "lib:tracy"
 _ :: tlsf
 _ :: back
 
-foreign import kernel32 "system:Kernel32.lib"
-
-// TODO: change to win32 type after odin release dev-10
-@(default_calling_convention="system", private="file")
-foreign kernel32 {
-    CancelIoEx :: proc(hFile: win32.HANDLE, lpOverlapped: win32.LPOVERLAPPED) -> win32.BOOL ---
-    RtlNtStatusToDosError :: proc(status: win32.NTSTATUS) -> win32.ULONG ---
-}
-
 // Only allow one concurrent io worker for now
 @(private="file")
 IOCP_CONCURRENT_THREADS :: 1
@@ -176,7 +167,7 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
     // cancel AcceptEx call
     overlapped := &ctx.last_accept_op_data.overlapped if ctx.last_accept_op_data != nil else nil
-    _ = CancelIoEx(win32.HANDLE(ctx.server_sock), overlapped)
+    _ = win32.CancelIoEx(win32.HANDLE(ctx.server_sock), overlapped)
 
 	// NOTE: refcounted, no socket handles must be associated with this iocp
 	// TODO: close server socket here?
@@ -330,7 +321,7 @@ _unregister_client :: proc(ctx: ^IOContext, handle: ConnectionHandle) -> bool {
     // cancel outstanding io operations, yet to arrive completions will have a ERROR_OPERATION_ABORTED status.
     // this is the only way to unregister clients, there is no real "iocp unregister" procedure
     // This affects the installed WSARecv and potential WSASend operations
-    ok := CancelIoEx(win32.HANDLE(win32.SOCKET(handle.socket)), /*cancel all*/ nil)
+    ok := win32.CancelIoEx(win32.HANDLE(win32.SOCKET(handle.socket)), /*cancel all*/ nil)
 
     // TODO: keep track of nr_outstanding or something and wait for completions instead of using ConnectionHandle
     // NOTE: we cannot actively rely on CancelIoEx emitting new iocp completions with an OPERATION_ABORTED status,
@@ -398,7 +389,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 
         // map IO NTSTATUS to win32 error
         // TODO: are we sure we need this translation?
-        status := cast(win32.System_Error) RtlNtStatusToDosError(win32.NTSTATUS(entry.Internal))
+        status := cast(win32.System_Error) win32.RtlNtStatusToDosError(win32.NTSTATUS(entry.Internal))
         if status == .OPERATION_ABORTED {
             tracy.ZoneN("Stale Completion")
             // OVERLAPPED and operation data is already deallocated here, must not access it
