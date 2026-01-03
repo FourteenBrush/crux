@@ -108,8 +108,7 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
             case .Read:
                 buf_write_bytes(&client_conn.rx_buf, comp.buf) // copies
                 reactor.release_recv_buf(state.io_ctx, comp)
-                // TODO: change allocator, we can do better than this
-                _drain_serverbound_packets(&state, client_conn, packet_alloc=client_conn.packet_scratch_alloc)
+                _drain_serverbound_packets(&state, client_conn)
             case .Write:
                 // must be freed using the same allocator the reactor write call was made with
                 delete(comp.buf, client_conn.packet_scratch_alloc)
@@ -148,17 +147,14 @@ _network_worker_atexit :: proc(state: ^NetworkWorkerState) {
     delete(state.connections)
 }
 
-_drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection, packet_alloc: mem.Allocator) {
+@(private="file")
+_drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection) {
     tracy.Zone()
 
     loop: for {
-        packet, err := read_serverbound(&client_conn.rx_buf, client_conn.state, allocator=packet_alloc)
+        packet, err := read_serverbound(&client_conn.rx_buf, client_conn.state, allocator=client_conn.packet_scratch_alloc)
         switch err {
-        case .ShortRead:
-            if buf_length(client_conn.rx_buf) > 0 {
-                log.debug("short read on packet")
-            }
-            break loop
+        case .ShortRead: break loop
         case .InvalidData:
             log.debug("client sent malformed packet, kicking; buf=")
             buf_dump(client_conn.rx_buf)
@@ -202,7 +198,7 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
             },
             players = {
                 max = 100,
-                online = 2,
+                online = len(state.connections) - 1, // account for querying client
             },
             description = {
                 text = "Some server",
@@ -233,6 +229,10 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
         client_conn.state = .Configuration
     case PluginMessagePacket:
         // TODO
+        enqueue_packet(state.io_ctx, client_conn, DisconnectConfigurationPacket {
+            reason = TextComponent { "You were kicked" },
+        })
+        client_conn.close_after_flushing = true
     case ClientInformationPacket:
         response := PluginMessagePacket {
             channel = "minecraft:brand",

@@ -25,7 +25,7 @@ MAX_STRING_LENGTH :: 32767
 
 IDENTIFIER_MAX_LENGTH :: 32767
 
-@(init, private)
+@(init, private="file")
 _init :: proc "contextless" () {
     context = {} // no actual context is used below
     allowed_identifier_chars = strings.ascii_set_make("abcdefghijklmnopqrstuvwxyz0123456789.-_") or_else panic("invariant")

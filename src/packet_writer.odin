@@ -1,7 +1,6 @@
 package crux
 
 import "core:log"
-import "core:mem"
 import "base:intrinsics"
 import "core:encoding/json"
 
@@ -13,7 +12,13 @@ enqueue_packet :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnectio
     tracy.Zone()
     log.log(LOG_LEVEL_OUTBOUND, "Sending packet", packet)
 
+    if _, ok := packet.(DisconnectConfigurationPacket); ok {
+        buf_dump(client_conn.tx_buf)
+    }
     _serialize_clientbound(packet, &client_conn.tx_buf)
+    if _, ok := packet.(DisconnectConfigurationPacket); ok {
+        buf_dump(client_conn.tx_buf)
+    }
     
     // freed by io worker after receiving write completion
     outb := make([]u8, buf_length(client_conn.tx_buf), client_conn.packet_scratch_alloc)
@@ -59,8 +64,8 @@ _serialize_clientbound :: proc(packet: ClientBoundPacket, outb: ^NetworkBuffer) 
         if signature, ok := packet.signature.?; ok {
             _ = buf_write_string(outb, signature)
         }
-    case DisconnectPacket:
-        // TODO
+    case DisconnectConfigurationPacket:
+        // TODO: write compound tag
     case PluginMessagePacket:
         buf_write_identifier(outb, packet.channel)
         buf_write_bytes(outb, packet.payload)

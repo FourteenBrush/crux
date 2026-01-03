@@ -1,5 +1,3 @@
-rwildcard = $(wildcard $1) $(foreach d,$1,$(call rwildcard,$(addsuffix /$(notdir $d),$(wildcard $(dir $d)*))))
-
 ifeq ($(OS), Windows_NT)
 	PROG = crux.exe
 else
@@ -7,13 +5,12 @@ else
 endif
 
 SRC = src
-SOURCE_FILES = $(call rwildcard,$(SRC)/*.odin)
 TESTS = tests
 COLLECTIONS = -collection:src=src -collection:lib=lib
 
 CC = odin
-CFLAGS = -out:$(BUILD_DIR)/$(PROG) -strict-style -vet-semicolon -vet-cast $(COLLECTIONS) # -vet-using-param
 BUILD_DIR = build
+CFLAGS = -out:$(BUILD_DIR)/$(PROG) -strict-style -vet-semicolon -vet-cast $(COLLECTIONS) # -vet-using-param
 
 all: release
 
@@ -24,11 +21,11 @@ debug: CFLAGS += -debug -o:none
 debug: $(PROG)
 
 test: CFLAGS += -define:ODIN_TEST_LOG_LEVEL=warning -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_SHORT_LOGS=true -debug -keep-executable
-test: $(SOURCE_FILES)
+test:
 	$(CC) test $(TESTS) $(CFLAGS)
 
-$(PROG): $(SOURCE_FILES)
-	mkdir $(BUILD_DIR) -p
+$(PROG):
+	@mkdir -p $(BUILD_DIR)
 	$(CC) build $(SRC) $(CFLAGS)
 
 run: debug
@@ -39,12 +36,10 @@ profile: release
 	./$(BUILD_DIR)/$(PROG)
 
 check: CFLAGS := $(filter-out -out:$(BUILD_DIR)/$(PROG),$(CFLAGS))
-check: $(SOURCE_FILES)
 check:
 	$(CC) check $(SRC) $(CFLAGS) -debug
 
 clean:
-	-@rm $(BUILD_DIR)/$(PROG)
-	-@rm $(BUILD_DIR) -r
+	-@rm -r $(BUILD_DIR)
 
-.PHONY: all release clean debug run test check
+.PHONY: release debug run test profile check clean

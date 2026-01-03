@@ -47,7 +47,7 @@ ClientBoundPacket :: union #no_nil {
     StatusResponsePacket,
     PongResponsePacket,
     LoginSuccessPacket,
-    DisconnectPacket,
+    DisconnectConfigurationPacket,
     PluginMessagePacket,
 }
 
@@ -63,11 +63,11 @@ ClientBoundPacketId :: enum VarInt {
     
     // sent in Login state
     
-    Disconnect     = 0x00,
     
     // sent in Configuration state
 
     PluginMessage  = 0x01,
+    Disconnect     = 0x02,
 }
 
 get_clientbound_packet_id :: proc(packet: ClientBoundPacket) -> ClientBoundPacketId {
@@ -82,11 +82,11 @@ VARIANT_IDX_OF :: intrinsics.type_variant_index_of
 // IMPORTANT NOTE: ClientBoundPacket must be #no_nil or we need a +1 on the variant idx
 @(rodata, private="file")
 clientbound_packet_id_lookup := [intrinsics.type_union_variant_count(ClientBoundPacket)]ClientBoundPacketId {
-    VARIANT_IDX_OF(ClientBoundPacket, StatusResponsePacket) = .StatusResponse,
-    VARIANT_IDX_OF(ClientBoundPacket, PongResponsePacket)   = .PongResponse,
-    VARIANT_IDX_OF(ClientBoundPacket, LoginSuccessPacket)   = .LoginSuccess,
-    VARIANT_IDX_OF(ClientBoundPacket, DisconnectPacket)     = .Disconnect,
-    VARIANT_IDX_OF(ClientBoundPacket, PluginMessagePacket)  = .PluginMessage,
+    VARIANT_IDX_OF(ClientBoundPacket, StatusResponsePacket)          = .StatusResponse,
+    VARIANT_IDX_OF(ClientBoundPacket, PongResponsePacket)            = .PongResponse,
+    VARIANT_IDX_OF(ClientBoundPacket, LoginSuccessPacket)            = .LoginSuccess,
+    VARIANT_IDX_OF(ClientBoundPacket, DisconnectConfigurationPacket) = .Disconnect,
+    VARIANT_IDX_OF(ClientBoundPacket, PluginMessagePacket)           = .PluginMessage,
 }
 
 get_serverbound_packet_descriptor :: proc(packet: ServerBoundPacket) -> ServerBoundPacketDescriptor {
@@ -217,10 +217,7 @@ StatusResponsePacket :: struct {
         protocol: ProtocolVersion `json:"protocol"`,
     },
     players: struct { max: uint, online: uint },
-    // TODO: make TextComponent
-    description: struct {
-        text: string,
-    },
+    description: TextComponent,
     favicon: string,
     enforces_secure_chat: bool `json:"enforcesSecureChat"`,
 }
@@ -231,8 +228,13 @@ PongResponsePacket :: struct {
 
 LoginSuccessPacket :: distinct GameProfile
 
-DisconnectPacket :: struct {
-    reason: string, // TODO: make TextComponent
+// A disconnect packet issued during the configuration state (disconnect resource).
+DisconnectConfigurationPacket :: struct {
+    reason: TextComponent,
+}
+
+TextComponent :: struct {
+    text: string `json:"text"`,
 }
 
 GameProfile :: struct {
