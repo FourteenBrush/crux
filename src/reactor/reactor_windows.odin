@@ -565,10 +565,6 @@ _alloc_operation_data :: proc(ctx: IOContext, $Op: IOOperation, source: win32.SO
     return op_data
 }
 
-@(private="file")
-_lower_timer_resolution :: proc() {
-}
-
 // Dynamically loads a WSA function pointer, returns `nil` on failure.
 @(private="file")
 _load_wsa_fn_ptr :: proc(ctx: ^IOContext, guid: win32.GUID, $Sig: typeid) -> (fn_ptr: Sig) {
