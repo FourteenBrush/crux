@@ -8,10 +8,6 @@ import win32 "core:sys/windows"
 
 import "lib:tracy"
 
-// Max number of threads the OS can use to process IOCP packets for a completion port
-@(private="file")
-IOCP_CONCURRENT_THREADS :: 1
-
 // Required size to store ipv4 socket addr for AcceptEx calls (see docs)
 @(private="file")
 ADDR_BUF_SIZE :: size_of(win32.sockaddr_in) + 16
@@ -61,7 +57,7 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 		win32.INVALID_HANDLE_VALUE,
 		win32.HANDLE(nil),
 		0, /* completion key (ignored) */
-		IOCP_CONCURRENT_THREADS,
+		0  /* use as many concurrent worker threads as there are processors */,
 	)
 	if ctx.completion_port == nil {
         _log_error(win32.GetLastError(), "failed to create IO completion port")
@@ -192,7 +188,7 @@ _register_client :: proc(ctx: ^IOContext, conn: _ConnectionHandle) -> bool {
         handle,
         ctx.completion_port,
         win32.ULONG_PTR(conn.socket),
-        IOCP_CONCURRENT_THREADS,
+        0 /* nr of concurrent threads (ignored) */,
     )
     if register_result != ctx.completion_port {
         _log_error(win32.GetLastError(), "failed to register client to iocp")
