@@ -6,13 +6,9 @@ import "core:net"
 import "core:mem/tlsf"
 import win32 "core:sys/windows"
 
-import "lib:back"
 import "lib:tracy"
 
-_ :: tlsf
-_ :: back
-
-// Only allow one concurrent io worker for now
+// Max number of threads the OS can use to process IOCP packets for a completion port
 @(private="file")
 IOCP_CONCURRENT_THREADS :: 1
 
@@ -103,24 +99,24 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 		free(tlsf_alloc, allocator)
 	}
 	
-	_install_accept_handler(&ctx) or_return
-
-	// allow server sock to emit iocp notifications for new connections
+	// allow server sock to emit iocp packets for new connections (through AcceptEx)
 	result := win32.CreateIoCompletionPort(
 	    win32.HANDLE(ctx.server_sock),
 		ctx.completion_port,
 		win32.ULONG_PTR(ctx.server_sock),
-		IOCP_CONCURRENT_THREADS,
+		0 /* nr of concurrent threads (ignored) */,
 	)
-	if result != win32.HANDLE(ctx.server_sock) && win32.GetLastError() != win32.ERROR_IO_PENDING {
+	if result != ctx.completion_port && win32.GetLastError() != win32.ERROR_IO_PENDING {
 	    _log_error(win32.GetLastError(), "failed to register server socket to completion port")
 	    return
 	}
+	
+	_install_accept_handler(&ctx) or_return
 
 	return ctx, true
 }
 
-// Installs an `AcceptEx` handler to the context, which will emit IOCP events for inbound connections.
+// Installs an `AcceptEx` handler to the context, which will emit IOCP packets for inbound connections.
 @(private="file")
 _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
     tracy.Zone()
@@ -170,7 +166,7 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
     win32.timeEndPeriod(ctx.timer_resolution)
 
 	// NOTE: refcounted, no socket handles must be associated with this iocp
-	// TODO: close server socket here?
+	// TODO: close server socket here as it is still associated with this iocp?
 	win32.CloseHandle(ctx.completion_port)
 	ctx.completion_port = win32.INVALID_HANDLE_VALUE
 	// TODO: we must actually wait for a completion (poll again?)
@@ -225,14 +221,14 @@ _ConnectionHandle :: struct {
     //
     // A buffer is stored at this address when a new connection handle is created, and is renewed every time a new recv buffer
     // is allocated. This way we always retain the last allocation, especially useful when disconnecting a client,
-    // at this point no new iocp event will be emitted to confirm the disconnect, where we could simply grab the last allocated buf.
+    // at this point no new iocp packet will be emitted to confirm the disconnect, where we could simply grab the last allocated buf.
     // TODO
     last_read_op: ^IOOperationData,
     last_write_op: ^IOOperationData,
 }
 #assert(size_of(_ConnectionHandle) == size_of(ConnectionHandle))
 
-// Initiate async recv call to emit an iocp event with the read data.
+// Initiate async recv call to emit an iocp packet with the read data.
 @(private="file")
 _initiate_recv :: proc(ctx: ^IOContext, handle: _ConnectionHandle) -> bool {
     tracy.Zone()
