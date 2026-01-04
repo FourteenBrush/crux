@@ -62,7 +62,7 @@ Operation :: enum u8 {
     // Additional error information might be logged on the `context.logger` on the call to `await_io_completions`,
     // with a log level of `ERROR_LOG_LEVEL`.
     Error,
-    // Data was read from the client socket and is now available in the `Completion.recv_buf`.
+    // Data was read from the client socket and is now available in the `Completion.buf`.
     // This always indicates a successful read, an EOF condition is handled with `.PeerHangup` instead.
     Read,
     Write,

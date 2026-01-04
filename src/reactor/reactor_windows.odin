@@ -279,10 +279,10 @@ IOOperationData :: struct {
 		// Only applicable when `op == .Write`.
 		write: struct {
 		    // User allocated buffer that holds written data, in the case of partial writes, this always
-    		// contains the whole write buffer, and `already_transfered` is used to indicate
+    		// contains the whole write buffer, and `already_transferred` is used to indicate
     		// which part actually still needs to be transferred. (we must store the whole buffer to avoid leaking it)
 			buf: []u8,
-			already_transfered: u32,
+			already_transferred: u32,
 		},
 		// Only applicable when `op == .AcceptedConnection`.
 		accepted_conn: struct {
@@ -453,7 +453,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
                 discard_entry = !_initiate_recv(ctx, handle)
 			}
 		case .Write:
-		    total_transfer := entry.dwNumberOfBytesTransferred + op_data.write.already_transfered
+		    total_transfer := entry.dwNumberOfBytesTransferred + op_data.write.already_transferred
 		    partial_write := int(total_transfer) != len(op_data.write.buf)
 			transport_buf := op_data.write.buf
 			if partial_write {
@@ -495,7 +495,7 @@ _initiate_send :: proc(ctx: ^IOContext, socket: win32.SOCKET, data: []u8, partia
     tracy.Zone()
 
     op_data := _alloc_operation_data(ctx^, .Write, socket, data)
-    op_data.write.already_transfered = partial_write_off
+    op_data.write.already_transferred = partial_write_off
 
     // handle potential partial writes, send this buffer while we keep storing the original in order to free it later
     data := data[partial_write_off:]
