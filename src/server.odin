@@ -144,7 +144,7 @@ _setup_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator)
     return io_ctx, true
 }
 
-ClientConnection :: struct {
+ClientConnection :: struct #packed {
     // Stores non blocking socket
     using handle: reactor.ConnectionHandle,
     state: ClientState,
@@ -152,7 +152,6 @@ ClientConnection :: struct {
     // Allocator to deal with all packet related allocations, overwriting itself
     // if there is too much backpressure.
     packet_scratch_alloc: mem.Allocator,
-    _scratch: ^mem.Scratch,
 
     // Whether this connection needs to be closed after flushing all packets
     close_after_flushing: bool,
@@ -161,13 +160,14 @@ ClientConnection :: struct {
 }
 
 // IMPORTANT NOTE: values must match respective values from HandshakeIntent to allow casting
-ClientState :: enum VarInt {
+ClientState :: enum {
     Handshake,
     Status        = auto_cast HandshakeIntent.Status,
     Login         = auto_cast HandshakeIntent.Login,
     Transfer      = auto_cast HandshakeIntent.Transfer,
     Configuration,
 }
+#assert(int(ClientState.Login) <= int(max(HandshakeIntent)))
 
 @(private="file")
 sig_handler :: proc "c" (_sig: i32) {

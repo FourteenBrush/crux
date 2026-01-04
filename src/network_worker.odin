@@ -78,8 +78,9 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
 
         completions: [512]reactor.Completion
         // NOTE: do not indefinitely block or this thread can't be joined
-        nready, ok := reactor.await_io_completions(state.io_ctx, completions[:], timeout_ms=REACTOR_TIMEOUT_MS)
-        assert(ok, "failed to await io events") // TODO: proper error handling
+        // TODO: scale down timer resolution when no clients are connected
+        nready, await_ok := reactor.await_io_completions(state.io_ctx, completions[:], timeout_ms=REACTOR_TIMEOUT_MS)
+        assert(await_ok, "failed to await io events") // TODO: proper error handling
 
         for comp in completions[:nready] {
             client_conn := &state.connections[comp.socket]
@@ -128,7 +129,6 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
                     state  = .Handshake,
                     
                     packet_scratch_alloc = mem.scratch_allocator(packet_scratch),
-                    _scratch = packet_scratch,
                     rx_buf = create_network_buf(allocator=os.heap_allocator()),
                     tx_buf = create_network_buf(allocator=os.heap_allocator()),
                 }
@@ -258,7 +258,8 @@ _disconnect_client :: proc(state: ^NetworkWorkerState, client_conn: ClientConnec
     destroy_network_buf(client_conn.rx_buf)
     
     // ensure right allocator is used to free buffer, instead of panic allocator
-    client_conn._scratch.backup_allocator = os.heap_allocator()
-    mem.scratch_destroy(client_conn._scratch)
-    free(client_conn._scratch, os.heap_allocator())
+    scratch_alloc := cast(^mem.Scratch) client_conn.packet_scratch_alloc.data
+    scratch_alloc.backup_allocator = os.heap_allocator()
+    mem.scratch_destroy(scratch_alloc)
+    free(scratch_alloc, os.heap_allocator())
 }
