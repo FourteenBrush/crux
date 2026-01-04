@@ -127,7 +127,6 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 
     // socket that AcceptEx will use to bind the accepted client to,
     // implicitly configured for overlapped IO
-    // TODO: close on cancellation
     client_sock := win32.socket(win32.AF_INET, win32.SOCK_STREAM, win32.IPPROTO_TCP)
 	if client_sock == win32.INVALID_SOCKET {
 	    _log_error(win32.WSAGetLastError(), "could not create client socket")
@@ -177,7 +176,8 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 	// TODO: we must actually wait for a completion (poll again?)
 	// https://stackoverflow.com/questions/79769834/winsock-can-an-overlapped-to-wsarecv-be-freed-immediately-after-calling-canceli
 	if ctx.last_accept_op_data != nil {
-	    // FIXME: test whether its correct to free OVERLAPPED for AcceptEx without waiting for completion on real network conditions
+		win32.closesocket(ctx.last_accept_op_data.accepted_conn.socket)
+		// FIXME: test whether its correct to free OVERLAPPED for AcceptEx without waiting for completion on real network conditions
         free(ctx.last_accept_op_data, ctx.allocator)
 	}
 
