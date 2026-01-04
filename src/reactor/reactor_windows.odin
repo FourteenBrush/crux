@@ -52,6 +52,8 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
     // call with a timeBeginPeriod/timeEndPeriod (to save power etc..), this does not reliably affect the timer
     // resolution (especially for code that only runs in this short period). For instance, switching power modes has a negative
     // effect on the timer resolution, effectively bringing us back to the ~15ms default resolution time...
+    // TODO: take a look at CreateWaitableTimerEx with CREATE_WAITABLE_TIMER_HIGH_RESOLUTION flag and make this emit
+    // iocp packets.
     timecaps: win32.TIMECAPS
     res := win32.timeGetDevCaps(&timecaps, size_of(timecaps))
     assert(res == win32.MMSYSERR_NOERROR, "failed querying timer resolution")
@@ -90,28 +92,17 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 		new_pool_size=120 * RECV_BUF_SIZE,
 	)
 	assert(init_err == .None, "failed to init tlsf allocator")
-	ctx.allocator = tlsf.allocator(tlsf_alloc)
+	
+	ctx.allocator = _make_instrumented_alloc(
+		backing=tlsf.allocator(tlsf_alloc),
+		meta_allocator=allocator,
+	)
 	defer if !ok {
-	    tlsf.destroy(tlsf_alloc)
+		_destroy_instrumented_alloc(instrumented=ctx.allocator, meta_allocator=allocator)
+	  	tlsf.destroy(tlsf_alloc)
 		free(tlsf_alloc, allocator)
 	}
-	when ODIN_DEBUG && !tracy.TRACY_ENABLE && !ODIN_TEST {
-	    tracking_alloc := new(back.Tracking_Allocator, allocator)
-		back.tracking_allocator_init(
-		    tracking_alloc,
-		    backing_allocator=allocator,
-			internals_allocator=allocator,
-		)
-		ctx.allocator = back.tracking_allocator(tracking_alloc)
-	}
-	when tracy.TRACY_ENABLE {
-	    ctx.allocator = tracy.MakeProfiledAllocator(
-			new(tracy.ProfiledAllocatorData, allocator),
-			callstack_size=14,
-			backing_allocator=ctx.allocator,
-		)
-	}
-
+	
 	_install_accept_handler(&ctx) or_return
 
 	// allow server sock to emit iocp notifications for new connections
@@ -190,20 +181,8 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
         free(ctx.last_accept_op_data, ctx.allocator)
 	}
 
-	// destroy allocator
-	when tracy.TRACY_ENABLE {
-	    profiler_data := cast(^tracy.ProfiledAllocatorData) ctx.allocator.data
-		ctx.allocator = profiler_data.backing_allocator
-        free(profiler_data, allocator)
-	}
-	when ODIN_DEBUG && !tracy.TRACY_ENABLE && !ODIN_TEST {
-	    tracking_alloc := cast(^back.Tracking_Allocator) ctx.allocator.data
-		back.tracking_allocator_print_results(tracking_alloc)
-		back.tracking_allocator_destroy(tracking_alloc)
-		ctx.allocator = tracking_alloc.backing
-		free(tracking_alloc, allocator)
-	}
-    tlsf_alloc := cast(^tlsf.Allocator) ctx.allocator.data
+	tlsf_allocator := _destroy_instrumented_alloc(instrumented=ctx.allocator, meta_allocator=allocator)
+	tlsf_alloc := cast(^tlsf.Allocator) tlsf_allocator.data
 	tlsf.destroy(tlsf_alloc)
 	free(tlsf_alloc, allocator)
 }
@@ -361,6 +340,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 
         // NOTE: nothing is guaranteed in terms of dequeuing order, but we only have one concurrent read for each socket,
         // and potentially multiple writes, so this does not seem to be an issue
+        // TODO: what does the ordering of a write chain look like?
     	result := win32.GetQueuedCompletionStatusEx(
     		ctx.completion_port,
     		raw_data(completion_entries),
