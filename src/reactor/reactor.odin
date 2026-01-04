@@ -69,7 +69,7 @@ Operation :: enum u8 {
     // Read hangup or abrupt disconnection, the associated socket in the completion has been closed and cannot be used for IO anymore.
     // The application is responsable for unregistering the client if it has not done that already.
     PeerHangup,
-    // Represents a newly accepted client socket, stored in `Completion.socket`. The socket is configured
+    // Represents a newly accepted client socket, stored in `Completion.svbvcxhcket`. The socket is configured
     // to be non-blocking and is already registered in this subsystem.
     // This merely acts as a way to notify the downstream, so they may update their internal data structures.
     NewConnection,
@@ -81,7 +81,7 @@ IOContext :: _IOContext
 // Creates a new `IOContext`, which registers the server socket as a source to accept new incoming clients.
 // Inputs:
 // - `server_sock`: the non-blocking server socket that is already listening.
-// Will use `context.logger` to log error messages.
+// Will use `context.logger` to log error messages at log level `ERROR_LOG_LEVEL`.
 //
 // Any connections accepted from the server socket will be implicitly registered, upon registration
 // `Operation.Read` completions may immediately be emitted whenever the client sends data. Write completions
@@ -130,18 +130,17 @@ submit_write_copy :: proc(ctx: ^IOContext, client: ConnectionHandle, data: []u8)
 
 @(private)
 _make_instrumented_alloc :: proc(backing: mem.Allocator, meta_allocator: mem.Allocator) -> mem.Allocator {
-    backing := backing
     when ODIN_DEBUG && !tracy.TRACY_ENABLE && !ODIN_TEST {
         tracking_alloc := new(back.Tracking_Allocator, meta_allocator)
         back.tracking_allocator_init(
             tracking_alloc,
             backing_allocator=backing,
-            internals_allocator=backing,
+            internals_allocator=meta_allocator,
         )
-        backing = back.tracking_allocator(tracking_alloc)
+        return back.tracking_allocator(tracking_alloc)
     }
     when tracy.TRACY_ENABLE {
-        backing = tracy.MakeProfiledAllocator(
+        return tracy.MakeProfiledAllocator(
             new(tracy.ProfiledAllocatorData, meta_allocator),
             callstack_size=14,
             backing_allocator=backing,
@@ -152,11 +151,11 @@ _make_instrumented_alloc :: proc(backing: mem.Allocator, meta_allocator: mem.All
 
 @(private)
 _destroy_instrumented_alloc :: proc(instrumented: mem.Allocator, meta_allocator: mem.Allocator) -> (unwrapped: mem.Allocator) {
-    unwrapped = instrumented
     when tracy.TRACY_ENABLE {
         profiler_data := cast(^tracy.ProfiledAllocatorData) instrumented.data
         unwrapped = profiler_data.backing_allocator
         free(profiler_data, meta_allocator)
+        return
     }
     when ODIN_DEBUG && !tracy.TRACY_ENABLE && !ODIN_TEST {
         tracking_alloc := cast(^back.Tracking_Allocator) instrumented.data
@@ -164,6 +163,7 @@ _destroy_instrumented_alloc :: proc(instrumented: mem.Allocator, meta_allocator:
         back.tracking_allocator_destroy(tracking_alloc)
         unwrapped = tracking_alloc.backing
         free(tracking_alloc, meta_allocator)
+        return
     }
-    return
+    return instrumented
 }
