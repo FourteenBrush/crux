@@ -371,7 +371,7 @@ _unregister_client :: proc(ctx: ^IOContext, handle: ConnectionHandle) -> bool {
 }
 
 @(private="file")
-_poll_iocp :: proc(ctx: ^IOContext, entries_out: []win32.OVERLAPPED_ENTRY, timeout_ms: u32) -> (nready: u32, ok: bool) {
+_poll_iocp :: proc(ctx: ^IOContext, entries_out: []win32.OVERLAPPED_ENTRY, timeout_ms: int) -> (nready: u32, ok: bool) {
 	tracy.ZoneN("GetQueuedCompletionStatusEx")
 		
     // NOTE: nothing is guaranteed in terms of dequeuing order, but we only have one concurrent read for each socket,
@@ -382,7 +382,7 @@ _poll_iocp :: proc(ctx: ^IOContext, entries_out: []win32.OVERLAPPED_ENTRY, timeo
   		raw_data(entries_out),
   		u32(len(entries_out)),
   		&nready,
-    	timeout_ms,
+    	u32(timeout_ms),
   		fAlertable=false,
    	)
    	// instead of returning TRUE, 0, WAIT_TIMEOUT is being set
@@ -398,7 +398,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
     tracy.Zone()
     
 	completion_entries := make([]win32.OVERLAPPED_ENTRY, len(completions_out), context.temp_allocator)
-	nready := _poll_iocp(ctx, completion_entries, u32(timeout_ms)) or_return
+	nready := _poll_iocp(ctx, completion_entries, timeout_ms) or_return
 
 	i := 0
 	for entry in completion_entries[:nready] {
@@ -420,20 +420,22 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 
         // map IO NTSTATUS to win32 error
         status := cast(win32.System_Error) win32.RtlNtStatusToDosError(win32.NTSTATUS(entry.Internal))
+        op_data: ^IOOperationData = container_of(entry.lpOverlapped, IOOperationData, "overlapped")
+		defer free(op_data, ctx.allocator)
+		
         if status == .OPERATION_ABORTED {
             tracy.ZoneN("Stale Completion")
-            // OVERLAPPED and operation data is already deallocated here, must not access it
-
             // TODO: what happens with last write operation, this contains an user allocated buffer, how do we pass it
             // back to them in order to free it?
-            // TODO: reads are leaking here?
+            
+            if op_data.op == .Read {
+	           	_release_recv_buf(ctx, op_data.read.buf[:RECV_BUF_SIZE])
+            }
 
             discard_entry = true
             continue
         }
 
-        op_data: ^IOOperationData = container_of(entry.lpOverlapped, IOOperationData, "overlapped")
-		defer free(op_data, ctx.allocator)
 
         if status != .SUCCESS {
             // NOTE: when this entry refers to a write, it still holds an user allocated buffer
