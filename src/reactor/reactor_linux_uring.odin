@@ -192,7 +192,7 @@ when /*USE_IO_URING*/ true {
         ctx.sq.sqes[idx] = sqe
         sync.atomic_store_explicit(&ctx.sq.array[idx], idx, .Release)
         sync.atomic_store_explicit(ctx.sq.tail, tail + 1, .Release)
-        ctx.to_submit += 1
+        // ctx.to_submit += 1
     }
 
     @(private)
