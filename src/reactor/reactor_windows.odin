@@ -34,8 +34,6 @@ _IOContext :: struct {
 	// one for completion entries, freelist block based, or perhaps even epoch based recycling (assuming no iocp stalls occur)
 	allocator: mem.Allocator,
 
-	// Operation data of accept handler that never completed, needs to be deallocated when destroying ctx.
-	last_accept_op_data: ^IOOperationData,
 	// Buf where local and remote addr are placed on an accept call.
 	accept_buf: [ADDR_BUF_SIZE * 2]u8,
 }
@@ -128,10 +126,8 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 		return false
 	}
 
-	assert(ctx.last_accept_op_data == nil)
 	op_data := _alloc_operation_data(ctx^, .AcceptedConnection, ctx.server_sock, nil)
 	op_data.accepted_conn.socket = client_sock
-	ctx.last_accept_op_data = op_data
 
 	// FIXME: we "know" clients will always send initial data after connecting (handshake packets and such),
 	// can we specify a recv buffer length > 0, while also defending against denial of service attacks
@@ -150,7 +146,6 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 	if !accept_ok && win32.System_Error(win32.WSAGetLastError()) != .IO_PENDING {
 	    _log_error(win32.WSAGetLastError(), "could not setup accept handler")
 	    free(op_data, ctx.allocator)
-		ctx.last_accept_op_data = nil
 		return false
 	}
 	
@@ -161,9 +156,7 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 @(private)
 _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
     // cancel AcceptEx call
-    // TODO: when is this nil??
-    overlapped := &ctx.last_accept_op_data.overlapped if ctx.last_accept_op_data != nil else nil
-    _ = win32.CancelIoEx(win32.HANDLE(ctx.server_sock), overlapped)
+    _ = win32.CancelIo(win32.HANDLE(ctx.server_sock))
     
     // await completion for all cancelled io operations (read/writes/accepts)
     // https://stackoverflow.com/questions/79769834/winsock-can-an-overlapped-to-wsarecv-be-freed-immediately-after-calling-canceli
@@ -214,13 +207,6 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 	win32.CloseHandle(ctx.completion_port)
 	ctx.completion_port = win32.INVALID_HANDLE_VALUE
 	
-	// TODO: we must actually wait for a completion (poll again?)
-	// if ctx.last_accept_op_data != nil {
-		// win32.closesocket(ctx.last_accept_op_data.accepted_conn.socket)
-		// FIXME: test whether its correct to free OVERLAPPED for AcceptEx without waiting for completion on real network conditions
-        // free(ctx.last_accept_op_data, ctx.allocator)
-	// }
-
 	tlsf_allocator := _destroy_instrumented_alloc(instrumented=ctx.allocator, meta_allocator=allocator)
 	tlsf_alloc := cast(^tlsf.Allocator) tlsf_allocator.data
 	tlsf.destroy(tlsf_alloc)
@@ -345,19 +331,19 @@ IOOperation :: enum u8 {
 @(private)
 _unregister_client :: proc(ctx: ^IOContext, handle: ConnectionHandle) -> bool {
     tracy.Zone()
-    // cancel outstanding io operations, yet to arrive completions will have a ERROR_OPERATION_ABORTED status.
     // This affects the installed WSARecv and potential WSASend operations
     ok := win32.CancelIoEx(win32.HANDLE(win32.SOCKET(handle.socket)), /*cancel all*/ nil)
-
-    // TODO: keep track of nr_outstanding or something and wait for completions instead of using ConnectionHandle
-    // NOTE: we cannot actively rely on CancelIoEx emitting new iocp completions with an OPERATION_ABORTED status,
-    // as this unregister is mosty only called after a peer has already hung up, thus the corresponding WSARecv has already completed
-    // with an EOF before we even got here to call CancelIoEx, leaving us with an ERROR_NOT_FOUND indicating nothing could be canceled.
-    // For this reason we use the ConnectionHandle struct, to still be able to track allocations
-    // that would have otherwise become unreachable.
+    
+    // NOTE: after cancellation, in flight network operations will either return an iocp packet
+    // with an ERROR_OPERATION_ABORTED status (which will then be discarded), or will still produce a successful status (or error)
+    // in the case where they could not be cancelled in time. In the latter case they will produce a valid Completion, and
+    // the upstream is responsable for guarding against those stale completions (as we do not track connected clients).
     //
-    // Of course the cancelation is still applicable to write operations or cases where this unregister procedure
-    // is called before the peer has hang up.
+    // For all in flight operations, an iocp packet needs to be collected before the associated resources can be deallocated
+    // (io operation data and eventual buffers). In practice this means polling again when shutting down the io context
+    // (after all connections have been unregistered first), or doing this implicitly when a connection gets unregistered
+    // in the middle of the io context's lifetime.
+
     if !ok && win32.System_Error(win32.GetLastError()) != .NOT_FOUND {
         _log_error(win32.GetLastError(), "failed to cancel outstanding io operations")
     }
@@ -408,8 +394,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 		#no_bounds_check comp := &completions_out[i]
   		comp.socket = net.TCP_Socket(emitter)
 
-        // NOTE: care must be taken with or_continue to ensure this does not accidentally emit a completion
-        // in a zeroed out state
+        // NOTE: care must be taken with or_continue to ensure this does not accidentally emit a zeroed out completion
         discard_entry := false
   		defer if discard_entry {
   		    nready -= 1
@@ -418,12 +403,11 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 	        ctx.outstanding_net_ops -= 1
   		}
 
-        // map IO NTSTATUS to win32 error
-        status := cast(win32.System_Error) win32.RtlNtStatusToDosError(win32.NTSTATUS(entry.Internal))
+        io_status := cast(win32.System_Error) win32.RtlNtStatusToDosError(win32.NTSTATUS(entry.Internal))
         op_data: ^IOOperationData = container_of(entry.lpOverlapped, IOOperationData, "overlapped")
 		defer free(op_data, ctx.allocator)
 		
-        if status == .OPERATION_ABORTED {
+        if io_status == .OPERATION_ABORTED {
             tracy.ZoneN("Stale Completion")
             // TODO: what happens with last write operation, this contains an user allocated buffer, how do we pass it
             // back to them in order to free it?
@@ -437,11 +421,10 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
         }
 
 
-        if status != .SUCCESS {
-            // NOTE: when this entry refers to a write, it still holds an user allocated buffer
-            // return this, so the application can free it
+        if io_status != .SUCCESS {
             comp.operation = .Error
             if op_data.op == .Write {
+            	// pass user allocated buf back upstream
                 comp.buf = op_data.write.buf
             }
  			continue
@@ -449,7 +432,6 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 
 		switch op_data.op {
 		case .AcceptedConnection:
-    		ctx.last_accept_op_data = nil
 		    client_sock := op_data.accepted_conn.socket
             accept_success := false
             defer if !accept_success {
