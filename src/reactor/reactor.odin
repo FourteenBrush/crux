@@ -26,11 +26,11 @@ ERROR_LOG_LEVEL :: log.Level(9)
 
 // Completion emitted by polling the IOContext, indicating the outcome of an IO operation.
 Completion :: struct {
-    // The handle referring to the client connection which emitted this completion. To simplify this structure, the application
-    // can only use this member when `operation == .NewConnection`, only at that point it stores a newly created connection handle,
-    // which the application is supposed to store, as it serves as a key into this subsystem. It is however always safe to access
-    // the `socket` member of this handle structure.
-    using handle: ConnectionHandle,
+    // The affected socket, this is always the socket that emitted the completion, except
+    // for cases where the server socket accepts new clients, then this stores the newly accepted client
+    // and `operation` is being set as `.NewConnection`.
+    // Always configured to be non-blocking.
+    socket: net.TCP_Socket,
     // The buffer where associated data is stored in, for `operation == .Read`, this contains the data
     // received from the socket, this must be freed by calling `release_recv_buf` after the client is done
     // processing this data, as it is allocated internally.
@@ -43,18 +43,6 @@ Completion :: struct {
     // In the case of a failed read operation, and in all other causes, this is `nil`.
     buf: []u8 `fmt:"-"`,
     operation: Operation,
-}
-
-// A handle which corresponds to an accepted connection.
-ConnectionHandle :: struct {
-    // The affected socket, this is always the socket that emitted the completion, except
-    // for cases where the server socket accepts new clients, then this stores the newly accepted client
-    // and `operation` is being set as `.NewConnection`.
-    // Always configured to be non-blocking.
-    socket: net.TCP_Socket,
-    // Opaque data.
-    _impl1: rawptr,
-    _impl2: rawptr,
 }
 
 Operation :: enum u8 {
@@ -106,11 +94,9 @@ destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 // queued in the internal buffers before cancellation, may still be delivered.
 // As a result, some completions might still be delived after unregistering, even though
 // no new IO operations were issued. The application should safeguard against this behaviour.
-unregister_client :: proc(ctx: ^IOContext, handle: ConnectionHandle) -> bool {
-    return _unregister_client(ctx, handle)
+unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
+    return _unregister_client(ctx, client)
 }
-
-// FIXME: make timeout_ms unsigned
 
 // Await IO completions for any of the registered clients (excluding the server socket).
 // This function returns when either `timeout_ms` has elapsed, or at least one completion has been awaited.
@@ -129,7 +115,7 @@ release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
 
 // TODO: why dont we save the allocator the passed buffer was allocated with, so we can free it
 // ourselves instead of sending it back?
-submit_write_copy :: proc(ctx: ^IOContext, client: ConnectionHandle, data: []u8) -> bool {
+submit_write_copy :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) -> bool {
     return _submit_write_copy(ctx, client, data)
 }
 

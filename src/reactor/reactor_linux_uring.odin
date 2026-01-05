@@ -137,7 +137,7 @@ when /*USE_IO_URING*/ true {
     } 
 
     @(private)
-    _unregister_client :: proc(ctx: ^IOContext, handle: ConnectionHandle) -> bool {
+    _unregister_client :: proc(ctx: ^IOContext, conn: net.TCP_Socket) -> bool {
         tracy.Zone()
         return false
     }
@@ -215,7 +215,7 @@ when /*USE_IO_URING*/ true {
     }
 
     @(private)
-    _submit_write_copy :: proc(ctx: ^IOContext, handle: ConnectionHandle, data: []u8) -> bool {
+    _submit_write_copy :: proc(ctx: ^IOContext, conn: net.TCP_Socket, data: []u8) -> bool {
         return false
     }
 

@@ -31,7 +31,8 @@ Server :: struct {
 
 run :: proc() -> bool {
     endpoint := net.Endpoint {
-        address = net.IP4_Loopback,
+        // address = net.IP4_Loopback,
+        address = net.IP4_Address { 0, 0, 0, 0 },
         port = 25565,
     }
 
@@ -145,8 +146,8 @@ _setup_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator)
 }
 
 ClientConnection :: struct #packed {
-    // Stores non blocking socket
-    using handle: reactor.ConnectionHandle,
+    // Non blocking socket
+    socket: net.TCP_Socket,
     state: ClientState,
     
     // Allocator to deal with all packet related allocations, overwriting itself

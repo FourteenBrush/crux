@@ -84,6 +84,9 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
 
         for comp in completions[:nready] {
             client_conn := &state.connections[comp.socket]
+            if client_conn == nil {
+	            log.warn("client was already unregistered (hangup confirmation)", comp.operation)
+            }
             if client_conn == nil && comp.operation != .NewConnection && comp.operation != .PeerHangup {
                 // stale completion arrived after a disconnect was issued (peer hangup confirmation or io completion
                 // that could not be canceled in time)
@@ -125,8 +128,8 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
                 packet_scratch.leaked_allocations.allocator = mem.panic_allocator()
                 
                 state.connections[comp.socket] = ClientConnection {
-                    handle = comp.handle,
-                    state  = .Handshake,
+	                socket = comp.socket,
+	                state  = .Handshake,
                     
                     packet_scratch_alloc = mem.scratch_allocator(packet_scratch),
                     rx_buf = create_network_buf(allocator=os.heap_allocator()),
@@ -233,6 +236,7 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
             reason = TextComponent { "You were kicked" },
         })
         client_conn.close_after_flushing = true
+        // sync.atomic_store(state.execution_permit, false)
     case ClientInformationPacket:
         response := PluginMessagePacket {
             channel = "minecraft:brand",
@@ -242,6 +246,7 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
         }
         
         enqueue_packet(state.io_ctx, client_conn, response)
+        // _disconnect_client(state, client_conn^)
     }
 }
 
@@ -250,7 +255,7 @@ _disconnect_client :: proc(state: ^NetworkWorkerState, client_conn: ClientConnec
     tracy.Zone()
 
     // FIXME: probably want to handle error
-    reactor.unregister_client(state.io_ctx, client_conn.handle)
+    reactor.unregister_client(state.io_ctx, client_conn.socket)
     _delete_client_connection(client_conn.socket)
 
     _, client_conn := delete_key(&state.connections, client_conn.socket)

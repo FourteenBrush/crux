@@ -60,13 +60,13 @@ _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 }
 
 @(private)
-_unregister_client :: proc(ctx: ^IOContext, handle: ConnectionHandle) -> bool {
+_unregister_client :: proc(ctx: ^IOContext, conn: net.TCP_Socket) -> bool {
     tracy.Zone()
 
-    ok := linux.epoll_ctl(ctx.epoll_fd, .DEL, linux.Fd(handle.socket), nil) == .NONE
-    _, pending_writes := delete_key(&ctx.pending_writes, handle.socket)
+    ok := linux.epoll_ctl(ctx.epoll_fd, .DEL, linux.Fd(conn), nil) == .NONE
+    _, pending_writes := delete_key(&ctx.pending_writes, conn)
     delete(pending_writes)
-    net.close(handle.socket)
+    net.close(conn)
     return ok
 }
 
@@ -195,10 +195,10 @@ _release_recv_buf :: proc(ctx: ^IOContext, buf: []u8) {
 }
 
 @(private)
-_submit_write_copy :: proc(ctx: ^IOContext, handle: ConnectionHandle, data: []u8) -> bool {
+_submit_write_copy :: proc(ctx: ^IOContext, conn: net.TCP_Socket, data: []u8) -> bool {
     iovecs: [dynamic]linux.IO_Vec
     iovecs.allocator = ctx.allocator
-    _, pending_writes, _ := map_upsert(&ctx.pending_writes, handle.socket, iovecs)
+    _, pending_writes, _ := map_upsert(&ctx.pending_writes, conn, iovecs)
 
     append(pending_writes, linux.IO_Vec { raw_data(data), len(data) })
     // FIXME: assert <= sysconf(._IOV_MAX)

@@ -166,13 +166,11 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
     	total_outstanding := ctx.outstanding_net_ops
 	    entries := make([]win32.OVERLAPPED_ENTRY, ctx.outstanding_net_ops, context.temp_allocator)
 		start := time.tick_now()
-		ABS_TIMEOUT_MS :: 15 * 1000
+		LINGER_SECS :: 15 * 1000
 		hit_deadline := false
 
 	   	for ctx.outstanding_net_ops > 0 && !hit_deadline {
-			// poll in steps of 1000 ms, enforcing a max timeout
 			nready := _poll_iocp(ctx, entries, timeout_ms=1000) or_break
-			log.logf(ERROR_LOG_LEVEL, "collected %d completions", nready)
 
 			for entry in entries[:nready] {
 				op_data: ^IOOperationData = container_of(entry.lpOverlapped, IOOperationData, "overlapped")
@@ -190,7 +188,7 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 			}
 			
 			ctx.outstanding_net_ops -= nready
-			if time.duration_milliseconds(time.tick_since(start)) >= ABS_TIMEOUT_MS {
+			if time.duration_milliseconds(time.tick_since(start)) >= LINGER_SECS {
 				hit_deadline = true
 				log.logf(
 					ERROR_LOG_LEVEL,
@@ -220,14 +218,14 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 }
 
 @(private="file")
-_register_client :: proc(ctx: ^IOContext, conn: _ConnectionHandle) -> bool {
+_register_client :: proc(ctx: ^IOContext, conn: win32.SOCKET) -> bool {
     tracy.Zone()
-    handle := win32.HANDLE(conn.socket)
+    handle := win32.HANDLE(conn)
 
     register_result := win32.CreateIoCompletionPort(
         handle,
         ctx.completion_port,
-        win32.ULONG_PTR(conn.socket),
+        win32.ULONG_PTR(conn),
         0 /* nr of concurrent threads (ignored) */,
     )
     if register_result != ctx.completion_port {
@@ -246,27 +244,9 @@ _register_client :: proc(ctx: ^IOContext, conn: _ConnectionHandle) -> bool {
     return _initiate_recv(ctx, conn)
 }
 
-// Non opaque ConnectionHandle variant, with win32 specific types.
-// IMPORTANT NOTE: must be layout compatible with `ConnectionHandle`.
-@(private="file")
-_ConnectionHandle :: struct {
-    socket: win32.SOCKET,
-    // Heap allocated pointer to store the last recv buf raw_data, this data
-    // is stored in a handle exchanged with the application, to ensure we retain access to it
-    // for the whole lifetime of this connection. (the application has better means of storing this than we do).
-    //
-    // A buffer is stored at this address when a new connection handle is created, and is renewed every time a new recv buffer
-    // is allocated. This way we always retain access to the last allocation, especially useful when disconnecting a client,
-    // at this point no new iocp packet will be emitted to confirm the disconnect, where we could simply grab the last allocated buf.
-    // TODO
-    last_read_op: ^IOOperationData,
-    last_write_op: ^IOOperationData,
-}
-#assert(size_of(_ConnectionHandle) == size_of(ConnectionHandle))
-
 // Initiate async recv call to emit an iocp packet with the read data.
 @(private="file")
-_initiate_recv :: proc(ctx: ^IOContext, handle: _ConnectionHandle) -> bool {
+_initiate_recv :: proc(ctx: ^IOContext, conn: win32.SOCKET) -> bool {
     tracy.Zone()
 
     // alloc a new recv buffer per recv operation, we could in theory use two buffers per client
@@ -276,11 +256,11 @@ _initiate_recv :: proc(ctx: ^IOContext, handle: _ConnectionHandle) -> bool {
         tracy.ZoneN("ALLOC_RECV")
         recv_buf = mem.alloc_bytes_non_zeroed(RECV_BUF_SIZE, align_of(u8), ctx.allocator) or_else panic("OOM")
     }
-    op_data := _alloc_operation_data(ctx^, .Read, handle.socket, recv_buf)
+    op_data := _alloc_operation_data(ctx^, .Read, conn, recv_buf)
 
     flags: u32
 	result := win32.WSARecv(
-		handle.socket,
+		conn,
 		&win32.WSABUF { RECV_BUF_SIZE, raw_data(recv_buf) },
 		1,   /* buffer count */
 		nil, /* nr of bytes received */
@@ -335,10 +315,12 @@ IOOperation :: enum u8 {
 }
 
 @(private)
-_unregister_client :: proc(ctx: ^IOContext, handle: ConnectionHandle) -> bool {
+_unregister_client :: proc(ctx: ^IOContext, conn: net.TCP_Socket) -> bool {
     tracy.Zone()
     // This affects the installed WSARecv and potential WSASend operations
-    ok := win32.CancelIoEx(win32.HANDLE(win32.SOCKET(handle.socket)), /*cancel all*/ nil)
+    // NOTE: it seems like it is safe to close the client socket with completion packets still in flight,
+    // but only with CancelIoEx, not with CancelIo
+    ok := win32.CancelIoEx(win32.HANDLE(win32.SOCKET(conn)), /*cancel all*/ nil)
     
     // NOTE: after cancellation, in flight network operations will either return an iocp packet
     // with an ERROR_OPERATION_ABORTED status (which will then be discarded), or will still produce a successful status (or error)
@@ -356,8 +338,7 @@ _unregister_client :: proc(ctx: ^IOContext, handle: ConnectionHandle) -> bool {
     
     // There is no way to disassociate a socket from a iocp, instead we just cancel operations, and close the socket,
     // the latter will implicitly unregister it from the completion port.
-    // TODO: are we sure we can do this before collecting a completion?
-    net.close(handle.socket)
+    net.close(conn)
 
 	return true
 }
@@ -444,21 +425,11 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 
             _configure_accepted_client(ctx, client_sock) or_continue
 
-            new_handle := _ConnectionHandle {
-                socket = client_sock,
-            }
-
-            if !_register_client(ctx, new_handle) {
+            if !_register_client(ctx, client_sock) {
                 continue
             }
             comp.operation = .NewConnection
-            // TODO: instead of using the heap allocation, cant we use a double ended stack allocator,
-            // where we allocate these pointers on one side (as they live for the whole connection lifecycle), and
-            // recv buffers on the other side (more frequent freeing).
-            //
-            // TODO: also instead of using an opaque last_recv_op passed to the client, cant we just "tag" recv buffers in our
-            // double ended stack, and search for the one represented by this connection (this wont be a perf issue with "lots" of clients right?)
-            comp.handle = transmute(ConnectionHandle) new_handle // layout compatible
+            comp.socket = net.TCP_Socket(client_sock)
             accept_success = true
 
             // re-arm accept handler
@@ -473,8 +444,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
                 comp.buf = op_data.read.buf[:entry.dwNumberOfBytesTransferred]
 
     			// re-arm recv handler
-                handle := _ConnectionHandle { socket = emitter }
-                if !_initiate_recv(ctx, handle) {
+                if !_initiate_recv(ctx, emitter) {
                 	comp.operation = .Error
                  	comp.buf = nil
                 }
@@ -509,11 +479,10 @@ _release_recv_buf :: proc(ctx: ^IOContext, buf: []u8) {
 
 // TODO: don't actually flush on every call
 @(private)
-_submit_write_copy :: proc(ctx: ^IOContext, handle: ConnectionHandle, data: []u8) -> bool {
+_submit_write_copy :: proc(ctx: ^IOContext, conn: net.TCP_Socket, data: []u8) -> bool {
     tracy.Zone()
-    handle := transmute(_ConnectionHandle) handle
 
-    return _initiate_send(ctx, handle.socket, data)
+    return _initiate_send(ctx, win32.SOCKET(conn), data)
 }
 
 @(private="file")
