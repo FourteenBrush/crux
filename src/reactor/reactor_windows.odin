@@ -441,7 +441,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 		case .Read:
 			if entry.dwNumberOfBytesTransferred == 0 {
 			    comp.operation = .PeerHangup
-				comp.buf = op_data.read.buf
+				_release_recv_buf(ctx, op_data.read.buf)
 			} else {
     			comp.operation = .Read
                 comp.buf = op_data.read.buf[:entry.dwNumberOfBytesTransferred]

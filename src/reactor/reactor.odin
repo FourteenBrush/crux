@@ -58,9 +58,9 @@ Operation :: enum u8 {
     // Read hangup or abrupt disconnection, the associated socket in the completion has been closed and cannot be used for IO anymore.
     // The application is responsable for unregistering the client if it has not done that already.
     PeerHangup,
-    // Represents a newly accepted client socket, stored in `Completion.svbvcxhcket`. The socket is configured
+    // Represents a newly accepted client socket, stored in `Completion.socket`. The socket is configured
     // to be non-blocking and is already registered in this subsystem.
-    // This merely acts as a way to notify the downstream, so they may update their internal data structures.
+    // This merely acts as a way to notify the upstream, so they may update their internal data structures.
     NewConnection,
 }
 
@@ -109,7 +109,7 @@ await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, tim
 // Releases the ´buf´ of the given completion, must be called on completions of type ´.Read´ or `.PeerHangup` after
 // the application processed the data, this data cannot be used afterwards.
 release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
-    assert((comp.operation == .Read || comp.operation == .PeerHangup) && comp.buf != nil)
+    assert(comp.operation == .Read && comp.buf != nil)
     _release_recv_buf(ctx, comp.buf)
 }
 

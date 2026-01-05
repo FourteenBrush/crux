@@ -84,9 +84,6 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
 
         for comp in completions[:nready] {
             client_conn := &state.connections[comp.socket]
-            if client_conn == nil {
-	            log.warn("client was already unregistered (hangup confirmation)", comp.operation)
-            }
             if client_conn == nil && comp.operation != .NewConnection && comp.operation != .PeerHangup {
                 // stale completion arrived after a disconnect was issued (peer hangup confirmation or io completion
                 // that could not be canceled in time)
@@ -104,7 +101,6 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
                 _disconnect_client(&state, client_conn^)
             case .PeerHangup:
                 log.debug("client socket hangup")
-                reactor.release_recv_buf(state.io_ctx, comp)
                 // client_conn is nil when we disconnected from the peer first, thus only serving as a confirmation
                 if client_conn != nil {
                     _disconnect_client(&state, client_conn^)
