@@ -3,6 +3,7 @@ package reactor
 import "core:log"
 import "core:mem"
 import "core:net"
+import "core:time"
 import "core:mem/tlsf"
 import win32 "core:sys/windows"
 
@@ -27,6 +28,8 @@ _IOContext :: struct {
 	completion_port: win32.HANDLE,
 	server_sock: win32.SOCKET,
 	timer_resolution: u32,
+	// Number of outstanding network operations which have not yet produced a completion.
+	outstanding_net_ops: u32,
 	// TODO: separate into two allocators, one for per client recv bufs/write bufs (maybe) and
 	// one for completion entries, freelist block based, or perhaps even epoch based recycling (assuming no iocp stalls occur)
 	allocator: mem.Allocator,
@@ -150,14 +153,59 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 		ctx.last_accept_op_data = nil
 		return false
 	}
+	
+	ctx.outstanding_net_ops += 1
 	return true
 }
 
 @(private)
 _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
     // cancel AcceptEx call
+    // TODO: when is this nil??
     overlapped := &ctx.last_accept_op_data.overlapped if ctx.last_accept_op_data != nil else nil
     _ = win32.CancelIoEx(win32.HANDLE(ctx.server_sock), overlapped)
+    
+    // await completion for all cancelled io operations (read/writes/accepts)
+    // https://stackoverflow.com/questions/79769834/winsock-can-an-overlapped-to-wsarecv-be-freed-immediately-after-calling-canceli
+    if ctx.outstanding_net_ops > 0 {
+    	total_outstanding := ctx.outstanding_net_ops
+	    entries := make([]win32.OVERLAPPED_ENTRY, ctx.outstanding_net_ops, context.temp_allocator)
+		start := time.tick_now()
+		ABS_TIMEOUT_MS :: 15 * 1000
+		hit_deadline := false
+
+	   	for ctx.outstanding_net_ops > 0 && !hit_deadline {
+			// poll in steps of 1000 ms, enforcing a max timeout
+			nready := _poll_iocp(ctx, entries, 1000) or_break
+
+			for entry in entries[:nready] {
+				op_data: ^IOOperationData = container_of(entry.lpOverlapped, IOOperationData, "overlapped")
+				defer free(op_data, ctx.allocator)
+				
+				// we don't care about the status, just grab the operation and perform cleanup
+				switch op_data.op {
+				case .AcceptedConnection:
+					win32.closesocket(op_data.accepted_conn.socket)
+				case .Read:
+					_release_recv_buf(ctx, op_data.read.buf[:RECV_BUF_SIZE])
+				case .Write:
+					// TODO: ideally pass allocated buffer back upstream, but we have no way to communicate with the upstream here
+				}
+			}
+			
+			ctx.outstanding_net_ops -= nready
+			if time.duration_milliseconds(time.tick_since(start)) >= ABS_TIMEOUT_MS {
+				hit_deadline = true
+				log.logf(
+					ERROR_LOG_LEVEL,
+					"failed to collect completions for %d aborted io operations in time, leaking memory..",
+					ctx.outstanding_net_ops,
+				)
+			}
+	   	}
+					
+		log.debugf("collected %d io completions in %v", total_outstanding, time.tick_since(start))
+    }
     
     win32.timeEndPeriod(ctx.timer_resolution)
 
@@ -165,13 +213,13 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 	// TODO: close server socket here as it is still associated with this iocp?
 	win32.CloseHandle(ctx.completion_port)
 	ctx.completion_port = win32.INVALID_HANDLE_VALUE
+	
 	// TODO: we must actually wait for a completion (poll again?)
-	// https://stackoverflow.com/questions/79769834/winsock-can-an-overlapped-to-wsarecv-be-freed-immediately-after-calling-canceli
-	if ctx.last_accept_op_data != nil {
-		win32.closesocket(ctx.last_accept_op_data.accepted_conn.socket)
+	// if ctx.last_accept_op_data != nil {
+		// win32.closesocket(ctx.last_accept_op_data.accepted_conn.socket)
 		// FIXME: test whether its correct to free OVERLAPPED for AcceptEx without waiting for completion on real network conditions
-        free(ctx.last_accept_op_data, ctx.allocator)
-	}
+        // free(ctx.last_accept_op_data, ctx.allocator)
+	// }
 
 	tlsf_allocator := _destroy_instrumented_alloc(instrumented=ctx.allocator, meta_allocator=allocator)
 	tlsf_alloc := cast(^tlsf.Allocator) tlsf_allocator.data
@@ -216,7 +264,7 @@ _ConnectionHandle :: struct {
     // for the whole lifetime of this connection. (the application has better means of storing this than we do).
     //
     // A buffer is stored at this address when a new connection handle is created, and is renewed every time a new recv buffer
-    // is allocated. This way we always retain the last allocation, especially useful when disconnecting a client,
+    // is allocated. This way we always retain access to the last allocation, especially useful when disconnecting a client,
     // at this point no new iocp packet will be emitted to confirm the disconnect, where we could simply grab the last allocated buf.
     // TODO
     last_read_op: ^IOOperationData,
@@ -245,6 +293,7 @@ _initiate_recv :: proc(ctx: ^IOContext, handle: _ConnectionHandle) -> bool {
 		1,   /* buffer count */
 		nil, /* nr of bytes received */
 		&flags,
+		// TODO: remove cast on new odin release
 		cast(win32.LPWSAOVERLAPPED) &op_data.overlapped,
 		nil, /* completion routine */
 	)
@@ -255,6 +304,7 @@ _initiate_recv :: proc(ctx: ^IOContext, handle: _ConnectionHandle) -> bool {
 		return false
 	}
 
+	ctx.outstanding_net_ops += 1
 	return true
 }
 
@@ -293,14 +343,10 @@ IOOperation :: enum u8 {
 	AcceptedConnection,
 }
 
-// TODO: the issue with freeing IOOperationData after canceling IO is that the docs do not reliably tell us whether this is allowed
-// or if we need to await the completion first (iocp wait/GetOverlappedResult). Even if we awaited the completion, we would not know whether
-// we would poll again after this call.
 @(private)
 _unregister_client :: proc(ctx: ^IOContext, handle: ConnectionHandle) -> bool {
     tracy.Zone()
     // cancel outstanding io operations, yet to arrive completions will have a ERROR_OPERATION_ABORTED status.
-    // this is the only way to unregister clients, there is no real "iocp unregister" procedure
     // This affects the installed WSARecv and potential WSASend operations
     ok := win32.CancelIoEx(win32.HANDLE(win32.SOCKET(handle.socket)), /*cancel all*/ nil)
 
@@ -316,37 +362,44 @@ _unregister_client :: proc(ctx: ^IOContext, handle: ConnectionHandle) -> bool {
     if !ok && win32.System_Error(win32.GetLastError()) != .NOT_FOUND {
         _log_error(win32.GetLastError(), "failed to cancel outstanding io operations")
     }
+    
+    // There is no way to disassociate a socket from a iocp, instead we just cancel operations, and close the socket,
+    // the latter will implicitly unregister it from the completion port.
+    // TODO: are we sure we can do this before collecting a completion?
     net.close(handle.socket)
 
 	return true
 }
 
+@(private="file")
+_poll_iocp :: proc(ctx: ^IOContext, entries_out: []win32.OVERLAPPED_ENTRY, timeout_ms: u32) -> (nready: u32, ok: bool) {
+	tracy.ZoneN("GetQueuedCompletionStatusEx")
+		
+    // NOTE: nothing is guaranteed in terms of dequeuing order, but we only have one concurrent read for each socket,
+    // and potentially multiple writes, so this does not seem to be an issue
+    // TODO: what does the ordering of a write chain look like?
+   	result := win32.GetQueuedCompletionStatusEx(
+  		ctx.completion_port,
+  		raw_data(entries_out),
+  		u32(len(entries_out)),
+  		&nready,
+    	timeout_ms,
+  		fAlertable=false,
+   	)
+   	// instead of returning TRUE, 0, WAIT_TIMEOUT is being set
+   	if !result && win32.System_Error(win32.GetLastError()) != .WAIT_TIMEOUT {
+        _log_error(win32.GetLastError(), "failed to queue completion entries")
+  		return
+   	}
+    return nready, true
+}
+
 @(private)
 _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, timeout_ms: int) -> (n: int, ok: bool) {
     tracy.Zone()
+    
 	completion_entries := make([]win32.OVERLAPPED_ENTRY, len(completions_out), context.temp_allocator)
-	nready: u32
-
-	{
-	    tracy.ZoneN("GetQueuedCompletionStatusEx")
-
-        // NOTE: nothing is guaranteed in terms of dequeuing order, but we only have one concurrent read for each socket,
-        // and potentially multiple writes, so this does not seem to be an issue
-        // TODO: what does the ordering of a write chain look like?
-    	result := win32.GetQueuedCompletionStatusEx(
-    		ctx.completion_port,
-    		raw_data(completion_entries),
-    		u32(len(completion_entries)),
-    		&nready,
-    		u32(timeout_ms),
-    		fAlertable=false,
-    	)
-    	// instead of returning TRUE, 0, WAIT_TIMEOUT is being set
-    	if !result && win32.System_Error(win32.GetLastError()) != .WAIT_TIMEOUT {
-            _log_error(win32.GetLastError(), "failed to queue completion entries")
-    		return
-    	}
-	}
+	nready := _poll_iocp(ctx, completion_entries, u32(timeout_ms)) or_return
 
 	i := 0
 	for entry in completion_entries[:nready] {
@@ -367,10 +420,10 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
  			// }
   		} else {
   		    i += 1
+	        ctx.outstanding_net_ops -= 1
   		}
 
         // map IO NTSTATUS to win32 error
-        // TODO: are we sure we need this translation?
         status := cast(win32.System_Error) win32.RtlNtStatusToDosError(win32.NTSTATUS(entry.Internal))
         if status == .OPERATION_ABORTED {
             tracy.ZoneN("Stale Completion")
@@ -505,6 +558,8 @@ _initiate_send :: proc(ctx: ^IOContext, socket: win32.SOCKET, data: []u8, partia
         free(op_data, ctx.allocator)
         return false
     }
+    
+    ctx.outstanding_net_ops += 1
     return true
 }
 
