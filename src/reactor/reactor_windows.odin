@@ -354,7 +354,8 @@ _poll_iocp :: proc(ctx: ^IOContext, entries_out: []win32.OVERLAPPED_ENTRY, timeo
 		
     // NOTE: nothing is guaranteed in terms of dequeuing order, but we only have one concurrent read for each socket,
     // and potentially multiple writes, so this does not seem to be an issue
-    // TODO: what does the ordering of a write chain look like?
+    // TODO: enforce write completions are assembled in order (especially when sending lots of them per client),
+    // perhaps we should handle buffering ourselves
    	success := win32.GetQueuedCompletionStatusEx(
   		ctx.completion_port,
   		raw_data(entries_out),
@@ -424,21 +425,18 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 		    client_sock := op_data.accepted_conn.socket
             accept_success := false
             defer if !accept_success {
-                _ = win32.closesocket(client_sock)
+                win32.closesocket(client_sock)
                 discard_entry = true
             }
 
             _configure_accepted_client(ctx, client_sock) or_continue
-
-            if !_register_client(ctx, client_sock) {
-                continue
-            }
+            _register_client(ctx, client_sock) or_continue
+            
             comp.operation = .NewConnection
             comp.socket = net.TCP_Socket(client_sock)
             accept_success = true
 
-            // re-arm accept handler
-            // TODO: consider this as being fatal, no more new clients can be accepted..
+            // re-arm accept handler, NOTE: fatal if this fails, no new connections can be accepted
             _install_accept_handler(ctx) or_break
 		case .Read:
 			if entry.dwNumberOfBytesTransferred == 0 {
@@ -468,8 +466,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 
 			assert(int(entry.dwNumberOfBytesTransferred) == len(op_data.write.buf), "partial writes should be handled above")
 		    comp.operation = .Write
-			// for caller to deallocate
-			comp.buf = transport_buf
+			comp.buf = transport_buf // pass back to upstream to deallocate
 		}
 	}
 

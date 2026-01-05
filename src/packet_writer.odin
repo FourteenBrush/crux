@@ -20,7 +20,7 @@ enqueue_packet :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnectio
         buf_dump(client_conn.tx_buf)
     }
     
-    // freed by io worker after receiving write completion
+    // freed by network worker after receiving write completion
     outb := make([]u8, buf_length(client_conn.tx_buf), client_conn.packet_scratch_alloc)
     read_err := buf_copy_into(&client_conn.tx_buf, outb)
     assert(read_err == .None, "invariant, copied full length")

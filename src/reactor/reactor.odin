@@ -113,6 +113,7 @@ release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
     _release_recv_buf(ctx, comp.buf)
 }
 
+// Submits a write operation, the passed buffer must be valid till a write completion (or error) has been received.
 // TODO: why dont we save the allocator the passed buffer was allocated with, so we can free it
 // ourselves instead of sending it back?
 submit_write_copy :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) -> bool {

@@ -236,7 +236,6 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
             reason = TextComponent { "You were kicked" },
         })
         client_conn.close_after_flushing = true
-        // sync.atomic_store(state.execution_permit, false)
     case ClientInformationPacket:
         response := PluginMessagePacket {
             channel = "minecraft:brand",
@@ -246,7 +245,6 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
         }
         
         enqueue_packet(state.io_ctx, client_conn, response)
-        // _disconnect_client(state, client_conn^)
     }
 }
 
