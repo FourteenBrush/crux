@@ -210,8 +210,8 @@ when /*USE_IO_URING*/ true {
     }
 
     @(private)
-    _release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
-        delete(comp.buf, os.heap_allocator())
+    _release_recv_buf :: proc(ctx: ^IOContext, buf: []u8) {
+        delete(buf, os.heap_allocator())
     }
 
     @(private)

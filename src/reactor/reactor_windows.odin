@@ -467,10 +467,9 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 }
 
 @(private)
-_release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
+_release_recv_buf :: proc(ctx: ^IOContext, buf: []u8) {
     tracy.Zone()
-    assert(comp.buf != nil)
-    delete(comp.buf, ctx.allocator)
+    delete(buf, ctx.allocator)
 }
 
 // TODO: don't actually flush on every call

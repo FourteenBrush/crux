@@ -190,8 +190,8 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 }
 
 @(private)
-_release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
-    delete(comp.buf, ctx.allocator)
+_release_recv_buf :: proc(ctx: ^IOContext, buf: []u8) {
+    delete(buf, ctx.allocator)
 }
 
 @(private)
