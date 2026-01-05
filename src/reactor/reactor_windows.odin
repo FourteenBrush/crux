@@ -30,11 +30,13 @@ _IOContext :: struct {
 	timer_resolution: u32,
 	// Number of outstanding network operations which have not yet produced a completion.
 	outstanding_net_ops: u32,
+	// Allocator used to allocate io operation data and recv buffers.
 	// TODO: separate into two allocators, one for per client recv bufs/write bufs (maybe) and
-	// one for completion entries, freelist block based, or perhaps even epoch based recycling (assuming no iocp stalls occur)
+	// one for completion entries, freelist block based
 	allocator: mem.Allocator,
 
-	// Buf where local and remote addr are placed on an accept call.
+	// Buf where local and remote addr are placed on an AcceptEx call.
+	// TODO: can we somehow put this in the IOOperationData, maybe as flexible array member?
 	accept_buf: [ADDR_BUF_SIZE * 2]u8,
 }
 
@@ -180,7 +182,7 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 				case .AcceptedConnection:
 					win32.closesocket(op_data.accepted_conn.socket)
 				case .Read:
-					_release_recv_buf(ctx, op_data.read.buf[:RECV_BUF_SIZE])
+					_release_recv_buf(ctx, op_data.read.buf)
 				case .Write:
 					// TODO: ideally pass allocated buffer back upstream, but we have no way to communicate with the upstream here
 				}
@@ -301,7 +303,7 @@ IOOperationData :: struct {
         // Only applicable when `op == .Read`.
 	    read: struct {
 			// Raw data of dynamically allocated recv buffer data, the size of this buffer is always `RECV_BUFFER_SIZE`.
-			buf: [^]u8,
+			buf: []u8,
 		},
 		// Only applicable when `op == .Write`.
 		write: struct {
@@ -413,7 +415,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
             // back to them in order to free it?
             
             if op_data.op == .Read {
-	           	_release_recv_buf(ctx, op_data.read.buf[:RECV_BUF_SIZE])
+	           	_release_recv_buf(ctx, op_data.read.buf)
             }
 
             discard_entry = true
@@ -464,7 +466,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 		case .Read:
 			if entry.dwNumberOfBytesTransferred == 0 {
 			    comp.operation = .PeerHangup
-				comp.buf = op_data.read.buf[:RECV_BUF_SIZE]
+				comp.buf = op_data.read.buf
 			} else {
     			comp.operation = .Read
                 comp.buf = op_data.read.buf[:entry.dwNumberOfBytesTransferred]
@@ -592,7 +594,7 @@ _alloc_operation_data :: proc(ctx: IOContext, $Op: IOOperation, source: win32.SO
     when Op == .Write {
         op_data.write.buf = buf
     } else when Op == .Read {
-        op_data.read.buf = raw_data(buf)
+        op_data.read.buf = buf
     }
 
     return op_data
