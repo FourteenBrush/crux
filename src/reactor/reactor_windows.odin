@@ -293,7 +293,6 @@ _initiate_recv :: proc(ctx: ^IOContext, handle: _ConnectionHandle) -> bool {
 		1,   /* buffer count */
 		nil, /* nr of bytes received */
 		&flags,
-		// TODO: remove cast on new odin release
 		cast(win32.LPWSAOVERLAPPED) &op_data.overlapped,
 		nil, /* completion routine */
 	)
@@ -414,10 +413,6 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
         discard_entry := false
   		defer if discard_entry {
   		    nready -= 1
- 			// if op_data.op == .Read {
- 			    // TODO: get rid of this nonsense and emit an .Error comp instead
-                    // _release_recv_buf(ctx, comp^)
- 			// }
   		} else {
   		    i += 1
 	        ctx.outstanding_net_ops -= 1
@@ -491,11 +486,11 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
                 comp.buf = op_data.read.buf[:entry.dwNumberOfBytesTransferred]
 
     			// re-arm recv handler
-                handle := _ConnectionHandle {
-                    socket = emitter,
+                handle := _ConnectionHandle { socket = emitter }
+                if !_initiate_recv(ctx, handle) {
+                	comp.operation = .Error
+                 	comp.buf = nil
                 }
-                // TODO: emit .Error instead of simply discarding this entry?
-                discard_entry = !_initiate_recv(ctx, handle)
 			}
 		case .Write:
 		    total_transfer := entry.dwNumberOfBytesTransferred + op_data.write.already_transferred

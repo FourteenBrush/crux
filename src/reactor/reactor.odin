@@ -37,9 +37,10 @@ Completion :: struct {
     //
     // For `operation == .Write`, this contains the exact buffer that was submitted to a `submit_write_*` procedure,
     // in order to let the client deallocate this written data.
-    // Additionally, when `operation == .Error`, and this completion corresponds to a failed write operation, this also contains
+    // 
+    // Additionally, when `operation == .Error`, and this completion corresponds to a failed write operation, this contains
     // the exact written bytes, so they do not get leaked.
-    // In all other cases, this is `nil`.
+    // In the case of a failed read operation, and in all other causes, this is `nil`.
     buf: []u8 `fmt:"-"`,
     operation: Operation,
 }
@@ -98,6 +99,8 @@ destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
     _destroy_io_context(ctx, allocator)
 }
 
+// FIXME: probably want to get rid of the returned bool on unregister_client
+
 // Unregisters a client from the IO context, after this call, the client will no longer produce new completions.
 // Any pending IO operations will be canceled, buf completions that were already
 // queued in the internal buffers before cancellation, may still be delivered.
@@ -106,6 +109,8 @@ destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 unregister_client :: proc(ctx: ^IOContext, handle: ConnectionHandle) -> bool {
     return _unregister_client(ctx, handle)
 }
+
+// FIXME: make timeout_ms unsigned
 
 // Await IO completions for any of the registered clients (excluding the server socket).
 // This function returns when either `timeout_ms` has elapsed, or at least one completion has been awaited.
