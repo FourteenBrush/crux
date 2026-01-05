@@ -160,61 +160,66 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
     // cancel AcceptEx call
     _ = win32.CancelIoEx(win32.HANDLE(ctx.server_sock), nil)
     
-    // await completion for all cancelled io operations (read/writes/accepts)
-    // https://stackoverflow.com/questions/79769834/winsock-can-an-overlapped-to-wsarecv-be-freed-immediately-after-calling-canceli
-    if ctx.outstanding_net_ops > 0 {
-    	total_outstanding := ctx.outstanding_net_ops
-	    entries := make([]win32.OVERLAPPED_ENTRY, ctx.outstanding_net_ops, context.temp_allocator)
-		start := time.tick_now()
-		LINGER_SECS :: 15 * 1000
-		hit_deadline := false
-
-	   	for ctx.outstanding_net_ops > 0 && !hit_deadline {
-			nready := _poll_iocp(ctx, entries, timeout_ms=1000) or_break
-
-			for entry in entries[:nready] {
-				op_data: ^IOOperationData = container_of(entry.lpOverlapped, IOOperationData, "overlapped")
-				defer free(op_data, ctx.allocator)
-				
-				// we don't care about the status, just grab the operation and perform cleanup
-				switch op_data.op {
-				case .AcceptedConnection:
-					win32.closesocket(op_data.accepted_conn.socket)
-				case .Read:
-					_release_recv_buf(ctx, op_data.read.buf)
-				case .Write:
-					// TODO: ideally pass allocated buffer back upstream, but we have no way to communicate with the upstream here
-				}
-			}
-			
-			ctx.outstanding_net_ops -= nready
-			if time.duration_milliseconds(time.tick_since(start)) >= LINGER_SECS {
-				hit_deadline = true
-				log.logf(
-					ERROR_LOG_LEVEL,
-					"failed to collect completions for %d cancelled io operations in time, leaking memory..",
-					ctx.outstanding_net_ops,
-				)
-			}
-	   	}
-		
-		collected_completions := total_outstanding - ctx.outstanding_net_ops
-		if collected_completions > 0 {
-			log.logf(ERROR_LOG_LEVEL, "collected %d io completions in %v", total_outstanding - ctx.outstanding_net_ops, time.tick_since(start))
-		}
-    }
-    
+    _reap_pending_completions(ctx)
     win32.timeEndPeriod(ctx.timer_resolution)
 
-	// NOTE: refcounted, no socket handles must be associated with this iocp
-	// TODO: close server socket here as it is still associated with this iocp?
 	win32.CloseHandle(ctx.completion_port)
 	ctx.completion_port = win32.INVALID_HANDLE_VALUE
+	// as all overlapped IO operations on the server socket are cancelled, there should
+	// be no issues in still having it bound to this iocp
 	
 	tlsf_allocator := _destroy_instrumented_alloc(instrumented=ctx.allocator, meta_allocator=allocator)
 	tlsf_alloc := cast(^tlsf.Allocator) tlsf_allocator.data
 	tlsf.destroy(tlsf_alloc)
 	free(tlsf_alloc, allocator)
+}
+
+@(private="file")
+_reap_pending_completions :: proc(ctx: ^IOContext) {
+	if ctx.outstanding_net_ops == 0 do return
+	
+	// await completion for all cancelled io operations (read/writes/accepts)
+	// https://stackoverflow.com/questions/79769834/winsock-can-an-overlapped-to-wsarecv-be-freed-immediately-after-calling-canceli
+   	total_outstanding := ctx.outstanding_net_ops
+	entries := make([]win32.OVERLAPPED_ENTRY, ctx.outstanding_net_ops, context.temp_allocator)
+	
+	start := time.tick_now()
+	LINGER_SECS :: 15
+	hit_deadline := false
+
+ 	for ctx.outstanding_net_ops > 0 && !hit_deadline {
+		nready := _poll_iocp(ctx, entries, timeout_ms=1000) or_break
+		
+		for entry in entries[:nready] {
+			op_data: ^IOOperationData = container_of(entry.lpOverlapped, IOOperationData, "overlapped")
+			defer free(op_data, ctx.allocator)
+			
+			// we don't care about the status, just grab the operation and perform cleanup
+			switch op_data.op {
+			case .AcceptedConnection:
+				win32.closesocket(op_data.accepted_conn.socket)
+			case .Read:
+				_release_recv_buf(ctx, op_data.read.buf)
+			case .Write:
+				// TODO: ideally pass allocated buffer back upstream, but we have no way to communicate with the upstream here
+			}
+		}
+		
+		ctx.outstanding_net_ops -= nready
+		if ctx.outstanding_net_ops > 0 && time.duration_seconds(time.tick_since(start)) >= LINGER_SECS {
+			hit_deadline = true
+			log.logf(
+				ERROR_LOG_LEVEL,
+				"failed to collect completions for %d cancelled io operations in time, leaking memory..",
+				ctx.outstanding_net_ops,
+			)
+		}
+ 	}
+		
+	collected_completions := total_outstanding - ctx.outstanding_net_ops
+	if collected_completions > 0 {
+		log.logf(ERROR_LOG_LEVEL, "collected %d io completions in %v", total_outstanding - ctx.outstanding_net_ops, time.tick_since(start))
+	}
 }
 
 @(private="file")
