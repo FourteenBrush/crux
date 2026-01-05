@@ -158,7 +158,7 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 @(private)
 _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
     // cancel AcceptEx call
-    _ = win32.CancelIo(win32.HANDLE(ctx.server_sock))
+    _ = win32.CancelIoEx(win32.HANDLE(ctx.server_sock), nil)
     
     // await completion for all cancelled io operations (read/writes/accepts)
     // https://stackoverflow.com/questions/79769834/winsock-can-an-overlapped-to-wsarecv-be-freed-immediately-after-calling-canceli
@@ -171,7 +171,8 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 
 	   	for ctx.outstanding_net_ops > 0 && !hit_deadline {
 			// poll in steps of 1000 ms, enforcing a max timeout
-			nready := _poll_iocp(ctx, entries, 1000) or_break
+			nready := _poll_iocp(ctx, entries, timeout_ms=1000) or_break
+			log.logf(ERROR_LOG_LEVEL, "collected %d completions", nready)
 
 			for entry in entries[:nready] {
 				op_data: ^IOOperationData = container_of(entry.lpOverlapped, IOOperationData, "overlapped")
@@ -193,13 +194,16 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 				hit_deadline = true
 				log.logf(
 					ERROR_LOG_LEVEL,
-					"failed to collect completions for %d aborted io operations in time, leaking memory..",
+					"failed to collect completions for %d cancelled io operations in time, leaking memory..",
 					ctx.outstanding_net_ops,
 				)
 			}
 	   	}
-					
-		log.debugf("collected %d io completions in %v", total_outstanding, time.tick_since(start))
+		
+		collected_completions := total_outstanding - ctx.outstanding_net_ops
+		if collected_completions > 0 {
+			log.logf(ERROR_LOG_LEVEL, "collected %d io completions in %v", total_outstanding - ctx.outstanding_net_ops, time.tick_since(start))
+		}
     }
     
     win32.timeEndPeriod(ctx.timer_resolution)
@@ -365,7 +369,7 @@ _poll_iocp :: proc(ctx: ^IOContext, entries_out: []win32.OVERLAPPED_ENTRY, timeo
     // NOTE: nothing is guaranteed in terms of dequeuing order, but we only have one concurrent read for each socket,
     // and potentially multiple writes, so this does not seem to be an issue
     // TODO: what does the ordering of a write chain look like?
-   	result := win32.GetQueuedCompletionStatusEx(
+   	success := win32.GetQueuedCompletionStatusEx(
   		ctx.completion_port,
   		raw_data(entries_out),
   		u32(len(entries_out)),
@@ -373,8 +377,7 @@ _poll_iocp :: proc(ctx: ^IOContext, entries_out: []win32.OVERLAPPED_ENTRY, timeo
     	u32(timeout_ms),
   		fAlertable=false,
    	)
-   	// instead of returning TRUE, 0, WAIT_TIMEOUT is being set
-   	if !result && win32.System_Error(win32.GetLastError()) != .WAIT_TIMEOUT {
+   	if !success && win32.System_Error(win32.GetLastError()) != .WAIT_TIMEOUT {
         _log_error(win32.GetLastError(), "failed to queue completion entries")
   		return
    	}
@@ -402,8 +405,8 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
   		    nready -= 1
   		} else {
   		    i += 1
-	        ctx.outstanding_net_ops -= 1
   		}
+	    ctx.outstanding_net_ops -= 1
 
         io_status := cast(win32.System_Error) win32.RtlNtStatusToDosError(win32.NTSTATUS(entry.Internal))
         op_data: ^IOOperationData = container_of(entry.lpOverlapped, IOOperationData, "overlapped")
@@ -411,8 +414,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 		
         if io_status == .OPERATION_ABORTED {
             tracy.ZoneN("Stale Completion")
-            // TODO: what happens with last write operation, this contains an user allocated buffer, how do we pass it
-            // back to them in order to free it?
+            // TODO: what happens with last write operation, this contains an user allocated buffer, how do we pass it back?
             
             if op_data.op == .Read {
 	           	_release_recv_buf(ctx, op_data.read.buf)
@@ -421,7 +423,6 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
             discard_entry = true
             continue
         }
-
 
         if io_status != .SUCCESS {
             comp.operation = .Error
