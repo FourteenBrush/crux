@@ -106,8 +106,11 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
                     _disconnect_client(&state, client_conn^)
                 }
             case .Read:
+                defer reactor.release_recv_buf(state.io_ctx, comp)
+                if client_conn.close_after_flushing {
+                    continue
+                }
                 buf_write_bytes(&client_conn.rx_buf, comp.buf) // copies
-                reactor.release_recv_buf(state.io_ctx, comp)
                 _drain_serverbound_packets(&state, client_conn)
             case .Write:
                 // must be freed using the same allocator the reactor write call was made with
@@ -173,6 +176,7 @@ _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^Cli
                 // TODO: do we even need a channel, what about a futex/atomic mutex and a darray?
                 log.error("tried sending packet to main thread but channel buf is full")
             }
+            if client_conn.close_after_flushing do break loop
         }
     }
 }
@@ -197,6 +201,7 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
             },
             players = {
                 max = 100,
+                // TODO: when multiply clients are querying server info, this is incorrect
                 online = len(state.connections) - 1, // account for querying client
             },
             description = {
@@ -227,7 +232,8 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
     case LoginAcknowledgedPacket:
         client_conn.state = .Configuration
     case PluginMessagePacket:
-        // TODO
+        // TODO: after we send this, switch a flag to .Disconnecting, so we know to ignore any futher packets,
+        // on a write completion, effectively shut down the connection
         enqueue_packet(state.io_ctx, client_conn, DisconnectConfigurationPacket {
             reason = TextComponent { "You were kicked" },
         })
