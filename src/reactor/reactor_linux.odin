@@ -165,10 +165,9 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
             }
             
             comp.operation = .Write
-            // TODO: use slice syntax after odin-dev-11
-            comp.buf = mem.ptr_to_bytes(cast(^u8)pending_writes[0].base, cast(int)pending_writes[0].len)
-
             // make downstream able to deallocate passed buffer
+            comp.buf = pending_writes[0].base[:pending_writes[0].len]
+
             if send_err != .NONE {
                 comp.operation = .Error
                 continue
@@ -179,7 +178,6 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
             // TODO: handle partial writes with cursor, potentially merge IO_Vec slices?
             assert(uint(n) == total_transfer_len, "TODO: handle partial writes")
             resize(pending_writes, 0)
-            
         } else if .HUP in event.events || .RDHUP in event.events {
             // handle abrupt disconnection and read hangup the same way
             comp.operation = .PeerHangup
@@ -196,12 +194,13 @@ _release_recv_buf :: proc(ctx: ^IOContext, buf: []u8) {
 
 @(private)
 _submit_write_copy :: proc(ctx: ^IOContext, conn: net.TCP_Socket, data: []u8) -> bool {
-    iovecs: [dynamic]linux.IO_Vec
-    iovecs.allocator = ctx.allocator
-    _, pending_writes, _ := map_upsert(&ctx.pending_writes, conn, iovecs)
-
+    _, pending_writes, inserted, _ := map_entry(&ctx.pending_writes, conn)
+    if inserted {
+        // zeroed out iovec darray is inserted, ensure using correct allocator
+        pending_writes.allocator = ctx.allocator
+    }
+    
     append(pending_writes, linux.IO_Vec { raw_data(data), len(data) })
-    // FIXME: assert <= sysconf(._IOV_MAX)
     return true
 }
 
