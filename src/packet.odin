@@ -75,7 +75,7 @@ get_clientbound_packet_id :: proc(packet: ClientBoundPacket) -> ClientBoundPacke
     #no_bounds_check return clientbound_packet_id_lookup[tag]
 }
 
-@(private)
+@(private="file")
 VARIANT_IDX_OF :: intrinsics.type_variant_index_of
 
 // mapping of ClientBoundPacket raw union tags to packet ids

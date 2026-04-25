@@ -10,7 +10,7 @@ COLLECTIONS = -collection:src=$(SRC) -collection:lib=lib
 
 CC = odin
 BUILD_DIR = build
-CFLAGS = -out:$(BUILD_DIR)/$(PROG) -strict-style -vet-semicolon -vet-cast $(COLLECTIONS) -define:CRUX_USE_IO_URING=true # -vet-using-param
+CFLAGS = -out:$(BUILD_DIR)/$(PROG) -strict-style -vet-semicolon -vet-cast $(COLLECTIONS) -define:CRUX_USE_IO_URING=false # -vet-using-param
 
 all: release
 

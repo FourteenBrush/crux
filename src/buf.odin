@@ -73,8 +73,8 @@ BufWriteMark :: distinct int
 
 // Dumps a NetworkBuffer to stdout, for debugging purposes.
 buf_dump :: proc(buf: NetworkBuffer) #no_bounds_check {
-    fmt.printfln("NetworkBuffer{{len=%d, r_offset=%d, data=%2x (hex)}}",
-        len(buf.data), buf.r_offset, buf.data[buf.r_offset:][:len(buf.data)],
+    fmt.printfln("NetworkBuffer{{len=%d, r_offset=%d, data=%2x (len=%d) (hex)}}",
+        len(buf.data), buf.r_offset, buf.data[buf.r_offset:][:len(buf.data)], len(buf.data),
     )
 }
 
@@ -529,6 +529,11 @@ buf_read_u16 :: proc(buf: ^NetworkBuffer) -> (u: u16be, err: ReadError) {
     return u16be(msb) << 8 | u16be(lsb), .None
 }
 
+buf_write_u16 :: proc(buf: ^NetworkBuffer, u: u16) {
+    buf_write_byte(buf, u8(u >> 8))
+    buf_write_byte(buf, u8(u & 0xff))
+}
+
 @(require_results)
 buf_consume_u16 :: proc(buf: ^NetworkBuffer, u: u16) -> (match: bool, err: ReadError) #no_bounds_check {
     buf_ensure_readable(buf^, 2) or_return
@@ -553,6 +558,7 @@ buf_consume_byte :: proc(buf: ^NetworkBuffer, expected: u8) -> (match: bool, err
     return false, .None
 }
 
+@(require_results)
 buf_unchecked_read_bool :: proc(buf: ^NetworkBuffer) -> (bool, ReadError) #no_bounds_check {
     (cast(^mem.Raw_Dynamic_Array)&buf.data).len -= 1
     defer buf.r_offset = (buf.r_offset + 1) % cap(buf.data)
