@@ -233,10 +233,6 @@ DisconnectConfigurationPacket :: struct {
     reason: TextComponent,
 }
 
-TextComponent :: struct {
-    text: string `json:"text"`,
-}
-
 GameProfile :: struct {
     uuid: uuid.Identifier,
     username: string,

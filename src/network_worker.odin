@@ -204,9 +204,7 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
                 // TODO: when multiply clients are querying server info, this is incorrect
                 online = len(state.connections) - 1, // account for querying client
             },
-            description = {
-                text = "Some server",
-            },
+            description = text_component("Some Server", .DarkAqua),
             favicon = "data:image/png;base64,<data>",
             enforces_secure_chat = false,
         }
@@ -232,10 +230,8 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
     case LoginAcknowledgedPacket:
         client_conn.state = .Configuration
     case PluginMessagePacket:
-        // TODO: after we send this, switch a flag to .Disconnecting, so we know to ignore any futher packets,
-        // on a write completion, effectively shut down the connection
         enqueue_packet(state.io_ctx, client_conn, DisconnectConfigurationPacket {
-            reason = TextComponent { "You were kicked" },
+            reason = text_component("You were kicked", .DarkAqua, {.Underlined}),
         })
         client_conn.close_after_flushing = true
     case ClientInformationPacket:

@@ -38,6 +38,7 @@ _serialize_clientbound :: proc(packet: ClientBoundPacket, outb: ^NetworkBuffer) 
 
     switch packet in packet {
     case StatusResponsePacket:
+        // TODO: serialize SNBT
         // json serializer does not return allocator errors, so there should be no reason this fails
         bytes := json.marshal(packet, allocator=context.temp_allocator) or_else panic("error serializing status response")
         werr := buf_write_string(outb, string(bytes)) // copied
@@ -58,8 +59,7 @@ _serialize_clientbound :: proc(packet: ClientBoundPacket, outb: ^NetworkBuffer) 
             _ = buf_write_string(outb, signature)
         }
     case DisconnectConfigurationPacket:
-        // TODO: write compound tag
-        werr := nbt_write_string(outb, packet.reason.text)
+        werr := serialize_text_component(outb, packet.reason)
         assert(werr == nil, "max string length exceeded") // TODO
     case PluginMessagePacket:
         buf_write_identifier(outb, packet.channel)

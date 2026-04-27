@@ -18,11 +18,16 @@ Utf16String :: distinct []u8
 
 MAX_VAR_INT :: int(max(VarInt))
 
+@(private="file")
 SEGMENT_BITS :: 0x7F
+@(private="file")
 CONTINUE_BIT :: 0x80
+@(private="file")
 MIN_STRING_LENGTH :: 1
+@(private="file")
 MAX_STRING_LENGTH :: 32767
 
+@(private="file")
 IDENTIFIER_MAX_LENGTH :: 32767
 
 @(init, private="file")
@@ -518,6 +523,12 @@ buf_copy_into :: proc(buf: ^NetworkBuffer, outb: []u8) -> ReadError #no_bounds_c
         intrinsics.mem_copy_non_overlapping(&outb[n_nowrap], raw_data(outb), n - n_nowrap)
     }
     return .None
+}
+
+buf_write_u32 :: proc(buf: ^NetworkBuffer, u: u32) {
+    u := u32be(u)
+    bytes := ([^]u8)(&u)[:4]
+    buf_write_bytes(buf, bytes)
 }
 
 @(require_results)

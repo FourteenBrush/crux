@@ -155,6 +155,7 @@ ClientConnection :: struct #packed {
     packet_scratch_alloc: mem.Allocator,
 
     // Whether this connection needs to be closed after flushing all packets
+    // TODO: rename and document the exact purpose of this field.
     close_after_flushing: bool,
     rx_buf: NetworkBuffer,
     tx_buf: NetworkBuffer,
