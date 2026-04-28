@@ -1,5 +1,7 @@
 package crux
 
+import "core:strconv"
+
 TextComponent :: union {
     // Plain text component without any styling applied.
     string,
@@ -34,16 +36,48 @@ TextFeatures :: bit_set[enum {
 }]
 
 TextColor :: enum u32 {
-    Black    = 0x0,
-    DarkAqua = 0x00aaaa,
+    Black       = 0x0,
+    DarkBlue    = 0x0000aa,
+    DarkGreen   = 0x00aa00,
+    DarkAqua    = 0x00aaaa,
+    DarkRed     = 0xaa0000,
+    DarkPurple  = 0xaa00aa,
+    Gold        = 0xffaa00,
+    Gray        = 0xaaaaaa,
+    DarkGray    = 0x555555,
+    Blue        = 0x5555ff,
+    Green       = 0x55ff55,
+    Aqua        = 0x55ffff,
+    Red         = 0xff5555,
+    LightPurple = 0xff55ff,
+    Yellow      = 0xffff55,
+    White       = 0xffffff,
 }
 
 @(private="file")
-text_color_to_string :: proc(color: TextColor) -> string {
+text_color_to_string :: proc(color: TextColor, hex_buf: ^[7]u8) -> string {
     switch color {
     case .Black: return "black"
+    case .DarkBlue: return "dark_blue"
+    case .DarkGreen: return "dark_green"
     case .DarkAqua: return "dark_aqua"
-    case: unimplemented()
+    case .DarkRed: return "dark_red"
+    case .DarkPurple: return "dark_purple"
+    case .Gold: return "gold"
+    case .Gray: return "gray"
+    case .DarkGray: return "dark_gray"
+    case .Blue: return "blue"
+    case .Green: return "green"
+    case .Aqua: return "aqua"
+    case .Red: return "red"
+    case .LightPurple: return "light_purple"
+    case .Yellow: return "yellow"
+    case .White: return "white"
+    case:
+        assert(int(color) <= 0xffffff, "invalid casted color bigger than #ffffff")
+        hex_buf[0] = '#'
+        strconv.write_int(hex_buf[1:], i64(color), 16)
+        return string(hex_buf[:])
     }
 }
 
@@ -63,7 +97,8 @@ serialize_text_component :: proc(buf: ^NetworkBuffer, comp: TextComponent) -> Wr
         
         nbt_write_named_string(&writer, "text", comp.text) or_return
         if comp.style.color != {} {
-            color := text_color_to_string(comp.style.color)
+            hex_buf: [7]u8
+            color := text_color_to_string(comp.style.color, &hex_buf)
             nbt_write_named_string(&writer, "color", color) or_return
         }
         if .Bold in comp.style.features {

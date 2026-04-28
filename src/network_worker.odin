@@ -2,6 +2,7 @@
 // IO on client sockets, (de)serialization and transmission of packets.
 package crux
 
+import "core:fmt"
 import "core:os"
 import "core:time"
 import "core:log"
@@ -230,8 +231,12 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
     case LoginAcknowledgedPacket:
         client_conn.state = .Configuration
     case PluginMessagePacket:
+        kick_message := fmt.aprintf(
+            "You were kicked after sending packet %s %s", packet.channel, packet.payload,
+            allocator=client_conn.packet_scratch_alloc,
+        )
         enqueue_packet(state.io_ctx, client_conn, DisconnectConfigurationPacket {
-            reason = text_component("You were kicked", .DarkAqua, {.Underlined}),
+            reason = text_component(kick_message, TextColor(0xffaacc), {.Underlined}),
         })
         client_conn.close_after_flushing = true
     case ClientInformationPacket:
