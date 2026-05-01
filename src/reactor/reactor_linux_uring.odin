@@ -1,8 +1,6 @@
 #+build linux 
 package reactor
 
-import "core:log"
-import "core:fmt"
 @(require) import "core:os"
 @(require) import "core:sync"
 @(require) import "core:net"
