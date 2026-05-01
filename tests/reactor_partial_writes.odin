@@ -77,6 +77,7 @@ partial_write_arrives_in_one_completion :: proc(t: ^testing.T) {
             if comp.operation == .PeerHangup {
                 testing.expectf(t, client_state == .ReceivedWrite, "received .PeerHangup event in state %s", client_state) or_break thread
                 client_state = .ReceivedHangup
+                reactor.unregister_client(&io, comp.socket)
                 break thread
             }
         }
