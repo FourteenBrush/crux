@@ -11,7 +11,7 @@ import "core:fmt"
 
 @(require) import "lib:tracy"
 
-when /*USE_IO_URING*/ true {
+when USE_IO_URING {
 
     // NOTE: must be kept relatively low due to mem limits (max locked pages, etc..), effectively
     // causing a memlock() to fail
@@ -74,7 +74,10 @@ when /*USE_IO_URING*/ true {
 
         mmap :: proc(size: uint, fd: linux.Fd, offset: i64, flags := linux.Map_Flags{}) -> (rawptr, bool) {
             ptr, map_err := linux.mmap(0, size, {.READ, .WRITE}, {.SHARED} | flags, fd, offset)
-            if map_err != .NONE do return nil, false
+            if map_err != .NONE {
+                _log_error(map_err, "mmap failed")
+                return nil, false
+            }
             return ptr, true
         }
 
@@ -84,6 +87,8 @@ when /*USE_IO_URING*/ true {
             base := cast([^]u32)mmap_base
             q.head = &base[offsets.head / size_of(u32)]
             q.tail = &base[offsets.tail / size_of(u32)]
+            // log.error(q.head^, q.tail^)
+            // log.error(offsets.head, offsets.tail)
             q.mask = &base[offsets.ring_mask / size_of(u32)]
         }
 
@@ -112,7 +117,10 @@ when /*USE_IO_URING*/ true {
         
         // install accept() handler
         // TODO(urgent): we are moving ctx
-        _submit_multishot_accept(&ctx) or_return
+        if !_submit_multishot_accept(&ctx) {
+            _log_error(.NONE, "failed to install accept() handler")
+            return
+        }
 
         return ctx, true
     }
@@ -176,6 +184,7 @@ when /*USE_IO_URING*/ true {
         head := sync.atomic_load_explicit(sq.head, .Acquire)
         tail := sync.atomic_load_explicit(sq.tail, .Acquire)
 
+        // TODO: head and tail are both 0
         if head == tail {
             return nil, false
         }
