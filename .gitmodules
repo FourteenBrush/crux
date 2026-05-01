@@ -3,5 +3,4 @@
 	url = https://github.com/FourteenBrush/odin-tracy.git
 [submodule "lib/back"]
 	path = lib/back
-	url = https://github.com/FourteenBrush/back.git
-	branch = patch-1
+	url = https://github.com/laytan/back.git
