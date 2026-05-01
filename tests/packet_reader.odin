@@ -1,3 +1,4 @@
+#+feature using-stmt
 package test
 
 import "core:slice"
