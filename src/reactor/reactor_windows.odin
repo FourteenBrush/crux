@@ -291,7 +291,7 @@ IOOperationData :: struct {
     using _: struct #raw_union {
         // Only applicable when `op == .Read`.
 	    read: struct {
-			// Raw data of dynamically allocated recv buffer data, the size of this buffer is always `RECV_BUFFER_SIZE`.
+			// Dynamically allocated recv buf.
 			buf: []u8,
 		},
 		// Only applicable when `op == .Write`.
