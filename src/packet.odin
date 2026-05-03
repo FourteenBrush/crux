@@ -20,6 +20,7 @@ ServerBoundPacket :: union #no_nil {
     // sent in .Configuration state
     PluginMessagePacket,
     ClientInformationPacket,
+    AcknowledgeFinishConfigurationPacket,
 }
 
 ServerBoundPacketId :: enum VarInt {
@@ -41,14 +42,18 @@ ServerBoundPacketId :: enum VarInt {
     
     PluginMessage       = 0x02,
     ClientInformation   = 0x00,
+    AcknowledgeFinishConfiguration = 0x03,
 }
 
 ClientBoundPacket :: union #no_nil {
     StatusResponsePacket,
     PongResponsePacket,
+    
     LoginSuccessPacket,
-    DisconnectConfigurationPacket,
+    
     PluginMessagePacket,
+    DisconnectConfigurationPacket,
+    FinishConfigurationPacket,
 }
 
 ClientBoundPacketId :: enum VarInt {
@@ -66,8 +71,9 @@ ClientBoundPacketId :: enum VarInt {
     
     // sent in Configuration state
 
-    PluginMessage  = 0x01,
-    Disconnect     = 0x02,
+    PluginMessage       = 0x01,
+    Disconnect          = 0x02,
+    FinishConfiguration = 0x03,
 }
 
 get_clientbound_packet_id :: proc(packet: ClientBoundPacket) -> ClientBoundPacketId {
@@ -85,8 +91,9 @@ clientbound_packet_id_lookup := [intrinsics.type_union_variant_count(ClientBound
     VARIANT_IDX_OF(ClientBoundPacket, StatusResponsePacket)          = .StatusResponse,
     VARIANT_IDX_OF(ClientBoundPacket, PongResponsePacket)            = .PongResponse,
     VARIANT_IDX_OF(ClientBoundPacket, LoginSuccessPacket)            = .LoginSuccess,
-    VARIANT_IDX_OF(ClientBoundPacket, DisconnectConfigurationPacket) = .Disconnect,
     VARIANT_IDX_OF(ClientBoundPacket, PluginMessagePacket)           = .PluginMessage,
+    VARIANT_IDX_OF(ClientBoundPacket, DisconnectConfigurationPacket) = .Disconnect,
+    VARIANT_IDX_OF(ClientBoundPacket, FinishConfigurationPacket)     = .FinishConfiguration,
 }
 
 get_serverbound_packet_descriptor :: proc(packet: ServerBoundPacket) -> ServerBoundPacketDescriptor {
@@ -99,14 +106,15 @@ get_serverbound_packet_descriptor :: proc(packet: ServerBoundPacket) -> ServerBo
 serverbound_packet_descriptors := [intrinsics.type_union_variant_count(ServerBoundPacket)]ServerBoundPacketDescriptor {
     // TODO: is this packet allowed in multiple states?
     // TODO: make expected_client_state Maybe(ClientState) (this can be a constant since around 19/09 as Maybe has only one variant); wait for release dev-10
-    VARIANT_IDX_OF(ServerBoundPacket, LegacyServerListPingPacket) = { .Handshake },
-    VARIANT_IDX_OF(ServerBoundPacket, HandshakePacket)            = { .Handshake },
-    VARIANT_IDX_OF(ServerBoundPacket, StatusRequestPacket)        = { .Status },
-    VARIANT_IDX_OF(ServerBoundPacket, PingRequestPacket)          = { .Status },
-    VARIANT_IDX_OF(ServerBoundPacket, LoginStartPacket)           = { .Login },
-    VARIANT_IDX_OF(ServerBoundPacket, LoginAcknowledgedPacket)    = { .Login },
-    VARIANT_IDX_OF(ServerBoundPacket, PluginMessagePacket)        = { .Configuration },
-    VARIANT_IDX_OF(ServerBoundPacket, ClientInformationPacket)    = { .Configuration },
+    VARIANT_IDX_OF(ServerBoundPacket, LegacyServerListPingPacket)           = { .Handshake },
+    VARIANT_IDX_OF(ServerBoundPacket, HandshakePacket)                      = { .Handshake },
+    VARIANT_IDX_OF(ServerBoundPacket, StatusRequestPacket)                  = { .Status },
+    VARIANT_IDX_OF(ServerBoundPacket, PingRequestPacket)                    = { .Status },
+    VARIANT_IDX_OF(ServerBoundPacket, LoginStartPacket)                     = { .Login },
+    VARIANT_IDX_OF(ServerBoundPacket, LoginAcknowledgedPacket)              = { .Login },
+    VARIANT_IDX_OF(ServerBoundPacket, PluginMessagePacket)                  = { .Configuration },
+    VARIANT_IDX_OF(ServerBoundPacket, ClientInformationPacket)              = { .Configuration },
+    VARIANT_IDX_OF(ServerBoundPacket, AcknowledgeFinishConfigurationPacket) = { .Configuration },
 }
 
 ServerBoundPacketDescriptor :: struct {
@@ -206,6 +214,8 @@ ConnectionState :: enum VarInt {
     Transfer = 3,
 }
 
+AcknowledgeFinishConfigurationPacket :: struct {}
+
 // Namespaced location thing, in the form of `minecraft:thing`, when no namespace is provided, it defaults to `minecraft`.
 Identifier :: distinct string
 
@@ -232,6 +242,8 @@ LoginSuccessPacket :: distinct GameProfile
 DisconnectConfigurationPacket :: struct {
     reason: TextComponent,
 }
+
+FinishConfigurationPacket :: struct {}
 
 GameProfile :: struct {
     uuid: uuid.Identifier,

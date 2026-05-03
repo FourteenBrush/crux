@@ -54,7 +54,7 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
                 allow_server_listings = buf_unchecked_read_bool(b) or_return,
                 particle_status = buf_unchecked_read_var_int_enum(b, ParticleStatus) or_return,
             }, .None
-        case .Transfer:
+        case .Transfer, .Play:
             return {}, .InvalidData
         case: unreachable()
         }
@@ -62,7 +62,12 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
     case .PingRequest:
         payload := buf_read_long(b) or_return
         return PingRequestPacket { payload }, .None
-    case .LoginAcknowledged:
+    case .LoginAcknowledged: // shared with .AcknowledgeFinishConfiguration
+        #partial switch client_state {
+        case .Login: return LoginAcknowledgedPacket {}, .None
+        case .Configuration: return AcknowledgeFinishConfigurationPacket {}, .None
+        case: return {}, .InvalidData
+        }
         return LoginAcknowledgedPacket {}, .None
     case .PluginMessage:
         channel := buf_read_identifier(b, allocator) or_return
