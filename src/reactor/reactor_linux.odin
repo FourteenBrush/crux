@@ -204,16 +204,30 @@ _do_write :: proc(
     completions_out: []Completion,
     idx_ptr: ^int,
 ) {
-    write_queue := &ctx.pending_writes[socket]
-    if write_queue == nil || len(write_queue.iovecs) == 0 do return
+    wq := &ctx.pending_writes[socket]
+    if wq == nil || len(wq.iovecs) == 0 do return
     
-    iovecs := &write_queue.iovecs
-    // TODO: cap every sendmsg to sysconf(._IOV_MAX) (usually ~1024)
-    nwritten, send_err := linux.sendmsg(linux.Fd(socket), &linux.Msg_Hdr { iov = iovecs[:] }, {.NOSIGNAL})
+    // apply iovec head_off by mutating first one in iovec slice, then restore it after syscall
+    orig_vec: Maybe(linux.IO_Vec) = nil
+    if wq.head_off > 0 {
+        vec := &wq.iovecs[wq.head_idx]
+        orig_vec = vec^
+        vec.base = vec.base[wq.head_off:]
+        vec.len -= uint(wq.head_off)
+    }
+    
+    msg := linux.Msg_Hdr { iov = wq.iovecs[wq.head_idx:] }
+    // FIXME: cap every sendmsg to sysconf(._IOV_MAX) (usually ~1024)
+    nwritten, send_err := linux.sendmsg(linux.Fd(socket), &msg, {.NOSIGNAL})
+    
+    if orig_vec, ok := orig_vec.?; ok {
+        // restore mutated iovec so caller receives correct completion bufs
+        wq.iovecs[wq.head_idx] = orig_vec
+    }
 
     if send_err != .NONE {
         // pass allocated buffers back to caller
-        for vec in iovecs {
+        for vec in wq.iovecs {
             comp := Completion {
                 socket = socket,
                 operation = .Error,
@@ -226,7 +240,7 @@ _do_write :: proc(
         return
     }
     
-    _advance_write_queue(ctx, write_queue, socket, nwritten, completions_out, idx_ptr)
+    _advance_write_queue(ctx, wq, socket, nwritten, completions_out, idx_ptr)
 
     // TODO: remove EPOLLOUT on non partial write to not constantly receive EPOLLOUT notifications
     // when we have nothing to write
@@ -300,6 +314,7 @@ _emit_completion :: proc(
         idx_ptr^ += 1
     } else {
         context.allocator = ctx.allocator // in case queue lazily initializes itself
+        // TODO: make queue bounded
         queue.push_back(&ctx.completion_queue, comp)
     }
 }
