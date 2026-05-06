@@ -84,7 +84,7 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
 
         for comp in completions[:nready] {
             client_conn := &state.connections[comp.socket]
-            if client_conn == nil && comp.operation != .NewConnection && comp.operation != .PeerHangup || comp.operation == .Error {
+            if client_conn == nil && comp.operation != .NewConnection && comp.operation != .PeerHangup && comp.operation == .Error {
                 // stale completion arrived after a disconnect was issued (peer hangup confirmation, io completion
                 // that could not be canceled in time or an allocated written back passed back to deallocate)
                 continue
