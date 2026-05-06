@@ -249,13 +249,13 @@ _advance_write_queue :: proc(
     // every iovec corresponds to a write operation so send completions for all fully written ones
 
     remaining := nwritten // nr of bytes we should consider to either emit a completion for or handle a partial write
-    for nwritten > 0 && wq.head_idx < len(wq.iovecs) {
+    for remaining > 0 && wq.head_idx < len(wq.iovecs) {
         #no_bounds_check vec := &wq.iovecs[wq.head_idx]
         // how many bytes left in this iovec
         available := int(vec.len) - wq.head_off
         
         if remaining < available {
-            // last iovec, which happened to be partially written
+            // iovec, which happened to be partially written
             wq.head_off += remaining
             remaining = 0
             break
