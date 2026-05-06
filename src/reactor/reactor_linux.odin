@@ -221,6 +221,8 @@ _do_write :: proc(
             }
             _emit_completion(ctx, completions_out, idx_ptr, comp)
         }
+        // drop buffers to not resume on next EPOLLOUT
+        _reset_write_queue(wq)
         return
     }
     
@@ -273,10 +275,15 @@ _advance_write_queue :: proc(
     
     // queue fully drained
     if wq.head_idx >= len(wq.iovecs) {
-        resize(&wq.iovecs, 0)
-        wq.head_idx = 0
-        wq.head_off = 0
+        _reset_write_queue(wq)
     }
+}
+
+@(private="file")
+_reset_write_queue :: proc(wq: ^WriteQueue) {
+    resize(&wq.iovecs, 0)
+    wq.head_idx = 0
+    wq.head_off = 0
 }
 
 // Either stores a completion directly to an output buffer if not saturated,
