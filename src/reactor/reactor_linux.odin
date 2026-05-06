@@ -106,17 +106,17 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
     }
     
     events := make([]linux.EPoll_Event, len(completions_out) - nproduced, context.temp_allocator)
-    nready: i32
+    epoll_nready: i32
     errno: linux.Errno
     for {
         tracy.ZoneN("epoll_wait")
         // NOTE: timer resolution is already fine with CLOCK_MONOTONIC
-        nready, errno = linux.epoll_wait(ctx.epoll_fd, &events[0], i32(len(events)), i32(timeout_ms))
+        epoll_nready, errno = linux.epoll_wait(ctx.epoll_fd, &events[0], i32(len(events)), i32(timeout_ms))
         if errno != .EINTR do break
     }
     if errno != .NONE do return 0, false
 
-    for event in events[:nready] {
+    for event in events[:epoll_nready] {
         tracy.ZoneN("event io")
         socket := net.TCP_Socket(event.data.fd)
 
@@ -150,7 +150,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
             _emit_completion(ctx, completions_out, &nproduced, Completion { socket = socket, operation = .PeerHangup })
         }
     }
-    return int(nready), true
+    return nproduced, true
 }
 
 @(private="file", require_results)
