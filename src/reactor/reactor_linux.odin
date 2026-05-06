@@ -5,6 +5,7 @@ package reactor
 @(require) import "core:mem"
 @(require) import "base:runtime"
 @(require) import "core:sys/linux"
+@(require) import "core:container/queue"
 
 @(require) import "lib:tracy"
 
@@ -14,11 +15,28 @@ when !USE_IO_URING {
 _IOContext :: struct {
     epoll_fd: linux.Fd,
     server_sock: net.TCP_Socket,
-    // Allocator used to allocate recv buffers, the pending writes map and iovecs.
+    // Allocator used to allocate recv buffers, the pending writes map and slices of iovecs.
     allocator: mem.Allocator,
     
-    // Yet to be sent writes per client.
-    pending_writes: map[net.TCP_Socket][dynamic]linux.IO_Vec,
+    // Per socket queue of pending outbound writes, each entry inside the write queue represents a buffer
+    // previously submitted via `submit_write_copy`. Buffers remain owned by the caller until a corresponding
+    // `.Write` or `.Error` completion is emitted for every one of them.
+    pending_writes: map[net.TCP_Socket]WriteQueue,
+    // Internal completion queue used when the `completions_out` buffer passed to `await_io_completions`
+    // is saturated and we cannot reconstruct completion state from epoll alone.
+    // Also handles epoll event batching as one EPoll_Event may occasionaly produce more than one completion.
+    // NOTE: Lazily allocated.
+    completion_queue: queue.Queue(Completion),
+}
+
+// Client socket specific write queue, to handle partial write state correctly.
+@(private="file")
+WriteQueue :: struct {
+    iovecs: [dynamic]linux.IO_Vec,
+    // which iovec we are on
+    head_idx: int,
+    // offset inside current iovec
+    head_off: int,
 }
 
 @(private)
@@ -30,7 +48,7 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
     ctx.server_sock = server_sock
     // TODO: convert to pool based thing, together with reactor_windows
     ctx.allocator = _make_instrumented_alloc(runtime.heap_allocator(), meta_allocator=runtime.heap_allocator())
-    ctx.pending_writes = make(map[net.TCP_Socket][dynamic]linux.IO_Vec, ctx.allocator)
+    ctx.pending_writes = make(map[net.TCP_Socket]WriteQueue, ctx.allocator)
     
     // register server sock to detect inbound connections
     _register_client(&ctx, ctx.server_sock) or_return
@@ -65,7 +83,7 @@ _unregister_client :: proc(ctx: ^IOContext, conn: net.TCP_Socket) -> bool {
 
     ok := linux.epoll_ctl(ctx.epoll_fd, .DEL, linux.Fd(conn), nil) == .NONE
     _, pending_writes := delete_key(&ctx.pending_writes, conn)
-    delete(pending_writes)
+    delete(pending_writes.iovecs)
     net.close(conn)
     return ok
 }
@@ -74,8 +92,20 @@ _unregister_client :: proc(ctx: ^IOContext, conn: net.TCP_Socket) -> bool {
 @(private)
 _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, timeout_ms: int) -> (n: int, ok: bool) {
     tracy.Zone()
-    events := make([]linux.EPoll_Event, len(completions_out), context.temp_allocator)
     
+    // drain internal queue first
+    nproduced := 0
+    for ; nproduced < len(completions_out); nproduced += 1 {
+        comp := queue.pop_front_safe(&ctx.completion_queue) or_break
+        #no_bounds_check completions_out[nproduced] = comp
+    }
+    // if user buffer is full, return early
+    if nproduced == len(completions_out) {
+        tracy.Message("reactor_epoll internal completion queue saturates user buffer")
+        return nproduced, true
+    }
+    
+    events := make([]linux.EPoll_Event, len(completions_out) - nproduced, context.temp_allocator)
     nready: i32
     errno: linux.Errno
     for {
@@ -84,107 +114,187 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
         nready, errno = linux.epoll_wait(ctx.epoll_fd, &events[0], i32(len(events)), i32(timeout_ms))
         if errno != .EINTR do break
     }
-    if errno != .NONE do return
+    if errno != .NONE do return 0, false
 
-    i := 0
     for event in events[:nready] {
-        discard_entry := false
-        defer if discard_entry {
-            nready -= 1
-        } else {
-            i += 1
-        }
-        
-        #no_bounds_check comp := &completions_out[i]
-        comp.socket = net.TCP_Socket(event.data.fd)
+        tracy.ZoneN("event io")
+        socket := net.TCP_Socket(event.data.fd)
 
-        // TODO: how do we handle epoll event batching?
+        // batch order processing: ERR -> IN -> OUT -> HUP/RDHUP
         if .ERR in event.events {
-            comp.operation = .Error
+            _emit_completion(ctx, completions_out, &nproduced, Completion { socket = socket, operation = .Error })
             
             actual_err: linux.Errno
-            _, opt_err := linux.getsockopt_base(linux.Fd(comp.socket), int(linux.SOL_SOCKET), .ERROR, &actual_err)
+            _, opt_err := linux.getsockopt_base(linux.Fd(socket), int(linux.SOL_SOCKET), .ERROR, &actual_err)
             if opt_err == .NONE {
                 _log_error(actual_err, "failed to poll client socket")
             }
-        } else if .IN in event.events {
-            if comp.socket == ctx.server_sock {
-                // accept client
-                client_sock, _, accept_err := net.accept_tcp(ctx.server_sock, /*client options*/{ no_delay=true })
-                if accept_err != .None {
-                    discard_entry = true
-                    log.warn("failed to accept client:", accept_err)
-                    continue
-                }
-                defer if discard_entry {
-                    net.close(client_sock)
-                }
-
-                // configure client socket
-                discard_entry = true
-                net.set_blocking(client_sock, false) or_continue
-                _register_client(ctx, client_sock) or_continue
-                discard_entry = false
-                comp.operation = .NewConnection
-                comp.socket = client_sock
-                continue
-            }
-            
-            comp.operation = .Read
-            recv_buf := mem.alloc_bytes_non_zeroed(RECV_BUF_SIZE, align_of(u8), ctx.allocator) or_else panic("OOM")
-            n, recv_err := net.recv_tcp(comp.socket, recv_buf)
-            switch {
-            case n == 0:
-                comp.operation = .PeerHangup
-                delete(recv_buf, ctx.allocator)
-            case recv_err == net.TCP_Recv_Error.Would_Block:
-                delete(recv_buf, ctx.allocator)
-                discard_entry = true
-            case recv_err != .None:
-                comp.operation = .Error
-                delete(recv_buf, ctx.allocator)
-            case:
-                // successful read, recv buffer will be freed downstream
-                comp.buf = recv_buf[:n]
-            }
-        } else if .OUT in event.events {
-            pending_writes := &ctx.pending_writes[comp.socket]
-            if pending_writes == nil || len(pending_writes) == 0 {
-                discard_entry = true
-                continue
-            }
-            
-            // TODO: returning only first buf for now, would theoretically have to emit multiple .Write completions
-            assert(len(pending_writes) == 1, "TODO: handle writev multiple completions")
-            
-            // TODO: profile both
-            when true {
-                n, send_err := linux.sendmsg(linux.Fd(comp.socket), &linux.Msg_Hdr { iov = pending_writes[:] }, {.NOSIGNAL})
-            } else {
-                n, send_err := linux.writev(linux.Fd(comp.socket), pending_writes[:]) // missing NOSIGNAL flag
-            }
-            
-            comp.operation = .Write
-            // make downstream able to deallocate passed buffer
-            comp.buf = pending_writes[0].base[:pending_writes[0].len]
-
-            if send_err != .NONE {
-                comp.operation = .Error
-                continue
-            }
-
-            total_transfer_len: uint
-            for vec in pending_writes do total_transfer_len += vec.len
-            // TODO: handle partial writes with cursor, potentially merge IO_Vec slices?
-            assert(uint(n) == total_transfer_len, "TODO: handle partial writes")
-            resize(pending_writes, 0)
-        } else if .HUP in event.events || .RDHUP in event.events {
+            continue
+        }
+        
+        if .IN in event.events {
+            comp := socket == ctx.server_sock \
+                ? _do_accept(ctx) or_continue \
+                : _do_read(ctx, socket) or_continue
+                
+            _emit_completion(ctx, completions_out, &nproduced, comp)
+        }
+        if .OUT in event.events {
+            _do_write(ctx, socket, completions_out, &nproduced)
+        }
+        if .HUP in event.events || .RDHUP in event.events {
             // handle abrupt disconnection and read hangup the same way
-            comp.operation = .PeerHangup
-            net.close(comp.socket)
+            // TODO: let the caller handle this, as they may receive a batched read and a hup, with a socket
+            // that now ended up being closed...
+            net.close(socket)
+            _emit_completion(ctx, completions_out, &nproduced, Completion { socket = socket, operation = .PeerHangup })
         }
     }
     return int(nready), true
+}
+
+@(private="file", require_results)
+_do_accept :: proc(ctx: ^IOContext) -> (comp: Completion, emit: bool) {
+    client_sock, _, accept_err := net.accept_tcp(ctx.server_sock, /*client options*/{ no_delay=true })
+    if accept_err != .None {
+        log.warn("failed to accept client:", accept_err)
+        return comp, false
+    }
+    defer if !emit {
+        net.close(client_sock)
+    }
+
+    _ = net.set_blocking(client_sock, false)
+    _register_client(ctx, client_sock) or_return
+    comp.socket = client_sock
+    comp.operation = .NewConnection
+    return comp, true
+}
+
+@(private="file", require_results)
+_do_read :: proc(ctx: ^IOContext, socket: net.TCP_Socket) -> (comp: Completion, emit: bool) {
+    recv_buf := mem.alloc_bytes_non_zeroed(RECV_BUF_SIZE, align_of(u8), ctx.allocator) or_else panic("OOM")
+    nread, recv_err := linux.recv(linux.Fd(socket), recv_buf, {.NOSIGNAL})
+    if recv_err == .EAGAIN {
+        delete(recv_buf, ctx.allocator)
+        return comp, false
+    }
+    
+    comp.socket = socket
+    comp.operation = .Read
+    switch {
+    case recv_err != .NONE:
+        comp.operation = .Error
+        delete(recv_buf, ctx.allocator)
+    case nread == 0:
+        comp.operation = .PeerHangup
+        delete(recv_buf, ctx.allocator)
+    case:
+        // successful read, recv buffer will be freed by caller
+        comp.buf = recv_buf[:nread]
+    }
+    return comp, true
+}
+
+@(private="file")
+_do_write :: proc(
+    ctx: ^IOContext,
+    socket: net.TCP_Socket,
+    // params from _emit_completion()
+    completions_out: []Completion,
+    idx_ptr: ^int,
+) {
+    write_queue := &ctx.pending_writes[socket]
+    if write_queue == nil || len(write_queue.iovecs) == 0 do return
+    
+    iovecs := &write_queue.iovecs
+    // TODO: cap every sendmsg to sysconf(._IOV_MAX) (usually ~1024)
+    nwritten, send_err := linux.sendmsg(linux.Fd(socket), &linux.Msg_Hdr { iov = iovecs[:] }, {.NOSIGNAL})
+
+    if send_err != .NONE {
+        // pass allocated buffers back to caller
+        for vec in iovecs {
+            comp := Completion {
+                socket = socket,
+                operation = .Error,
+                buf = vec.base[:vec.len],
+            }
+            _emit_completion(ctx, completions_out, idx_ptr, comp)
+        }
+        return
+    }
+    
+    _advance_write_queue(ctx, write_queue, socket, nwritten, completions_out, idx_ptr)
+
+    // TODO: remove EPOLLOUT on non partial write to not constantly receive EPOLLOUT notifications
+    // when we have nothing to write
+}
+
+// Depending on `nwritten`, which is the result of a write call for the given write queue.
+// - Emits completions for every written iovec inside the queue
+// - Advances offsets to handle partial writes
+@(private="file")
+_advance_write_queue :: proc(
+    ctx: ^IOContext,
+    wq: ^WriteQueue,
+    socket: net.TCP_Socket,
+    nwritten: int,
+    // params from _emit_completion()
+    completions_out: []Completion,
+    idx_ptr: ^int,
+) {
+    // for partial writes: advance cursor and resume sending on the next EPOLLOUT.
+    // every iovec corresponds to a write operation so send completions for all fully written ones
+
+    remaining := nwritten // nr of bytes we should consider to either emit a completion for or handle a partial write
+    for nwritten > 0 && wq.head_idx < len(wq.iovecs) {
+        #no_bounds_check vec := &wq.iovecs[wq.head_idx]
+        // how many bytes left in this iovec
+        available := int(vec.len) - wq.head_off
+        
+        if remaining < available {
+            // last iovec, which happened to be partially written
+            wq.head_off += remaining
+            remaining = 0
+            break
+        }
+        
+        // fully consume iovec
+        remaining -= available
+        comp := Completion {
+            socket = socket,
+            operation = .Write,
+            buf = vec.base[:vec.len],
+        }
+        _emit_completion(ctx, completions_out, idx_ptr, comp)
+        wq.head_idx += 1
+        wq.head_off = 0
+    }
+    
+    // queue fully drained
+    if wq.head_idx >= len(wq.iovecs) {
+        resize(&wq.iovecs, 0)
+        wq.head_idx = 0
+        wq.head_off = 0
+    }
+}
+
+// Either stores a completion directly to an output buffer if not saturated,
+// otherwise queues it internally.
+@(private="file")
+_emit_completion :: proc(
+    ctx: ^IOContext,
+    completions_out: []Completion,
+    idx_ptr: ^int,
+    comp: Completion,
+) {
+    if idx_ptr^ < len(completions_out) {
+        #no_bounds_check completions_out[idx_ptr^] = comp
+        idx_ptr^ += 1
+    } else {
+        context.allocator = ctx.allocator // in case queue lazily initializes itself
+        queue.push_back(&ctx.completion_queue, comp)
+    }
 }
 
 @(private)
@@ -194,13 +304,13 @@ _release_recv_buf :: proc(ctx: ^IOContext, buf: []u8) {
 
 @(private)
 _submit_write_copy :: proc(ctx: ^IOContext, conn: net.TCP_Socket, data: []u8) -> bool {
-    _, pending_writes, inserted, _ := map_entry(&ctx.pending_writes, conn)
-    if inserted {
-        // zeroed out iovec darray is inserted, ensure using correct allocator
-        pending_writes.allocator = ctx.allocator
+    // TODO: rearm epoll_ctl with EPOLL_CTL_MOD to achieve EPOLLOUT notifications
+    _, write_queue, zeroed_insert, _ := map_entry(&ctx.pending_writes, conn)
+    if zeroed_insert {
+        write_queue.iovecs.allocator = ctx.allocator
     }
     
-    append(pending_writes, linux.IO_Vec { raw_data(data), len(data) })
+    append(&write_queue.iovecs, linux.IO_Vec { raw_data(data), len(data) })
     return true
 }
 

@@ -92,7 +92,7 @@ destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 // Unregisters a client from the IO context, after this call, the client will no longer produce new completions.
 // Any pending IO operations will be canceled, buf completions that were already
 // queued in the internal buffers before cancellation, may still be delivered.
-// As a result, some completions might still be delived after unregistering, even though
+// As a result, some completions might still be delivered after unregistering, even though
 // no new IO operations were issued. The application should safeguard against this behaviour.
 unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
     return _unregister_client(ctx, client)
@@ -106,7 +106,7 @@ await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, tim
     return _await_io_completions(ctx, completions_out, timeout_ms)
 }
 
-// Releases the ´buf´ of the given completion, must be called on completions of type ´.Read´ or `.PeerHangup` after
+// Releases the ´buf´ of the given completion, must be called on completions of type ´.Read´ after
 // the application processed the data, this data cannot be used afterwards.
 release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
     assert(comp.operation == .Read && comp.buf != nil)
