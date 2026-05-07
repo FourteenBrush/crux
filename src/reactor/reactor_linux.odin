@@ -144,9 +144,6 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
         }
         if .HUP in event.events || .RDHUP in event.events {
             // handle abrupt disconnection and read hangup the same way
-            // TODO: let the caller handle this, as they may receive a batched read and a hup, with a socket
-            // that now ended up being closed...
-            net.close(socket)
             _emit_completion(ctx, completions_out, &nproduced, Completion { socket = socket, operation = .PeerHangup })
         }
     }

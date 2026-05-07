@@ -55,8 +55,8 @@ Operation :: enum u8 {
     // This always indicates a successful read, an EOF condition is handled with `.PeerHangup` instead.
     Read,
     Write,
-    // Read hangup or abrupt disconnection, the associated socket in the completion has been closed and cannot be used for IO anymore.
-    // The application is responsable for unregistering the client if it has not done that already.
+    // Read hangup or abrupt disconnection, the caller is responsable for closing the associated socket
+    // and unregistering the client if it has not done that already (through `unregister_client`).
     PeerHangup,
     // Represents a newly accepted client socket, stored in `Completion.socket`. The socket is configured
     // to be non-blocking and is already registered in this subsystem.
@@ -90,10 +90,11 @@ destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 // FIXME: probably want to get rid of the returned bool on unregister_client
 
 // Unregisters a client from the IO context, after this call, the client will no longer produce new completions.
-// Any pending IO operations will be canceled, buf completions that were already
+// Any pending IO operations will be canceled, but completions that were already
 // queued in the internal buffers before cancellation, may still be delivered.
 // As a result, some completions might still be delivered after unregistering, even though
 // no new IO operations were issued. The application should safeguard against this behaviour.
+// The passed socket will be closed after this call completes.
 unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
     return _unregister_client(ctx, client)
 }
