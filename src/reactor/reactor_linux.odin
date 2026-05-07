@@ -226,7 +226,7 @@ _do_write :: proc(
 
     if send_err != .NONE {
         // pass allocated buffers back to caller
-        for vec in wq.iovecs {
+        for vec in wq.iovecs[wq.head_idx:] {
             comp := Completion {
                 socket = socket,
                 operation = .Error,
