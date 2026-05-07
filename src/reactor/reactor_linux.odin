@@ -174,7 +174,7 @@ _do_accept :: proc(ctx: ^IOContext) -> (comp: Completion, emit: bool) {
 _do_read :: proc(ctx: ^IOContext, socket: net.TCP_Socket) -> (comp: Completion, emit: bool) {
     recv_buf := mem.alloc_bytes_non_zeroed(RECV_BUF_SIZE, align_of(u8), ctx.allocator) or_else panic("OOM")
     nread, recv_err := linux.recv(linux.Fd(socket), recv_buf, {.NOSIGNAL})
-    if recv_err == .EAGAIN {
+    if recv_err == .EAGAIN || recv_err == .EWOULDBLOCK {
         delete(recv_buf, ctx.allocator)
         return comp, false
     }
@@ -224,6 +224,9 @@ _do_write :: proc(
         wq.iovecs[wq.head_idx] = orig_vec
     }
 
+    if send_err == .EAGAIN || send_err == .EWOULDBLOCK {
+        return
+    }
     if send_err != .NONE {
         // pass allocated buffers back to caller
         for vec in wq.iovecs[wq.head_idx:] {
