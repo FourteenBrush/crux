@@ -119,6 +119,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
     for event in events[:epoll_nready] {
         tracy.ZoneN("event io")
         socket := net.TCP_Socket(event.data.fd)
+        emitted_hangup := false
 
         // batch order processing: ERR -> IN -> OUT -> HUP/RDHUP
         if .ERR in event.events {
@@ -138,11 +139,12 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
                 : _do_read(ctx, socket) or_continue
                 
             _emit_completion(ctx, completions_out, &nproduced, comp)
+            emitted_hangup = comp.operation == .PeerHangup
         }
         if .OUT in event.events {
             _do_write(ctx, socket, completions_out, &nproduced)
         }
-        if .HUP in event.events || .RDHUP in event.events {
+        if !emitted_hangup && (.HUP in event.events || .RDHUP in event.events) {
             // handle abrupt disconnection and read hangup the same way
             _emit_completion(ctx, completions_out, &nproduced, Completion { socket = socket, operation = .PeerHangup })
         }
