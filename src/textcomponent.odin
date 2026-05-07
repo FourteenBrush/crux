@@ -1,5 +1,6 @@
 package crux
 
+import "core:mem"
 import "core:strconv"
 
 TextComponent :: union {
@@ -55,7 +56,7 @@ TextColor :: enum u32 {
 }
 
 @(private="file")
-text_color_to_string :: proc(color: TextColor, hex_buf: ^[7]u8) -> string {
+_text_color_to_string :: proc(color: TextColor, hex_buf: ^[7]u8) -> string {
     switch color {
     case .Black: return "black"
     case .DarkBlue: return "dark_blue"
@@ -81,46 +82,82 @@ text_color_to_string :: proc(color: TextColor, hex_buf: ^[7]u8) -> string {
     }
 }
 
-text_component :: proc(text: string, color: TextColor, features := TextFeatures{}) -> TextComponent {
+text_component :: proc{text_component_single, text_component_children}
+
+text_component_single :: proc(text: string, color: TextColor, features := TextFeatures{}) -> TextComponent {
     return StyledComponent { text = text, style = { color = color, features = features } }
 }
 
+text_component_children :: proc(
+    text: string,
+    color: TextColor,
+    features := TextFeatures{},
+    children: []TextComponent,
+    children_allocator: mem.Allocator,
+) -> TextComponent {
+    component := StyledComponent {
+        text = text,
+        style = TextStyle { color = color, features = features },
+    }
+    context.allocator = children_allocator
+    append(&component.children, ..children)
+    return component
+}
+
+@(require_results)
 serialize_text_component :: proc(buf: ^NetworkBuffer, comp: TextComponent) -> WriteError {
     writer := NBTWriter { buf = buf }
-    
+    return _serialize_text_component(&writer, comp, .Full)
+}
+
+@(private="file")
+EmitMode :: enum {
+    // Omit full tag and payload
+    Full,
+    // Omit tag, used when writing list elements, which do not carry a tag as it's encoded
+    // once in the list "header".
+    OmitTag,
+}
+
+@(private="file", require_results)
+_serialize_text_component :: proc(writer: ^NBTWriter, comp: TextComponent, mode: EmitMode) -> WriteError {
     switch comp in comp {
     case string:
-        nbt_write_string(&writer, comp) or_return
+        nbt_write_string(writer, comp) or_return
     case StyledComponent:
-        nbt_write_compound_start(&writer)
-        defer nbt_write_compound_end(&writer)
+        if mode == .Full {
+            nbt_write_compound_start(writer)
+        }
+        defer nbt_write_compound_end(writer)
         
-        nbt_write_named_string(&writer, "text", comp.text) or_return
+        nbt_write_named_string(writer, "text", comp.text) or_return
         if comp.style.color != {} {
             hex_buf: [7]u8
-            color := text_color_to_string(comp.style.color, &hex_buf)
-            nbt_write_named_string(&writer, "color", color) or_return
+            color := _text_color_to_string(comp.style.color, &hex_buf)
+            nbt_write_named_string(writer, "color", color) or_return
         }
         if .Bold in comp.style.features {
-            nbt_write_named_bool(&writer, "bold", true) or_return
+            nbt_write_named_bool(writer, "bold", true) or_return
         }
         if .Italic in comp.style.features {
-            nbt_write_named_bool(&writer, "italic", true) or_return
+            nbt_write_named_bool(writer, "italic", true) or_return
         }
         if .Underlined in comp.style.features {
-            nbt_write_named_bool(&writer, "underlined", true) or_return
+            nbt_write_named_bool(writer, "underlined", true) or_return
         }
         if .StrikeThrough in comp.style.features {
-            nbt_write_named_bool(&writer, "strikethrough", true) or_return
+            nbt_write_named_bool(writer, "strikethrough", true) or_return
         }
         if .Obfuscated in comp.style.features {
-            nbt_write_named_bool(&writer, "obfuscated", true) or_return
+            nbt_write_named_bool(writer, "obfuscated", true) or_return
         }
         
-        // buf_write_byte(&writer, u8(NBTTag.List))
-        // buf_write_u16(&writer, len("color"))
-        // buf_write_bytes(&writer, transmute([]u8)string("color"))
-        // buf_write_byte(&writer, u8(NBTTag.End))
+        if len(comp.children) > 0 {
+            nbt_write_named_list_start(writer, "extra", .Compound, len(comp.children)) or_return
+            for child in comp.children {
+                _serialize_text_component(writer, child, .OmitTag) or_return
+            }
+        }
     case TranslatableComponent:
         unimplemented()
     }

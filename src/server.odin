@@ -145,29 +145,30 @@ _setup_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator)
     return io_ctx, true
 }
 
-ClientConnection :: struct #packed {
+ClientConnection :: struct {
     // Non blocking socket
     socket: net.TCP_Socket,
     state: ClientState,
+    // Whether this connection needs to be closed after flushing all packets
+    // TODO: rename and document the exact purpose of this field.
+    close_after_flushing: bool,
     
     // Allocator to deal with all packet related allocations, overwriting itself
     // if there is too much backpressure.
     packet_scratch_alloc: mem.Allocator,
 
-    // Whether this connection needs to be closed after flushing all packets
-    // TODO: rename and document the exact purpose of this field.
-    close_after_flushing: bool,
     rx_buf: NetworkBuffer,
     tx_buf: NetworkBuffer,
 }
 
 // IMPORTANT NOTE: values must match respective values from HandshakeIntent to allow casting
-ClientState :: enum {
+ClientState :: enum u8 {
     Handshake,
     Status        = auto_cast HandshakeIntent.Status,
     Login         = auto_cast HandshakeIntent.Login,
     Transfer      = auto_cast HandshakeIntent.Transfer,
     Configuration,
+    Play,
 }
 #assert(int(ClientState.Login) <= int(max(HandshakeIntent)))
 

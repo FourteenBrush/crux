@@ -457,7 +457,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 		    partial_write := int(total_transfer) != len(op_data.write.buf)
 			transport_buf := op_data.write.buf
 			if partial_write {
-			    // ignore this entry, query another send with the remaining part of the buffer
+			    // ignore this entry, queue another send with the remaining part of the buffer
 				discard_entry = true
 
 				_initiate_send(ctx, emitter, transport_buf, partial_write_off=total_transfer) or_continue

@@ -2,7 +2,6 @@
 // IO on client sockets, (de)serialization and transmission of packets.
 package crux
 
-import "core:fmt"
 import "core:os"
 import "core:time"
 import "core:log"
@@ -85,9 +84,9 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
 
         for comp in completions[:nready] {
             client_conn := &state.connections[comp.socket]
-            if client_conn == nil && comp.operation != .NewConnection && comp.operation != .PeerHangup {
-                // stale completion arrived after a disconnect was issued (peer hangup confirmation or io completion
-                // that could not be canceled in time)
+            if client_conn == nil && comp.operation != .NewConnection && comp.operation != .PeerHangup && comp.operation == .Error {
+                // stale completion arrived after a disconnect was issued (peer hangup confirmation, io completion
+                // that could not be canceled in time or an allocated written back passed back to deallocate)
                 continue
             }
             tracy.ZoneN("ProcessCompletion")
@@ -99,7 +98,9 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
                 if comp.buf != nil {
                     delete(comp.buf, client_conn.packet_scratch_alloc)
                 }
-                _disconnect_client(&state, client_conn^)
+                if client_conn != nil {
+                    _disconnect_client(&state, client_conn^)
+                }
             case .PeerHangup:
                 log.debug("client socket hangup")
                 // client_conn is nil when we disconnected from the peer first, thus only serving as a confirmation
@@ -109,6 +110,7 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
             case .Read:
                 defer reactor.release_recv_buf(state.io_ctx, comp)
                 if client_conn.close_after_flushing {
+                    // TODO: we need closing logic here?
                     continue
                 }
                 buf_write_bytes(&client_conn.rx_buf, comp.buf) // copies
@@ -231,24 +233,29 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
     case LoginAcknowledgedPacket:
         client_conn.state = .Configuration
     case PluginMessagePacket:
-        kick_message := fmt.aprintf(
-            "You were kicked after sending packet %s %s", packet.channel, packet.payload,
-            allocator=client_conn.packet_scratch_alloc,
-        )
-        enqueue_packet(state.io_ctx, client_conn, DisconnectConfigurationPacket {
-            reason = text_component(kick_message, TextColor(0xffaacc), {.Underlined}),
-        })
-        client_conn.close_after_flushing = true
+        // _kick_client(state, client_conn)
     case ClientInformationPacket:
-        response := PluginMessagePacket {
+        // from here on, send server configuration until we reach a serverbound finish config ack
+        enqueue_packet(state.io_ctx, client_conn, PluginMessagePacket {
             channel = "minecraft:brand",
             // TODO: hand crafted for now, will we store the payload as a NetworkBuffer in the future?
             // payload for minecraft:brand is a length prefixed string
             payload = { len("crux"), 'c', 'r', 'u', 'x' },
-        }
-        
-        enqueue_packet(state.io_ctx, client_conn, response)
+        })
+        enqueue_packet(state.io_ctx, client_conn, FinishConfigurationPacket {})
+    case AcknowledgeFinishConfigurationPacket:
+        client_conn.state = .Play
     }
+}
+
+_kick_client :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection) {
+    enqueue_packet(state.io_ctx, client_conn, DisconnectConfigurationPacket {
+        reason = text_component("You were kicked", TextColor(0xffaacc), {.Underlined}, []TextComponent{
+            " ",
+            text_component("This works", .Aqua),
+        }, client_conn.packet_scratch_alloc),
+    })
+    client_conn.close_after_flushing = true
 }
 
 // Unregisters a client and shuts down the connection without transmitting any more data.
