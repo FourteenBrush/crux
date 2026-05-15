@@ -1,5 +1,6 @@
 package crux
 
+import "core:fmt"
 import "core:mem"
 
 // Correctness considerations:
@@ -89,7 +90,7 @@ nbt_write_named_compound_start :: proc(w: ^NBTWriter, name: string) -> WriteErro
 }
 
 nbt_write_compound_start :: proc(w: ^NBTWriter) {
-    _, requires_tag := _require_unnamed_ctx(w)
+    _, requires_tag := _require_unnamed_ctx(w, .Compound)
     _push_frame(w, ContainerFrame { kind = .Compound, list_elem_type = {} })
     if requires_tag {
         buf_write_byte(w, u8(NBTTag.Compound))
@@ -128,7 +129,7 @@ nbt_write_named_list_start :: proc(w: ^NBTWriter, name: string, elem_type: NBTTa
 }
 
 nbt_write_list_start :: proc(w: ^NBTWriter, elem_type: NBTTag, count: int) {
-    _, requires_tag := _require_unnamed_ctx(w)
+    _, requires_tag := _require_unnamed_ctx(w, .List)
     // Dont bother pushing bookkeeping frame when there are no elements which' write calls would advance the
     // list cursor and eventually pop the frame.
     if count > 0 {
@@ -158,7 +159,7 @@ nbt_write_named_string :: proc(w: ^NBTWriter, name: string, str: string) -> Writ
 
 @(require_results)
 nbt_write_string :: proc(w: ^NBTWriter, str: string) -> WriteError {
-    frame, requires_tag := _require_unnamed_ctx(w)
+    frame, requires_tag := _require_unnamed_ctx(w, .String)
     if len(str) > _MAX_STRING_LENGTH {
         return .StringTooLong
     } 
@@ -220,7 +221,7 @@ nbt_write_named_bool :: proc(w: ^NBTWriter, name: string, b: bool) -> WriteError
 }
 
 nbt_write_bool :: proc(w: ^NBTWriter, b: bool) {
-    frame, requires_tag := _require_unnamed_ctx(w)
+    frame, requires_tag := _require_unnamed_ctx(w, .Byte)
     if requires_tag {
         buf_write_byte(w, u8(NBTTag.Byte))
     }
@@ -247,14 +248,15 @@ _require_named_ctx :: proc(w: ^NBTWriter, loc := #caller_location) {
     )
 }
 
-// whether a name is required for the element payload currently being written
-// root compound -> no compound name required
-// list -> no name required
-// compound -> name required
-// whether is tag must be prepended in front of payloads (not required for list elements)
-
 @(private="file", require_results)
-_require_unnamed_ctx :: proc(w: ^NBTWriter, loc := #caller_location) -> (frame: ^UnnamedContainerFrame, requires_tag: bool) {
+_require_unnamed_ctx :: proc(
+    w: ^NBTWriter,
+    self_list_elem_type: NBTTag,
+    loc := #caller_location,
+) -> (
+    frame: ^UnnamedContainerFrame,
+    requires_tag: bool,
+) {
     if len(w.frame_stack) == 0 {
         return nil, true
     }
@@ -262,6 +264,12 @@ _require_unnamed_ctx :: proc(w: ^NBTWriter, loc := #caller_location) -> (frame: 
     assert(
         frame.kind == .List,
         "Incorrect nbt_write_* usage, attempted to write unnamed entry in a context requiring named entries",
+        loc=loc,
+    )
+    fmt.assertf(
+        frame.list_elem_type == self_list_elem_type,
+        "Incorrect nbt_write_* usage, list declares element type to be %s, but was trying to write %s",
+        frame.list_elem_type, self_list_elem_type,
         loc=loc,
     )
     // TODO: enforce list element type consistency
