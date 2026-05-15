@@ -329,7 +329,7 @@ insert_var_int_5bytes_negative :: proc(t: ^testing.T) {
     expect_buf_state(t, buf, length=5, raw_data=[]u8{ 0x80, 0x80, 0x80, 0x80, 0x08 })
 }
 
-@(private)
+@(private="file")
 expect_buf_state :: proc(
     t: ^testing.T,
     buf: crux.NetworkBuffer,
@@ -358,13 +358,13 @@ expect_buf_state :: proc(
     }
 }
 
-@(private)
+@(private="file")
 expect_read_result :: proc(t: ^testing.T, res: $R, err: crux.ReadError, expected_res: R, expected_err: crux.ReadError, loc:=#caller_location) {
     testing.expect_value(t, res, expected_res, loc=loc)
     testing.expect_value(t, err, expected_err, loc=loc)
 }
 
-@(private)
+@(private="file")
 expect_same_retrieval :: proc(t: ^testing.T, buf: ^crux.NetworkBuffer, data: ^[$S]u8) {
     using crux
     temp: [S]u8
@@ -373,12 +373,12 @@ expect_same_retrieval :: proc(t: ^testing.T, buf: ^crux.NetworkBuffer, data: ^[$
     testing.expectf(t, slice.equal(data[:], temp[:]), "expected data to be equal: %v and %v differ", data, temp[:])
 }
 
-@(private, deferred_out=crux.destroy_network_buf)
+@(private="file", deferred_out=crux.destroy_network_buf)
 scoped_create_network_buf :: proc(cap := 512) -> crux.NetworkBuffer {
     return crux.create_network_buf(cap=cap, allocator=context.allocator)
 }
 
-@(private)
+@(private="file")
 random_block :: proc($Size: int) -> (b: [Size]u8) {
     _ = rand.read(b[:])
     return

@@ -1,5 +1,6 @@
 package crux
 
+import "core:log"
 import "core:strings"
 import "core:encoding/uuid"
 import "core:fmt"
@@ -13,6 +14,7 @@ VarInt :: distinct i32le
 VarLong :: distinct i64le
 
 Long :: distinct i64be
+Int :: distinct i32be
 
 Utf16String :: distinct []u8
 
@@ -49,6 +51,7 @@ NetworkBuffer :: struct {
     r_offset: int,
 }
 
+// TODO: remove cap default value
 create_network_buf :: proc(cap := 512, allocator: mem.Allocator) -> (buf: NetworkBuffer) {
     assert(cap > 0)
     buf.data = make([dynamic]u8, 0, cap, allocator)
@@ -193,6 +196,8 @@ buf_write_var_int_at :: proc(buf: ^NetworkBuffer, mark: BufWriteMark, val: VarIn
     // |-----R-----M-----W-----|
     // (move data between mark and write offset to make VarInt fit)
     if wrapped {
+        log.fatal("yet to be implemented, length=", buf_length(buf^), "cap=", cap(buf.data),
+            "roff=", buf.r_offset, "mark=", mark)
         panic("yet to be implemented")
     } else {
         // W >= M for all cases
@@ -525,9 +530,32 @@ buf_copy_into :: proc(buf: ^NetworkBuffer, outb: []u8) -> ReadError #no_bounds_c
     return .None
 }
 
+buf_write_f64 :: proc(buf: ^NetworkBuffer, f: f64) {
+    f := f64be(f)
+    buf_write_bytes(buf, ([^]u8)(&f)[:8])
+}
+
+buf_write_f32 :: proc(buf: ^NetworkBuffer, f: f32) {
+    f := f32be(f)
+    bytes := ([^]u8)(&f)[:4]
+    buf_write_bytes(buf, bytes)
+}
+
+buf_write_u64 :: proc(buf: ^NetworkBuffer, u: u64) {
+    u := u64be(u)
+    bytes := ([^]u8)(&u)[:8]
+    buf_write_bytes(buf, bytes)
+}
+
 buf_write_u32 :: proc(buf: ^NetworkBuffer, u: u32) {
     u := u32be(u)
     bytes := ([^]u8)(&u)[:4]
+    buf_write_bytes(buf, bytes)
+}
+
+buf_write_i32 :: proc(buf: ^NetworkBuffer, i: i32) {
+    i := i32be(i)
+    bytes := ([^]u8)(&i)[:4]
     buf_write_bytes(buf, bytes)
 }
 

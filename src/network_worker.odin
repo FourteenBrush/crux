@@ -134,8 +134,8 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
 	                state  = .Handshake,
                     
                     packet_scratch_alloc = mem.scratch_allocator(packet_scratch),
-                    rx_buf = create_network_buf(allocator=os.heap_allocator()),
-                    tx_buf = create_network_buf(allocator=os.heap_allocator()),
+                    rx_buf = create_network_buf(1024, allocator=os.heap_allocator()),
+                    tx_buf = create_network_buf(1024, allocator=os.heap_allocator()),
                 }
 
                 log.debugf("client connected (fd %d)", comp.socket)
@@ -242,9 +242,38 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
             // payload for minecraft:brand is a length prefixed string
             payload = { len("crux"), 'c', 'r', 'u', 'x' },
         })
+        // TODO: send registries
+        enqueue_packet(state.io_ctx, client_conn, DimensionTypeRegistry {
+            entries = {
+                { id = Identifier("minecraft:overworld"), data = nil },
+            },
+        })
         enqueue_packet(state.io_ctx, client_conn, FinishConfigurationPacket {})
     case AcknowledgeFinishConfigurationPacket:
         client_conn.state = .Play
+        enqueue_packet(state.io_ctx, client_conn, LoginPacket {
+            entity_id = 1,
+            is_hardcore = false,
+            dimension_names = {Identifier("minecraft:overworld")},
+            max_players = 100,
+            view_distance = 8,
+            simulation_distance = 6,
+            reduced_debug_info = false,
+            enable_respawn_screen = true,
+            do_limited_crafting = true,
+            // TODO: send registry data packet for minecraft:dimension_type, with at least one entry
+            dimension_type = 0,
+            dimension_name = Identifier("minecraft:overworld"),
+            hashed_seed = 0x68162572, // random
+            gamemode = .Survival,
+            prev_gamemode = nil,
+            is_debug = false,
+            is_flat = false,
+            death_location = nil,
+            portal_cooldown = 40,
+            sea_level = 65,
+            enforces_secure_chat = false,
+        })
     }
 }
 

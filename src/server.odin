@@ -14,6 +14,8 @@ import "src:reactor"
 
 import "lib:tracy"
 
+PROTOCOL_VERSION :: ProtocolVersion.V1_20_2
+
 TARGET_TPS :: 20
 
 @(private="file")
