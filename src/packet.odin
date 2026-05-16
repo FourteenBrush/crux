@@ -20,6 +20,7 @@ ServerBoundPacket :: union #no_nil {
     // sent in .Configuration state
     PluginMessagePacket,
     ClientInformationPacket,
+    KnownPacksPacket,
     AcknowledgeFinishConfigurationPacket,
 }
 
@@ -42,6 +43,7 @@ ServerBoundPacketId :: enum VarInt {
     
     PluginMessage       = 0x02,
     ClientInformation   = 0x00,
+    KnownPacks          = 0x07,
     AcknowledgeFinishConfiguration = 0x03,
 }
 
@@ -53,6 +55,7 @@ ClientBoundPacket :: union #no_nil {
     
     PluginMessagePacket,
     DisconnectConfigurationPacket,
+    KnownPacksPacket,
     RegistryDataPacket,
     FinishConfigurationPacket,
 
@@ -69,13 +72,11 @@ ClientBoundPacketId :: enum VarInt {
     
     LoginSuccess   = 0x02,
     
-    // sent in Login state
-    
-    
     // sent in Configuration state
 
     PluginMessage       = 0x01,
     Disconnect          = 0x02,
+    KnownPacks          = 0x0e,
     RegistryData        = 0x07,
     FinishConfiguration = 0x03,
 
@@ -101,6 +102,7 @@ clientbound_packet_id_lookup := [intrinsics.type_union_variant_count(ClientBound
     VARIANT_IDX_OF(ClientBoundPacket, LoginSuccessPacket)            = .LoginSuccess,
     VARIANT_IDX_OF(ClientBoundPacket, PluginMessagePacket)           = .PluginMessage,
     VARIANT_IDX_OF(ClientBoundPacket, DisconnectConfigurationPacket) = .Disconnect,
+    VARIANT_IDX_OF(ClientBoundPacket, KnownPacksPacket)              = .KnownPacks,
     VARIANT_IDX_OF(ClientBoundPacket, RegistryDataPacket)            = .RegistryData,
     VARIANT_IDX_OF(ClientBoundPacket, FinishConfigurationPacket)     = .FinishConfiguration,
     VARIANT_IDX_OF(ClientBoundPacket, LoginPacket)                   = .Login,
@@ -124,6 +126,7 @@ serverbound_packet_descriptors := [intrinsics.type_union_variant_count(ServerBou
     VARIANT_IDX_OF(ServerBoundPacket, LoginAcknowledgedPacket)              = { .Login },
     VARIANT_IDX_OF(ServerBoundPacket, PluginMessagePacket)                  = { .Configuration },
     VARIANT_IDX_OF(ServerBoundPacket, ClientInformationPacket)              = { .Configuration },
+    VARIANT_IDX_OF(ServerBoundPacket, KnownPacksPacket)                     = { .Configuration },
     VARIANT_IDX_OF(ServerBoundPacket, AcknowledgeFinishConfigurationPacket) = { .Configuration },
 }
 
@@ -242,6 +245,16 @@ ConnectionState :: enum VarInt {
     Transfer = 3,
 }
 
+KnownPacksPacket :: struct {
+    known_packs: []KnownPack,
+}
+
+KnownPack :: struct {
+    namespace: string,
+    id: string,
+    version: string,
+}
+
 AcknowledgeFinishConfigurationPacket :: struct {}
 
 // Namespaced location thing, in the form of `minecraft:thing`, when no namespace is provided, it defaults to `minecraft`.
@@ -273,7 +286,27 @@ DisconnectConfigurationPacket :: struct {
 
 RegistryDataPacket :: union #no_nil {
     DimensionTypeRegistry,
-    DamageTypeRegistry,
+    CatVariantRegistry,
+    ChickenVariantRegistry,
+    CowVariantRegistry,
+    FrogVariantRegistry,
+    PigVariantRegistry,
+    WolfVariantRegistry,
+    WolfSoundVariantRegistry,
+    PaintingVariantRegistry,
+}
+
+PaintingVariantRegistry :: Registry(PaintingVariant)
+PaintingVariant :: struct {
+    asset_id: Identifier,
+    width: u8,
+    height: u8,
+    title: TextComponent,
+    author: TextComponent,
+}
+
+Registry :: struct($E: typeid) {
+    entries: []RegistryEntry(E),
 }
 
 RegistryEntry :: struct($E: typeid) {
@@ -281,13 +314,7 @@ RegistryEntry :: struct($E: typeid) {
     data: Maybe(E),
 }
 
-DimensionTypeRegistry :: struct {
-    entries: []RegistryEntry(DimensionType),
-}
-
-DamageTypeRegistry :: struct {
-    
-}
+DimensionTypeRegistry :: Registry(DimensionType)
 
 DimensionType :: struct {
     has_skylight: bool,
@@ -353,6 +380,88 @@ BlockTag :: distinct string
 
 // By default, there are two world clocks, named `minecraft:overworld` and `minecraft:the_end`
 WorldClock :: distinct string
+
+CatVariantRegistry :: Registry(CatVariant)
+CatVariant :: struct {
+    using _: MobVariantBase,
+    baby_asset_id: Identifier,
+}
+
+ChickenVariantRegistry :: Registry(ChickenVariant)
+ChickenVariant :: struct {
+    using _: MobVariantBase,
+    baby_asset_id: Identifier,
+    model: enum { Normal = 0, Cold },
+}
+
+CowVariantRegistry :: Registry(CowVariant)
+CowVariant :: struct {
+    using _: MobVariantBase,
+    baby_asset_id: Identifier,
+    model: enum { Normal = 0, Cold, Warm },
+}
+
+FrogVariantRegistry :: Registry(FrogVariant)
+FrogVariant :: MobVariantBase
+
+PigVariantRegistry :: Registry(PigVariant)
+PigVariant :: struct {
+    using _: MobVariantBase,
+    baby_asset_id: Identifier,
+    model: enum { Normal = 0, Cold },
+}
+
+WolfVariantRegistry :: Registry(WolfVariant)
+WolfVariant :: struct {
+    assets, baby_assets: struct {
+        angry: Identifier,
+        wild: Identifier,
+        tame: Identifier,
+    },
+}
+
+WolfSoundVariantRegistry :: Registry(WolfSoundVariant)
+WolfSoundVariant :: struct {
+    // FIXME: should actually be sound events (identifier or {sound_id, range:F})
+    adult_sounds, baby_sounds: struct {
+        ambient_sound: Identifier,
+        death_sound: Identifier,
+        growl_sound: Identifier,
+        hurt_sound: Identifier,
+        pant_sound: Identifier,
+        whine_sound: Identifier,
+    },
+}
+
+MobVariantBase :: struct {
+    asset_id: Identifier,
+    spawn_conditions: []SpawnCondition,
+}
+
+SpawnCondition :: struct {
+    priority: i32,
+    condition: Maybe(SpawnConditionMatch),
+}
+
+SpawnConditionMatch :: union {
+    SpawnConditionBiomeMatch,
+    SpawnConditionStructureMatch,
+    SpawnConditionMoonBrightnessMatch,
+}
+
+SpawnConditionBiomeMatch :: struct {
+    biomes: []Identifier,
+}
+
+SpawnConditionStructureMatch :: struct {
+    structures: []Identifier,
+}
+
+SpawnConditionMoonBrightnessMatch :: struct {
+    // Both fields may have the same value in order to specify a single brightness value.
+    min: f32,
+    max: f32,
+}
 
 FinishConfigurationPacket :: struct {}
 

@@ -74,6 +74,15 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
         payload, _ := mem.alloc_bytes_non_zeroed(int(length) - buf_bytes_consumed_since(b^, start_off), allocator=allocator)
         buf_read_bytes(b, payload[:]) or_return
         return PluginMessagePacket { channel=channel, payload=payload }, .None
+    case .KnownPacks:
+        count := buf_read_var_int(b) or_return
+        known_packs := make([]KnownPack, count, allocator)
+        for &pack in known_packs {
+            pack.namespace = buf_read_string(b, 32767, allocator) or_return
+            pack.id = buf_read_string(b, 32767, allocator) or_return
+            pack.version = buf_read_string(b, 32767, allocator) or_return
+        }
+        return KnownPacksPacket { known_packs }, .None
     case:
         log.warn("unhandled packet id:", ServerBoundPacketId(id), "kicking with .InvalidData")
         return p, .InvalidData

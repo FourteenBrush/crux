@@ -82,10 +82,9 @@ nbt_write_named_compound_start :: proc(w: ^NBTWriter, name: string) -> WriteErro
     }
     _push_frame(w, ContainerFrame { kind = .Compound })
     buf_write_byte(w, u8(NBTTag.Compound))
-    // TODO: ensure correctness
-    // if !w.network_nbt {
+    if !w.exclude_root_compound_name {
         _write_field_name(w, name)
-    // }
+    }
     return .None
 }
 
@@ -144,7 +143,7 @@ nbt_write_list_start :: proc(w: ^NBTWriter, elem_type: NBTTag, count: int) {
 }
 
 @(require_results)
-nbt_write_named_string :: proc(w: ^NBTWriter, name: string, str: string) -> WriteError {
+nbt_write_named_string :: proc(w: ^NBTWriter, name: string, str: $S/string) -> WriteError {
     _require_named_ctx(w)
     if len(name) > _MAX_STRING_LENGTH || len(str) > _MAX_STRING_LENGTH {
         return .StringTooLong
@@ -158,7 +157,7 @@ nbt_write_named_string :: proc(w: ^NBTWriter, name: string, str: string) -> Writ
 }
 
 @(require_results)
-nbt_write_string :: proc(w: ^NBTWriter, str: string) -> WriteError {
+nbt_write_string :: proc(w: ^NBTWriter, str: $S/string) -> WriteError {
     frame, requires_tag := _require_unnamed_ctx(w, .String)
     if len(str) > _MAX_STRING_LENGTH {
         return .StringTooLong
@@ -272,7 +271,6 @@ _require_unnamed_ctx :: proc(
         frame.list_elem_type, self_list_elem_type,
         loc=loc,
     )
-    // TODO: enforce list element type consistency
     return frame, false
 }
 

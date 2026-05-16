@@ -134,8 +134,8 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
 	                state  = .Handshake,
                     
                     packet_scratch_alloc = mem.scratch_allocator(packet_scratch),
-                    rx_buf = create_network_buf(1024, allocator=os.heap_allocator()),
-                    tx_buf = create_network_buf(1024, allocator=os.heap_allocator()),
+                    rx_buf = create_network_buf(10240, allocator=os.heap_allocator()),
+                    tx_buf = create_network_buf(10240, allocator=os.heap_allocator()),
                 }
 
                 log.debugf("client connected (fd %d)", comp.socket)
@@ -173,7 +173,7 @@ _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^Cli
                 break loop
             }
 
-            _handle_packet(state, packet, client_conn)
+            _handle_clientbound_packet(state, packet, client_conn)
             success := chan.try_send(state.packet_bridge, packet)
             if !success {
                 // TODO: do we even need a channel, what about a futex/atomic mutex and a darray?
@@ -184,7 +184,7 @@ _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^Cli
     }
 }
 
-_handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, client_conn: ^ClientConnection) {
+_handle_clientbound_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, client_conn: ^ClientConnection) {
     log.log(LOG_LEVEL_INBOUND, "Received Packet", packet)
 
     switch packet in packet {
@@ -195,7 +195,6 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
         _disconnect_client(state, client_conn^)
         return
 
-    // TODO: move to main thread
     case StatusRequestPacket:
         status_response := StatusResponsePacket {
             version = {
@@ -213,9 +212,7 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
         }
         enqueue_packet(state.io_ctx, client_conn, status_response)
     case PingRequestPacket:
-        response := PongResponsePacket {
-            payload = packet.payload,
-        }
+        response := PongResponsePacket { payload = packet.payload }
         enqueue_packet(state.io_ctx, client_conn, response)
         client_conn.close_after_flushing = true
     case LoginStartPacket:
@@ -233,7 +230,7 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
     case LoginAcknowledgedPacket:
         client_conn.state = .Configuration
     case PluginMessagePacket:
-        // _kick_client(state, client_conn)
+        // empty
     case ClientInformationPacket:
         // from here on, send server configuration until we reach a serverbound finish config ack
         enqueue_packet(state.io_ctx, client_conn, PluginMessagePacket {
@@ -242,17 +239,30 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
             // payload for minecraft:brand is a length prefixed string
             payload = { len("crux"), 'c', 'r', 'u', 'x' },
         })
-        // TODO: send registries
-        enqueue_packet(state.io_ctx, client_conn, DimensionTypeRegistry {
-            entries = {
-                { id = Identifier("minecraft:overworld"), data = nil },
+        enqueue_packet(state.io_ctx, client_conn, KnownPacksPacket {
+            known_packs = {
+                { namespace = "minecraft", id = "core", version = "1.21.8" },
             },
         })
+    case KnownPacksPacket:
+        ensure_has_core: for pack, i in packet.known_packs {
+            if pack.namespace != "minecraft" && pack.id != "core" {
+                if i == len(packet.known_packs) - 1 {
+                    kick_reason := text_component("No mutual minecraft:core known packs", TextColor(0xffaacc), {.Bold})
+                    _kick_client(state, client_conn, kick_reason)
+                    break ensure_has_core
+                }
+            }
+        }
+        
+        // TODO: send remaining registries with nil data if known pack minecraft:core is present
+        _send_registry_packets(state.io_ctx, client_conn)
+        
         enqueue_packet(state.io_ctx, client_conn, FinishConfigurationPacket {})
     case AcknowledgeFinishConfigurationPacket:
         client_conn.state = .Play
         enqueue_packet(state.io_ctx, client_conn, LoginPacket {
-            entity_id = 1,
+            entity_id = 2,
             is_hardcore = false,
             dimension_names = {Identifier("minecraft:overworld")},
             max_players = 100,
@@ -261,10 +271,9 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
             reduced_debug_info = false,
             enable_respawn_screen = true,
             do_limited_crafting = true,
-            // TODO: send registry data packet for minecraft:dimension_type, with at least one entry
             dimension_type = 0,
             dimension_name = Identifier("minecraft:overworld"),
-            hashed_seed = 0x68162572, // random
+            hashed_seed = 0x6816257285065639, // random
             gamemode = .Survival,
             prev_gamemode = nil,
             is_debug = false,
@@ -277,13 +286,138 @@ _handle_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, cl
     }
 }
 
-_kick_client :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection) {
-    enqueue_packet(state.io_ctx, client_conn, DisconnectConfigurationPacket {
-        reason = text_component("You were kicked", TextColor(0xffaacc), {.Underlined}, []TextComponent{
-            " ",
-            text_component("This works", .Aqua),
-        }, client_conn.packet_scratch_alloc),
+@(private="file")
+_send_registry_packets :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnection) {
+    enqueue_packet(io_ctx, client_conn, DimensionTypeRegistry {
+        entries = {
+            0 = { id = Identifier("minecraft:overworld"), data = nil },
+        },
     })
+    enqueue_packet(io_ctx, client_conn, CatVariantRegistry {
+        entries = {
+            { id = Identifier("minecraft:tabby"), data = nil },
+            { id = Identifier("minecraft:black"), data = nil },
+            { id = Identifier("minecraft:red"), data = nil },
+            { id = Identifier("minecraft:siamese"), data = nil },
+            { id = Identifier("minecraft:british_shorthair"), data = nil },
+            { id = Identifier("minecraft:calico"), data = nil },
+            { id = Identifier("minecraft:persian"), data = nil },
+            { id = Identifier("minecraft:ragdoll"), data = nil },
+            { id = Identifier("minecraft:white"), data = nil },
+            { id = Identifier("minecraft:jellie"), data = nil },
+        },
+    })
+    enqueue_packet(io_ctx, client_conn, ChickenVariantRegistry {
+        entries = {
+            { id = Identifier("minecraft:cold"), data = nil },
+            { id = Identifier("minecraft:temperate"), data = nil },
+            { id = Identifier("minecraft:warm"), data = nil },
+        },
+    })
+    enqueue_packet(io_ctx, client_conn, CowVariantRegistry {
+        entries = {
+            { id = Identifier("minecraft:cold"), data = nil },
+            { id = Identifier("minecraft:temperate"), data = nil },
+            { id = Identifier("minecraft:warm"), data = nil },
+        },
+    })
+    enqueue_packet(io_ctx, client_conn, FrogVariantRegistry {
+        entries = {
+            { id = Identifier("minecraft:cold"), data = nil },
+            { id = Identifier("minecraft:temperate"), data = nil },
+            { id = Identifier("minecraft:warm"), data = nil },
+        },
+    })
+    enqueue_packet(io_ctx, client_conn, PigVariantRegistry {
+        entries = {
+            { id = Identifier("minecraft:cold"), data = nil },
+            { id = Identifier("minecraft:temperate"), data = nil },
+            { id = Identifier("minecraft:warm"), data = nil },
+        },
+    })
+    enqueue_packet(io_ctx, client_conn, WolfVariantRegistry {
+        entries = {
+            { id = Identifier("minecraft:ashen"), data = nil },
+            { id = Identifier("minecraft:black"), data = nil },
+            { id = Identifier("minecraft:chestnut"), data = nil },
+            { id = Identifier("minecraft:pale"), data = nil },
+            { id = Identifier("minecraft:rusty"), data = nil },
+            { id = Identifier("minecraft:snowy"), data = nil },
+            { id = Identifier("minecraft:spotted"), data = nil },
+            { id = Identifier("minecraft:striped"), data = nil },
+            { id = Identifier("minecraft:woods"), data = nil },
+        },
+    })
+    enqueue_packet(io_ctx, client_conn, WolfSoundVariantRegistry {
+        entries = {
+            { id = Identifier("minecraft:angry"), data = nil },
+            { id = Identifier("minecraft:big"), data = nil },
+            { id = Identifier("minecraft:classic"), data = nil },
+            { id = Identifier("minecraft:cute"), data = nil },
+            { id = Identifier("minecraft:grumpy"), data = nil },
+            { id = Identifier("minecraft:puglin"), data = nil },
+            { id = Identifier("minecraft:sad"), data = nil },
+        },
+    })
+    enqueue_packet(io_ctx, client_conn, PaintingVariantRegistry {
+        entries = {
+            { id = Identifier("minecraft:alban"), data = nil },
+            { id = Identifier("minecraft:aztec"), data = nil },
+            { id = Identifier("minecraft:aztec2"), data = nil },
+            { id = Identifier("minecraft:backyard"), data = nil },
+            { id = Identifier("minecraft:baroque"), data = nil },
+            { id = Identifier("minecraft:bomb"), data = nil },
+            { id = Identifier("minecraft:bouquet"), data = nil },
+            { id = Identifier("minecraft:burning_skull"), data = nil },
+            { id = Identifier("minecraft:bust"), data = nil },
+            { id = Identifier("minecraft:cavebird"), data = nil },
+            { id = Identifier("minecraft:changing"), data = nil },
+            { id = Identifier("minecraft:cotan"), data = nil },
+            { id = Identifier("minecraft:courbet"), data = nil },
+            { id = Identifier("minecraft:creebet"), data = nil },
+            { id = Identifier("minecraft:dennis"), data = nil },
+            { id = Identifier("minecraft:donkey_kong"), data = nil },
+            { id = Identifier("minecraft:earth"), data = nil },
+            { id = Identifier("minecraft:fern"), data = nil },
+            { id = Identifier("minecraft:fighters"), data = nil },
+            { id = Identifier("minecraft:finding"), data = nil },
+            { id = Identifier("minecraft:fire"), data = nil },
+            { id = Identifier("minecraft:graham"), data = nil },
+            { id = Identifier("minecraft:humble"), data = nil },
+            { id = Identifier("minecraft:kebab"), data = nil },
+            { id = Identifier("minecraft:lowmist"), data = nil },
+            { id = Identifier("minecraft:match"), data = nil },
+            { id = Identifier("minecraft:meditative"), data = nil },
+            { id = Identifier("minecraft:orb"), data = nil },
+            { id = Identifier("minecraft:owlemons"), data = nil },
+            { id = Identifier("minecraft:passage"), data = nil },
+            { id = Identifier("minecraft:pigscene"), data = nil },
+            { id = Identifier("minecraft:plant"), data = nil },
+            { id = Identifier("minecraft:pointer"), data = nil },
+            { id = Identifier("minecraft:pond"), data = nil },
+            { id = Identifier("minecraft:pool"), data = nil },
+            { id = Identifier("minecraft:prairie_ride"), data = nil },
+            { id = Identifier("minecraft:sea"), data = nil },
+            { id = Identifier("minecraft:skeleton"), data = nil },
+            { id = Identifier("minecraft:skull_and_roses"), data = nil },
+            { id = Identifier("minecraft:stage"), data = nil },
+            { id = Identifier("minecraft:sunflowers"), data = nil },
+            { id = Identifier("minecraft:sunset"), data = nil },
+            { id = Identifier("minecraft:tides"), data = nil },
+            { id = Identifier("minecraft:unpacked"), data = nil },
+            { id = Identifier("minecraft:void"), data = nil },
+            { id = Identifier("minecraft:wanderer"), data = nil },
+            { id = Identifier("minecraft:wasteland"), data = nil },
+            { id = Identifier("minecraft:water"), data = nil },
+            { id = Identifier("minecraft:wind"), data = nil },
+            { id = Identifier("minecraft:wither"), data = nil },
+        },
+    })
+}
+
+_kick_client :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection, reason: TextComponent) {
+    assert(client_conn.state == .Configuration, "TODO: handle respective kick packets for other states")
+    enqueue_packet(state.io_ctx, client_conn, DisconnectConfigurationPacket { reason = reason })
     client_conn.close_after_flushing = true
 }
 
