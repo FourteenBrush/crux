@@ -107,55 +107,40 @@ text_component_children :: proc(
 @(require_results)
 serialize_text_component :: proc(buf: ^NetworkBuffer, comp: TextComponent) -> WriteError {
     writer := create_nbt_writer(buf, context.temp_allocator, network_nbt=true)
-    return _serialize_text_component(&writer, comp, .Full)
-}
-
-@(private="file")
-EmitMode :: enum {
-    // Omit full tag and payload
-    Full,
-    // Omit tag, used when writing list elements, which do not carry a tag as it's encoded
-    // once in the list "header".
-    OmitTag,
-}
-
-@(private="file", require_results)
-_serialize_text_component :: proc(writer: ^NBTWriter, comp: TextComponent, mode: EmitMode) -> WriteError {
+    
     switch comp in comp {
     case string:
-        nbt_write_string(writer, comp) or_return
+        nbt_write_string(&writer, comp) or_return
     case StyledComponent:
-        if mode == .Full {
-            nbt_write_compound_start(writer)
-        }
-        defer nbt_write_compound_end(writer)
+        nbt_write_compound_start(&writer)
+        defer nbt_write_compound_end(&writer)
         
-        nbt_write_named_string(writer, "text", comp.text) or_return
+        nbt_write_named_string(&writer, "text", comp.text) or_return
         if comp.style.color != {} {
             hex_buf: [7]u8
             color := _text_color_to_string(comp.style.color, &hex_buf)
-            nbt_write_named_string(writer, "color", color) or_return
+            nbt_write_named_string(&writer, "color", color) or_return
         }
         if .Bold in comp.style.features {
-            nbt_write_named_bool(writer, "bold", true) or_return
+            nbt_write_named_bool(&writer, "bold", true) or_return
         }
         if .Italic in comp.style.features {
-            nbt_write_named_bool(writer, "italic", true) or_return
+            nbt_write_named_bool(&writer, "italic", true) or_return
         }
         if .Underlined in comp.style.features {
-            nbt_write_named_bool(writer, "underlined", true) or_return
+            nbt_write_named_bool(&writer, "underlined", true) or_return
         }
         if .StrikeThrough in comp.style.features {
-            nbt_write_named_bool(writer, "strikethrough", true) or_return
+            nbt_write_named_bool(&writer, "strikethrough", true) or_return
         }
         if .Obfuscated in comp.style.features {
-            nbt_write_named_bool(writer, "obfuscated", true) or_return
+            nbt_write_named_bool(&writer, "obfuscated", true) or_return
         }
         
         if len(comp.children) > 0 {
-            nbt_write_named_list_start(writer, "extra", .Compound, len(comp.children)) or_return
+            nbt_write_named_list_start(&writer, "extra", .Compound, len(comp.children)) or_return
             for child in comp.children {
-                _serialize_text_component(writer, child, .OmitTag) or_return
+                serialize_text_component(&writer, child) or_return
             }
         }
     case TranslatableComponent:
