@@ -198,8 +198,8 @@ _handle_clientbound_packet :: proc(state: ^NetworkWorkerState, packet: ServerBou
     case StatusRequestPacket:
         status_response := StatusResponsePacket {
             version = {
-                name = "1.21.8",
-                protocol = .V1_21_8,
+                name = "1.21.10",
+                protocol = .V1_21_10,
             },
             players = {
                 max = 100,
@@ -241,7 +241,7 @@ _handle_clientbound_packet :: proc(state: ^NetworkWorkerState, packet: ServerBou
         })
         enqueue_packet(state.io_ctx, client_conn, KnownPacksPacket {
             known_packs = {
-                { namespace = "minecraft", id = "core", version = "1.21.8" },
+                { namespace = "minecraft", id = "core", version = "1.21.10" },
             },
         })
     case KnownPacksPacket:
@@ -411,6 +411,12 @@ _send_registry_packets :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientC
             { id = Identifier("minecraft:water"), data = nil },
             { id = Identifier("minecraft:wind"), data = nil },
             { id = Identifier("minecraft:wither"), data = nil },
+        },
+    })
+    // a minecraft:plains biome is required as default biome before a login packet will be accepted
+    enqueue_packet(io_ctx, client_conn, BiomeRegistry {
+        entries = {
+            { id = Identifier("minecraft:plains"), data = nil },
         },
     })
 }
