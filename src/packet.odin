@@ -294,6 +294,8 @@ RegistryDataPacket :: union #no_nil {
     WolfVariantRegistry,
     WolfSoundVariantRegistry,
     PaintingVariantRegistry,
+    DamageTypeRegistry,
+    BiomeRegistry,
 }
 
 PaintingVariantRegistry :: Registry(PaintingVariant)
@@ -315,7 +317,6 @@ RegistryEntry :: struct($E: typeid) {
 }
 
 DimensionTypeRegistry :: Registry(DimensionType)
-
 DimensionType :: struct {
     has_skylight: bool,
     has_ceiling: bool,
@@ -462,6 +463,38 @@ SpawnConditionMoonBrightnessMatch :: struct {
     min: f32,
     max: f32,
 }
+
+DamageTypeRegistry :: Registry(DamageType)
+DamageType :: struct {
+    message_id: Identifier,
+    exhaustion: f32,
+    scaling: enum { Never, Always, WhenCausedByLivingNonPlayer },
+    effects: enum { Hurt = 0, Thorns, Drowning, Burning, Poking, Freezing },
+    death_message_type: enum { Default = 0, FallVariants, IntentionalGameDesign },
+}
+
+BiomeRegistry :: Registry(Biome)
+Biome :: struct {
+    has_precipitation: bool,
+    temperature: f32,
+    temperature_modifier: enum { None = 0, Frozen },
+    downfall: f32,
+    effects: struct {
+        water_color: i32,
+        foliage_color: i32,
+        dry_foliage_color: i32,
+        grass_color: Maybe(i32),
+        grass_color_modifier: enum { None = 0, DarkForest, Swamp },
+    },
+    // TODO: map[string] for environment attributes (optional)
+    carvers: []Identifier,
+    features: []Tag,
+    creature_spawn_probability: Maybe(f32),
+    // spawners: 
+}
+
+// Tag starting with #
+Tag :: distinct string
 
 FinishConfigurationPacket :: struct {}
 

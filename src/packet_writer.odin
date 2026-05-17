@@ -96,6 +96,10 @@ _serialize_clientbound :: proc(packet: ClientBoundPacket, outb: ^NetworkBuffer) 
         return _serialize_registry(outb, reg, Identifier("minecraft:wolf_sound_variant"), _serialize_wolf_sound_variant_registry_entry)
     case PaintingVariantRegistry:
         return _serialize_registry(outb, reg, Identifier("minecraft:painting_variant"), _serialize_painting_variant_registry_entry)
+    case DamageTypeRegistry:
+        return _serialize_registry(outb, reg, Identifier("minecraft:damage_type"), _serialize_damage_type_registry_entry)
+    case BiomeRegistry:
+        return _serialize_registry(outb, reg, Identifier("minecraft:worldgen/biome"), _serialize_biome_registry_entry)
     }
     case FinishConfigurationPacket:
         // no fields
@@ -330,4 +334,47 @@ _serialize_spawn_conditions :: proc(writer: ^NBTWriter, conditions: []SpawnCondi
         }
     }
     return .None
+}
+
+@(private="file", require_results)
+_serialize_damage_type_registry_entry :: proc(writer: ^NBTWriter, entry: DamageType) -> WriteError {
+    nbt_write_named_string(writer, "message_id", string(entry.message_id)) or_return
+    nbt_write_named_float(writer, "exhaustion", entry.exhaustion) or_return
+    scaling: string
+    switch entry.scaling {
+    case .Never: scaling = "never"
+    case .Always: scaling = "always"
+    case .WhenCausedByLivingNonPlayer: scaling = "when_caused_by_living_non_player"
+    case: unreachable()
+    }
+    nbt_write_named_string(writer, "scaling", scaling) or_return
+    if entry.effects != .Hurt { // default
+        effects: string
+        switch entry.effects {
+        case .Thorns: effects = "thorns"
+        case .Drowning: effects = "drowning"
+        case .Burning: effects = "burning"
+        case .Poking: effects = "poking"
+        case .Freezing: effects = "freezing"
+        case .Hurt: effects = "hurt"
+        case: unreachable()
+        }
+        nbt_write_named_string(writer, "effects", effects) or_return
+    }
+    if entry.death_message_type != .Default {
+        death_message_type: string
+        switch entry.death_message_type {
+        case .FallVariants: death_message_type = "fall_variants"
+        case .IntentionalGameDesign: death_message_type = "intentional_game_design"
+        case .Default: death_message_type = "default"
+        case: unreachable()
+        }
+        nbt_write_named_string(writer, "death_message_type", death_message_type) or_return
+    }
+    return .None
+}
+
+@(private="file", require_results)
+_serialize_biome_registry_entry :: proc(writer: ^NBTWriter, entry: Biome) -> WriteError {
+    unimplemented("TODO: implement biome registry serialization")
 }
