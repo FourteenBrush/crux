@@ -78,6 +78,7 @@ ClientBoundPacket :: union #no_nil {
     FinishConfigurationPacket,
     // sent in .Play state
     LoginPacket,
+    DisconnectPlayPacket,
     SynchronizePlayerPositionPacket,
     PlayerInfoUpdatePacket,
 }
@@ -94,15 +95,16 @@ ClientBoundPacketId :: enum VarInt {
     
     // sent in Configuration state
 
-    PluginMessage       = 0x01,
-    Disconnect          = 0x02,
-    KnownPacks          = 0x0e,
-    RegistryData        = 0x07,
-    FinishConfiguration = 0x03,
+    PluginMessage           = 0x01,
+    DisconnectConfiguration = 0x02,
+    KnownPacks              = 0x0e,
+    RegistryData            = 0x07,
+    FinishConfiguration     = 0x03,
 
     // sent in Play state
 
     Login                     = 0x30,
+    DisconnectPlay            = 0x20,
     SynchronizePlayerPosition = 0x46,
     PlayerInfoUpdate          = 0x44,
 }
@@ -123,11 +125,12 @@ clientbound_packet_id_lookup := [intrinsics.type_union_variant_count(ClientBound
     VARIANT_IDX_OF(ClientBoundPacket, PongResponsePacket)              = .PongResponse,
     VARIANT_IDX_OF(ClientBoundPacket, LoginSuccessPacket)              = .LoginSuccess,
     VARIANT_IDX_OF(ClientBoundPacket, PluginMessagePacket)             = .PluginMessage,
-    VARIANT_IDX_OF(ClientBoundPacket, DisconnectConfigurationPacket)   = .Disconnect,
+    VARIANT_IDX_OF(ClientBoundPacket, DisconnectConfigurationPacket)   = .DisconnectConfiguration,
     VARIANT_IDX_OF(ClientBoundPacket, KnownPacksPacket)                = .KnownPacks,
     VARIANT_IDX_OF(ClientBoundPacket, RegistryDataPacket)              = .RegistryData,
     VARIANT_IDX_OF(ClientBoundPacket, FinishConfigurationPacket)       = .FinishConfiguration,
     VARIANT_IDX_OF(ClientBoundPacket, LoginPacket)                     = .Login,
+    VARIANT_IDX_OF(ClientBoundPacket, DisconnectPlayPacket)            = .DisconnectPlay,
     VARIANT_IDX_OF(ClientBoundPacket, SynchronizePlayerPositionPacket) = .SynchronizePlayerPosition,
     VARIANT_IDX_OF(ClientBoundPacket, PlayerInfoUpdatePacket)          = .PlayerInfoUpdate,
 }
@@ -575,6 +578,10 @@ Gamemode :: enum {
     Creative  = 1,
     Adventure = 2,
     Spectator = 3,
+}
+
+DisconnectPlayPacket :: struct {
+    reason: TextComponent,
 }
 
 SynchronizePlayerPositionPacket :: struct {

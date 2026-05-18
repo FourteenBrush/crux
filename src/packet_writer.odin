@@ -136,6 +136,8 @@ _serialize_clientbound :: proc(packet: ClientBoundPacket, outb: ^NetworkBuffer) 
         buf_write_var_int(outb, packet.portal_cooldown)
         buf_write_var_int(outb, packet.sea_level)
         buf_write_byte(outb, u8(packet.enforces_secure_chat))
+    case DisconnectPlayPacket:
+        serialize_text_component(outb, packet.reason) or_return
     case SynchronizePlayerPositionPacket:
         buf_write_var_int(outb, packet.teleport_id)
         buf_write_f64(outb, packet.x)

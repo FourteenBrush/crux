@@ -508,13 +508,21 @@ _send_registry_packets :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientC
     })
 }
 
+@(private="file")
 _kick_client :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection, reason: TextComponent) {
-    assert(client_conn.state == .Configuration, "TODO: handle respective kick packets for other states")
-    enqueue_packet(state.io_ctx, client_conn, DisconnectConfigurationPacket { reason = reason })
+    #partial switch client_conn.state {
+    case .Configuration: 
+        enqueue_packet(state.io_ctx, client_conn, DisconnectConfigurationPacket { reason = reason })
+    case .Play:
+        enqueue_packet(state.io_ctx, client_conn, DisconnectPlayPacket { reason = reason })
+    case:
+        panic(#procedure + " in wrong client state")
+    }
     client_conn.close_after_flushing = true
 }
 
 // Unregisters a client and shuts down the connection without transmitting any more data.
+@(private="file")
 _disconnect_client :: proc(state: ^NetworkWorkerState, client_conn: ClientConnection) {
     tracy.Zone()
 
