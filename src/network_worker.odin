@@ -196,6 +196,11 @@ _handle_clientbound_packet :: proc(state: ^NetworkWorkerState, packet: ServerBou
         return
 
     case StatusRequestPacket:
+        online_players := 0
+        for _, conn in state.connections do if conn.state == .Play {
+            online_players += 1
+        }
+            
         status_response := StatusResponsePacket {
             version = {
                 name = "1.21.10",
