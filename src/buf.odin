@@ -81,8 +81,11 @@ BufWriteMark :: distinct int
 
 // Dumps a NetworkBuffer to stdout, for debugging purposes.
 buf_dump :: proc(buf: NetworkBuffer) #no_bounds_check {
-    fmt.printfln("NetworkBuffer{{len=%d, r_offset=%d, data=%2x (len=%d) (hex)}}",
-        len(buf.data), buf.r_offset, buf.data[buf.r_offset:][:len(buf.data)], len(buf.data),
+    linear_buf := make([]u8, buf_length(buf), context.temp_allocator)
+    buf := buf // copy is fine here
+    assert(buf_copy_into(&buf, linear_buf) == .None)
+    fmt.printfln("NetworkBuffer{{len=%d, r_offset=%d, linear_data=%2x (len=%d) (hex)}}",
+        len(buf.data), buf.r_offset, linear_buf, len(buf.data),
     )
 }
 
@@ -530,9 +533,23 @@ buf_copy_into :: proc(buf: ^NetworkBuffer, outb: []u8) -> ReadError #no_bounds_c
     return .None
 }
 
+@(require_results)
+buf_read_f64 :: proc(buf: ^NetworkBuffer) -> (f: f64, err: ReadError) {
+    outb: [8]u8
+    buf_read_bytes(buf, outb[:]) or_return
+    return f64(transmute(f64be) outb), .None
+}
+
 buf_write_f64 :: proc(buf: ^NetworkBuffer, f: f64) {
     f := f64be(f)
     buf_write_bytes(buf, ([^]u8)(&f)[:8])
+}
+
+@(require_results)
+buf_read_f32 :: proc(buf: ^NetworkBuffer) -> (f: f32, err: ReadError) {
+    outb: [4]u8
+    buf_read_bytes(buf, outb[:]) or_return
+    return f32(transmute(f32be) outb), .None
 }
 
 buf_write_f32 :: proc(buf: ^NetworkBuffer, f: f32) {

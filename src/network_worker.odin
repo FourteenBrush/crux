@@ -40,6 +40,14 @@ NetworkWorkerSharedData :: struct {
 NetworkWorkerState :: struct {
     using shared: NetworkWorkerSharedData,
     connections: map[net.TCP_Socket]ClientConnection,
+    
+    // World data essentially, TODO: move this out to some world abstraction once this is established
+    sessions: map[net.TCP_Socket]SessionData,
+}
+
+@(private="file")
+SessionData :: struct {
+    game_profile: GameProfile,
 }
 
 // TODO: logger is not threadsafe
@@ -200,16 +208,15 @@ _handle_clientbound_packet :: proc(state: ^NetworkWorkerState, packet: ServerBou
         for _, conn in state.connections do if conn.state == .Play {
             online_players += 1
         }
-            
+
         status_response := StatusResponsePacket {
             version = {
-                name = "1.21.10",
-                protocol = .V1_21_10,
+                name = GAME_VERSION_STR,
+                protocol = PROTOCOL_VERSION,
             },
             players = {
                 max = 100,
-                // TODO: when multiply clients are querying server info, this is incorrect
-                online = len(state.connections) - 1, // account for querying client
+                online = uint(online_players),
             },
             description = text_component("Some Server", .DarkAqua),
             favicon = "data:image/png;base64,<data>",
@@ -287,6 +294,28 @@ _handle_clientbound_packet :: proc(state: ^NetworkWorkerState, packet: ServerBou
             portal_cooldown = 40,
             sea_level = 65,
             enforces_secure_chat = false,
+        })
+        
+        // if we do not send a position sync, the client keeps sending set player position packets
+        // with an incrementally decreasing height field.
+        // Will be confirmed with a ConfirmTeleportationPacket
+        enqueue_packet(state.io_ctx, client_conn, SynchronizePlayerPositionPacket {
+            y = 65,
+        })
+    case ClientTickEndPacket:
+        // empty
+    case SetPlayerRotationPacket:
+        // empty
+    case SetPlayerPositionPacket:
+        // empty
+    case SetPlayerPositionRotationPacket:
+        // empty
+    case ConfirmTeleportationPacket:
+        // initial play state position sync got acknowledged, prepare for player spawning
+        enqueue_packet(state.io_ctx, client_conn, PlayerInfoUpdatePacket {
+            players = {
+                // { uuid =  },
+            },
         })
     }
 }

@@ -9,6 +9,9 @@ import "lib:tracy"
 
 import "src:reactor"
 
+@(private="file")
+LOG2 :: intrinsics.constant_log2
+
 // TODO: propagate errors and close connection
 enqueue_packet :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnection, packet: ClientBoundPacket) {
     tracy.Zone()
@@ -133,6 +136,68 @@ _serialize_clientbound :: proc(packet: ClientBoundPacket, outb: ^NetworkBuffer) 
         buf_write_var_int(outb, packet.portal_cooldown)
         buf_write_var_int(outb, packet.sea_level)
         buf_write_byte(outb, u8(packet.enforces_secure_chat))
+    case SynchronizePlayerPositionPacket:
+        buf_write_var_int(outb, packet.teleport_id)
+        buf_write_f64(outb, packet.x)
+        buf_write_f64(outb, packet.y)
+        buf_write_f64(outb, packet.z)
+        buf_write_f64(outb, packet.velocity_x)
+        buf_write_f64(outb, packet.velocity_y)
+        buf_write_f64(outb, packet.velocity_z)
+        buf_write_f32(outb, packet.yaw)
+        buf_write_f32(outb, packet.pitch)
+        buf_write_u32(outb, transmute(u32)packet.flags)
+    case PlayerInfoUpdatePacket:
+        PlayerInfoUpdateActions :: bit_set[PlayerInfoUpdateAction; u8]
+        PlayerInfoUpdateAction :: enum {
+            AddPlayer          = LOG2(0x01),
+            InitializeChat     = LOG2(0x02),
+            UpdateGameMode     = LOG2(0x04),
+            UpdateListed       = LOG2(0x08),
+            UpdateLatency      = LOG2(0x10),
+            UpdateDisplayName  = LOG2(0x20),
+            UpdateListPriority = LOG2(0x40),
+            UpdateHat          = LOG2(0x80),
+        }
+        assert(len(packet.players) > 0, "zero length packet entries")
+        actions_mask: PlayerInfoUpdateActions
+        // compute used actions mask for players[0], ensure other entries use the same actions
+        assert(len(packet.players[0].actions) > 0, "zero length player info update actions")
+        for action in packet.players[0].actions {
+            switch action in action {
+            case PlayerInfoUpdateActionAddPlayer: actions_mask += {.AddPlayer}
+            }
+        }
+        for player in packet.players {
+            for action in player.actions {
+                switch action in action {
+                case PlayerInfoUpdateActionAddPlayer: assert(.AddPlayer in actions_mask, "mismatched action sets")
+                }
+            }
+        }
+        // serialize
+        buf_write_byte(outb, transmute(u8)actions_mask)
+        buf_write_var_int(outb, VarInt(len(packet.players)))
+        for player in packet.players {
+            buf_write_uuid(outb, player.uuid)
+            for action in player.actions {
+                switch action in action {
+                case PlayerInfoUpdateActionAddPlayer:
+                    buf_write_string(outb, action.username) or_return
+                    buf_write_var_int(outb, VarInt(len(action.properties)))
+                    for prop in action.properties {
+                        buf_write_string(outb, prop.name) or_return
+                        buf_write_string(outb, prop.value) or_return
+                        if signature, ok := prop.signature.?; ok {
+                            buf_write_byte(outb, 1)
+                            buf_write_string(outb, signature) or_return
+                        } else {
+                            buf_write_byte(outb, 0)
+                        }
+                    }
+                }
+            }
+        }
     }
     return .None
 }

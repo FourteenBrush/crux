@@ -22,9 +22,13 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
     buf_advance_pos_unchecked(b, length_nbytes)
     start_off := b.r_offset
     id := buf_read_var_int(b) or_return
+    
+    defer if err == .InvalidData {
+        log.warn("invalid data for packet id", ServerBoundPacketId(id))
+    }
 
     switch ServerBoundPacketId(id) {
-    case .Handshake: // shared with .StatusRequest, LoginStart and ClientInformation, blame the protocol
+    case .Handshake: // shared with .StatusRequest, LoginStart, ClientInformation and .ConfirmTeleportation, blame the protocol
         
         switch client_state {
         case .Handshake:
@@ -54,7 +58,10 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
                 allow_server_listings = buf_unchecked_read_bool(b) or_return,
                 particle_status = buf_unchecked_read_var_int_enum(b, ParticleStatus) or_return,
             }, .None
-        case .Transfer, .Play:
+        case .Play:
+            teleport_id := buf_read_var_int(b) or_return
+            return ConfirmTeleportationPacket { teleport_id=teleport_id }, .None
+        case .Transfer:
             return {}, .InvalidData
         case: unreachable()
         }
@@ -83,6 +90,27 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
             pack.version = buf_read_string(b, 32767, allocator) or_return
         }
         return KnownPacksPacket { known_packs }, .None
+    case .ClientTickEnd:
+        return ClientTickEndPacket {}, .None
+    case .SetPlayerRotation:
+        yaw := buf_read_f32(b) or_return
+        pitch := buf_read_f32(b) or_return
+        flags := buf_read_byte(b) or_return
+        return SetPlayerRotationPacket { yaw=yaw, pitch=pitch, flags=flags }, .None
+    case .SetPlayerPosition:
+        x := buf_read_f64(b) or_return
+        feet_y := buf_read_f64(b) or_return
+        z := buf_read_f64(b) or_return
+        flags := buf_read_byte(b) or_return
+        return SetPlayerPositionPacket { x=x, feet_y=feet_y, z=z, flags=flags }, .None
+    case .SetPlayerPositionRotation:
+        x := buf_read_f64(b) or_return
+        feet_y := buf_read_f64(b) or_return
+        z := buf_read_f64(b) or_return
+        yaw := buf_read_f32(b) or_return
+        pitch := buf_read_f32(b) or_return
+        flags := buf_read_byte(b) or_return
+        return SetPlayerPositionRotationPacket { x=x, feet_y=feet_y, z=z, yaw=yaw, pitch=pitch, flags=flags }, .None
     case:
         log.warn("unhandled packet id:", ServerBoundPacketId(id), "kicking with .InvalidData")
         return p, .InvalidData

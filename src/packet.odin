@@ -4,6 +4,9 @@ import "core:reflect"
 import "base:intrinsics"
 import "core:encoding/uuid"
 
+@(private="file")
+LOG2 :: intrinsics.constant_log2
+
 // FIXME: cant we avoid having a tagged union inside another one?
 Packet :: union { ClientBoundPacket, ServerBoundPacket }
 
@@ -22,6 +25,12 @@ ServerBoundPacket :: union #no_nil {
     ClientInformationPacket,
     KnownPacksPacket,
     AcknowledgeFinishConfigurationPacket,
+    // sent in .Play state
+    ClientTickEndPacket,
+    SetPlayerRotationPacket,
+    SetPlayerPositionPacket,
+    SetPlayerPositionRotationPacket,
+    ConfirmTeleportationPacket,
 }
 
 ServerBoundPacketId :: enum VarInt {
@@ -39,27 +48,38 @@ ServerBoundPacketId :: enum VarInt {
     LoginStart          = 0x00,
     LoginAcknowledged   = 0x03,
     
-    // send in .Configuration state
+    // sent in .Configuration state
     
     PluginMessage       = 0x02,
     ClientInformation   = 0x00,
     KnownPacks          = 0x07,
     AcknowledgeFinishConfiguration = 0x03,
+    
+    // sent in .Play state
+    
+    ClientTickEnd             = 0x0c,
+    SetPlayerRotation         = 0x1f,
+    SetPlayerPosition         = 0x1d,
+    SetPlayerPositionRotation = 0x1e,
+    ConfirmTeleportation      = 0x00,
 }
 
 ClientBoundPacket :: union #no_nil {
+    // sent in .Status state
     StatusResponsePacket,
     PongResponsePacket,
-    
+    // sent in .Login state
     LoginSuccessPacket,
-    
+    // sent in .Configuration satte
     PluginMessagePacket,
     DisconnectConfigurationPacket,
     KnownPacksPacket,
     RegistryDataPacket,
     FinishConfigurationPacket,
-
+    // sent in .Play state
     LoginPacket,
+    SynchronizePlayerPositionPacket,
+    PlayerInfoUpdatePacket,
 }
 
 ClientBoundPacketId :: enum VarInt {
@@ -82,7 +102,9 @@ ClientBoundPacketId :: enum VarInt {
 
     // sent in Play state
 
-    Login = 0x30,
+    Login                     = 0x30,
+    SynchronizePlayerPosition = 0x46,
+    PlayerInfoUpdate          = 0x44,
 }
 
 get_clientbound_packet_id :: proc(packet: ClientBoundPacket) -> ClientBoundPacketId {
@@ -97,15 +119,17 @@ VARIANT_IDX_OF :: intrinsics.type_variant_index_of
 // IMPORTANT NOTE: ClientBoundPacket must be #no_nil or we need a +1 on the variant idx
 @(rodata, private="file")
 clientbound_packet_id_lookup := [intrinsics.type_union_variant_count(ClientBoundPacket)]ClientBoundPacketId {
-    VARIANT_IDX_OF(ClientBoundPacket, StatusResponsePacket)          = .StatusResponse,
-    VARIANT_IDX_OF(ClientBoundPacket, PongResponsePacket)            = .PongResponse,
-    VARIANT_IDX_OF(ClientBoundPacket, LoginSuccessPacket)            = .LoginSuccess,
-    VARIANT_IDX_OF(ClientBoundPacket, PluginMessagePacket)           = .PluginMessage,
-    VARIANT_IDX_OF(ClientBoundPacket, DisconnectConfigurationPacket) = .Disconnect,
-    VARIANT_IDX_OF(ClientBoundPacket, KnownPacksPacket)              = .KnownPacks,
-    VARIANT_IDX_OF(ClientBoundPacket, RegistryDataPacket)            = .RegistryData,
-    VARIANT_IDX_OF(ClientBoundPacket, FinishConfigurationPacket)     = .FinishConfiguration,
-    VARIANT_IDX_OF(ClientBoundPacket, LoginPacket)                   = .Login,
+    VARIANT_IDX_OF(ClientBoundPacket, StatusResponsePacket)            = .StatusResponse,
+    VARIANT_IDX_OF(ClientBoundPacket, PongResponsePacket)              = .PongResponse,
+    VARIANT_IDX_OF(ClientBoundPacket, LoginSuccessPacket)              = .LoginSuccess,
+    VARIANT_IDX_OF(ClientBoundPacket, PluginMessagePacket)             = .PluginMessage,
+    VARIANT_IDX_OF(ClientBoundPacket, DisconnectConfigurationPacket)   = .Disconnect,
+    VARIANT_IDX_OF(ClientBoundPacket, KnownPacksPacket)                = .KnownPacks,
+    VARIANT_IDX_OF(ClientBoundPacket, RegistryDataPacket)              = .RegistryData,
+    VARIANT_IDX_OF(ClientBoundPacket, FinishConfigurationPacket)       = .FinishConfiguration,
+    VARIANT_IDX_OF(ClientBoundPacket, LoginPacket)                     = .Login,
+    VARIANT_IDX_OF(ClientBoundPacket, SynchronizePlayerPositionPacket) = .SynchronizePlayerPosition,
+    VARIANT_IDX_OF(ClientBoundPacket, PlayerInfoUpdatePacket)          = .PlayerInfoUpdate,
 }
 
 get_serverbound_packet_descriptor :: proc(packet: ServerBoundPacket) -> ServerBoundPacketDescriptor {
@@ -128,6 +152,11 @@ serverbound_packet_descriptors := [intrinsics.type_union_variant_count(ServerBou
     VARIANT_IDX_OF(ServerBoundPacket, ClientInformationPacket)              = { .Configuration },
     VARIANT_IDX_OF(ServerBoundPacket, KnownPacksPacket)                     = { .Configuration },
     VARIANT_IDX_OF(ServerBoundPacket, AcknowledgeFinishConfigurationPacket) = { .Configuration },
+    VARIANT_IDX_OF(ServerBoundPacket, ClientTickEndPacket)                  = { .Play },
+    VARIANT_IDX_OF(ServerBoundPacket, SetPlayerRotationPacket)              = { .Play },
+    VARIANT_IDX_OF(ServerBoundPacket, SetPlayerPositionPacket)              = { .Play },
+    VARIANT_IDX_OF(ServerBoundPacket, SetPlayerPositionRotationPacket)      = { .Play },
+    VARIANT_IDX_OF(ServerBoundPacket, ConfirmTeleportationPacket)           = { .Play },
 }
 
 // TODO: determine the possibility of storing an "is_terminal" flag on packets
@@ -499,12 +528,16 @@ Tag :: distinct string
 FinishConfigurationPacket :: struct {}
 
 GameProfile :: struct {
+    using _: Property,
     uuid: uuid.Identifier,
     username: string,
-    // FIXME: use some kind of property map? {textures: "value"}
-    name: string,
-    value: string,
-    signature: Maybe(string),
+}
+
+// Key-value pair, optionally signed
+Property :: struct {
+    name: string /*(64)*/,
+    value: string /*(32767)*/,
+    signature: Maybe(string) /*(1024)*/,
 }
 
 // ---------------------------------------- 
@@ -542,6 +575,84 @@ Gamemode :: enum {
     Creative  = 1,
     Adventure = 2,
     Spectator = 3,
+}
+
+SynchronizePlayerPositionPacket :: struct {
+    teleport_id: VarInt,
+    x: f64,
+    y: f64,
+    z: f64,
+    velocity_x: f64,
+    velocity_y: f64,
+    velocity_z: f64,
+    yaw: f32,
+    pitch: f32,
+    flags: TeleportFlags,
+}
+
+TeleportFlags :: bit_set[TeleportFlag; u32]
+TeleportFlag :: enum {
+    RelativeX         = LOG2(0x0001),
+    RelativeY         = LOG2(0x0002),
+    RelativeZ         = LOG2(0x0004),
+    RelativeYaw       = LOG2(0x0008),
+    RelativePitch     = LOG2(0x0010),
+    RelativeVelocityX = LOG2(0x0020),
+    RelativeVelocityY = LOG2(0x0040),
+    RelativeVelocityZ = LOG2(0x0080),
+    RotateVelocity    = LOG2(0x100),
+}
+
+ClientTickEndPacket :: struct {}
+
+SetPlayerRotationPacket :: struct {
+    yaw: f32,
+    pitch: f32,
+    // TODO: change to bitfield and fix decoding invalid values
+    flags: u8,
+}
+
+SetPlayerPositionPacket :: struct {
+    x: f64,
+    feet_y: f64,
+    z: f64,
+    // TODO: change to bitfield and fix decoding invalid values
+    flags: u8,
+}
+
+SetPlayerPositionRotationPacket :: struct {
+    x: f64,
+    feet_y: f64,
+    z: f64,
+    yaw: f32,
+    pitch: f32,
+    // TODO: change to bitfield and fix decoding invalid values
+    flags: u8,
+}
+
+ConfirmTeleportationPacket :: struct {
+    teleport_id: VarInt,
+}
+
+PlayerInfoUpdatePacket :: struct {
+    // TODO: replace with []ServerPlayer source of truth and place bitset back in
+    players: []PlayerInfoUpdateEntry,
+}
+
+PlayerInfoUpdateEntry :: struct {
+    uuid: uuid.Identifier,
+    actions: []PlayerInfoUpdateAction,
+}
+
+PlayerInfoUpdateAction :: union {
+    PlayerInfoUpdateActionAddPlayer,
+    // TODO: add remaining actions
+}
+
+PlayerInfoUpdateActionAddPlayer :: struct {
+    username: string /*(16)*/,
+    // Properties included in this packet are the same as in LoginSuccessPacket,
+    properties: []Property,
 }
 
 Position :: bit_field i64be {

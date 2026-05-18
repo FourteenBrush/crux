@@ -15,6 +15,7 @@ import "src:reactor"
 import "lib:tracy"
 
 PROTOCOL_VERSION :: ProtocolVersion.V1_20_2
+GAME_VERSION_STR :: "1.21.10"
 
 TARGET_TPS :: 20
 
@@ -147,6 +148,7 @@ _setup_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator)
     return io_ctx, true
 }
 
+// IO client context.
 ClientConnection :: struct {
     // Non blocking socket
     socket: net.TCP_Socket,
