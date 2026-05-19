@@ -21,7 +21,7 @@ WORKER_TARGET_MSPT :: 5
 // The capacity of the allocator that allocates per client packet specific data, if this allocator
 // fills up, old data will be overwritten.
 @(private="file")
-PACKET_SCRATCH_BUFFER_SIZE :: 256 * 1024
+PACKET_SCRATCH_BUFFER_SIZE :: 256 * 2 * 1024
 
 NetworkWorkerSharedData :: struct {
     io_ctx: ^reactor.IOContext,
@@ -48,6 +48,7 @@ NetworkWorkerState :: struct {
 @(private="file")
 SessionData :: struct {
     game_profile: GameProfile,
+    protocol_version: ProtocolVersion,
 }
 
 // TODO: logger is not threadsafe
@@ -56,6 +57,7 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
     state := NetworkWorkerState {
         shared = shared^,
         connections = make(map[net.TCP_Socket]ClientConnection, 16, os.heap_allocator()),
+        sessions = make(map[net.TCP_Socket]SessionData, 16, os.heap_allocator()),
     }
 
     defer cleanup: {
@@ -95,6 +97,7 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
             if client_conn == nil && comp.operation != .NewConnection && comp.operation != .PeerHangup && comp.operation == .Error {
                 // stale completion arrived after a disconnect was issued (peer hangup confirmation, io completion
                 // that could not be canceled in time or an allocated written back passed back to deallocate)
+                // TODO: where is memory deallocated then?
                 continue
             }
             tracy.ZoneN("ProcessCompletion")
@@ -124,6 +127,11 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
                 buf_write_bytes(&client_conn.rx_buf, comp.buf) // copies
                 _drain_serverbound_packets(&state, client_conn)
             case .Write:
+                // TODO: client_conn may be null for some reason after getting disconnected a few times (eg enabling f3+f2)
+                // possibly because we receive multiple Write completions and already remove the conn on the first?
+                // Also, _disconnect_client deletes the whole scratch buf, can we just avoid deallocation, or does the lifetime
+                // of the buffer submitted to the kernel becomes dangerous here?
+
                 // must be freed using the same allocator the reactor write call was made with
                 delete(comp.buf, client_conn.packet_scratch_alloc)
                 if client_conn.close_after_flushing {
@@ -171,7 +179,7 @@ _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^Cli
         case .InvalidData:
             log.debug("client sent malformed packet, kicking; buf=")
             buf_dump(client_conn.rx_buf)
-            _disconnect_client(state, client_conn^)
+            _kick_client(state, client_conn, text_component_single("Sent an unimplemented packet", TextColor(0xD92625)))
             break loop
         case .None:
             packet_desc := get_serverbound_packet_descriptor(packet)
@@ -192,17 +200,28 @@ _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^Cli
     }
 }
 
+@(private="file")
 _handle_clientbound_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, client_conn: ^ClientConnection) {
-    log.log(LOG_LEVEL_INBOUND, "Received Packet", packet)
+    // get rid of some of the packet spam
+    if _, is_client_tick := packet.(ClientTickEndPacket); !is_client_tick {
+        log.log(LOG_LEVEL_INBOUND, "Received Packet", packet)
+    }
 
     switch packet in packet {
-    case HandshakePacket:
-        client_conn.state = ClientState(packet.intent) // safe to cast
     case LegacyServerListPingPacket:
-        log.debugf("kicking client due to LegacyServerPingEvent")
         _disconnect_client(state, client_conn^)
         return
-
+    case HandshakePacket:
+        if packet.intent == .Login {
+            // client may have an unsupported protocol version, but there is no way to kick them with a custom message here
+            // (no disconnect packet for Handshake state exist), so we wait till the first Login state packet (LoginStart)
+            // and kick them there.
+            map_insert(&state.sessions, client_conn.socket, SessionData { 
+                protocol_version = packet.protocol_version,
+                game_profile = {}, // filled in on LoginStart
+            })
+        }
+        client_conn.state = ClientState(packet.intent) // safe to cast
     case StatusRequestPacket:
         online_players := 0
         for _, conn in state.connections do if conn.state == .Play {
@@ -224,21 +243,25 @@ _handle_clientbound_packet :: proc(state: ^NetworkWorkerState, packet: ServerBou
         }
         enqueue_packet(state.io_ctx, client_conn, status_response)
     case PingRequestPacket:
-        response := PongResponsePacket { payload = packet.payload }
-        enqueue_packet(state.io_ctx, client_conn, response)
+        enqueue_packet(state.io_ctx, client_conn, PongResponsePacket { payload=packet.payload })
         client_conn.close_after_flushing = true
     case LoginStartPacket:
+        session_data := _get_session(state, client_conn)
+        if session_data.protocol_version != PROTOCOL_VERSION {
+            _kick_client(state, client_conn, text_component("Unsupported protocol version", .Red))
+            return
+        }
         // FIXME: negotiate compression here
 
-        // TODO: fetch skin here
-        response := LoginSuccessPacket {
+        // TODO: fetch skin here and cache
+        session_data.game_profile = GameProfile {
             uuid = packet.uuid,
             username = packet.username,
             name = "textures",
             value = "somestringhere",
             signature = nil,
         }
-        enqueue_packet(state.io_ctx, client_conn, response)
+        enqueue_packet(state.io_ctx, client_conn, LoginSuccessPacket { game_profile=session_data.game_profile })
     case LoginAcknowledgedPacket:
         client_conn.state = .Configuration
     case PluginMessagePacket:
@@ -268,7 +291,7 @@ _handle_clientbound_packet :: proc(state: ^NetworkWorkerState, packet: ServerBou
         }
         
         // TODO: send remaining registries with nil data if known pack minecraft:core is present
-        _send_registry_packets(state.io_ctx, client_conn)
+        _send_registry_data(state.io_ctx, client_conn)
         
         enqueue_packet(state.io_ctx, client_conn, FinishConfigurationPacket {})
     case AcknowledgeFinishConfigurationPacket:
@@ -312,16 +335,42 @@ _handle_clientbound_packet :: proc(state: ^NetworkWorkerState, packet: ServerBou
         // empty
     case ConfirmTeleportationPacket:
         // initial play state position sync got acknowledged, prepare for player spawning
+        // TODO: this only has to be sent to other players, vanilla client ignores it though
+        session_data := _get_session(state, client_conn)
+        
+        add_player_action := PlayerInfoUpdateActionAddPlayer {
+            username = session_data.game_profile.username,
+            properties = {},
+        }
+        gamemode_change := PlayerInfoUpdateActionUpdateGameMode {
+            new_mode = .Spectator,
+        }
+        add_to_tablist := PlayerInfoUpdateActionUpdateListed { listed=true }
         enqueue_packet(state.io_ctx, client_conn, PlayerInfoUpdatePacket {
             players = {
-                // { uuid =  },
+                { uuid = session_data.game_profile.uuid, actions = { add_player_action, gamemode_change, add_to_tablist } },
             },
         })
+        enqueue_packet(state.io_ctx, client_conn, PlayerAbilitiesPacket {
+            flags = {.AllowFlying, .Flying},
+            flying_speed = 0.05,
+            fov_modifier = 0.1,
+        })
+        enqueue_packet(state.io_ctx, client_conn, StartWaitingForChunks {})
+    case PlayerLoadedPacket:
+        // empty
     }
 }
 
 @(private="file")
-_send_registry_packets :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnection) {
+_get_session :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection) -> ^SessionData {
+    assert(client_conn.state > .Status, "attempted to get unexistent session due to wrong client state")
+    return &state.sessions[client_conn.socket]
+}
+
+@(private="file")
+_send_registry_data :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnection) {
+    assert(client_conn.state == .Configuration)
     enqueue_packet(io_ctx, client_conn, DimensionTypeRegistry {
         entries = {
             0 = { id = Identifier("minecraft:overworld"), data = nil },
@@ -510,6 +559,7 @@ _send_registry_packets :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientC
 
 @(private="file")
 _kick_client :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection, reason: TextComponent) {
+    // TODO: add DisconnectLoginPacket and implement TextComponent -> json
     #partial switch client_conn.state {
     case .Configuration: 
         enqueue_packet(state.io_ctx, client_conn, DisconnectConfigurationPacket { reason = reason })
@@ -531,6 +581,7 @@ _disconnect_client :: proc(state: ^NetworkWorkerState, client_conn: ClientConnec
     _delete_client_connection(client_conn.socket)
 
     _, client_conn := delete_key(&state.connections, client_conn.socket)
+    delete_key(&state.sessions, client_conn.socket) // if present
     destroy_network_buf(client_conn.tx_buf)
     destroy_network_buf(client_conn.rx_buf)
     

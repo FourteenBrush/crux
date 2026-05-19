@@ -111,6 +111,8 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
         pitch := buf_read_f32(b) or_return
         flags := buf_read_byte(b) or_return
         return SetPlayerPositionRotationPacket { x=x, feet_y=feet_y, z=z, yaw=yaw, pitch=pitch, flags=flags }, .None
+    case .PlayerLoaded:
+        return PlayerLoadedPacket {}, .None
     case:
         log.warn("unhandled packet id:", ServerBoundPacketId(id), "kicking with .InvalidData")
         return p, .InvalidData

@@ -20,7 +20,8 @@ enqueue_packet :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnectio
     _serialize_clientbound(packet, &client_conn.tx_buf)
     
     // freed by network worker after receiving write completion
-    outb := make([]u8, buf_length(client_conn.tx_buf), client_conn.packet_scratch_alloc)
+    outb := make([]u8, buf_length(client_conn.tx_buf), client_conn.packet_scratch_alloc) \
+        or_else panic("OOM: write submission")
     read_err := buf_copy_into(&client_conn.tx_buf, outb)
     assert(read_err == .None, "invariant, copied full length")
 
@@ -53,17 +54,17 @@ _serialize_clientbound :: proc(packet: ClientBoundPacket, outb: ^NetworkBuffer) 
     case PongResponsePacket:
         buf_write_long(outb, packet.payload)
     case LoginSuccessPacket:
-        buf_write_uuid(outb, packet.uuid)
-        _ = buf_write_string(outb, packet.username)
+        buf_write_uuid(outb, packet.game_profile.uuid)
+        _ = buf_write_string(outb, packet.game_profile.username)
         // properties
         // TODO: fix whatever this is
         buf_write_var_int(outb, VarInt(1)) // 1 property
-        _ = buf_write_string(outb, packet.name)
-        _ = buf_write_string(outb, packet.value)
+        _ = buf_write_string(outb, packet.game_profile.name)
+        _ = buf_write_string(outb, packet.game_profile.value)
         
         // optional signature
-        buf_write_byte(outb, 1 if packet.signature != nil else 0)
-        if signature, ok := packet.signature.?; ok {
+        buf_write_byte(outb, 1 if packet.game_profile.signature != nil else 0)
+        if signature, ok := packet.game_profile.signature.?; ok {
             _ = buf_write_string(outb, signature)
         }
     case PluginMessagePacket:
@@ -123,7 +124,7 @@ _serialize_clientbound :: proc(packet: ClientBoundPacket, outb: ^NetworkBuffer) 
         buf_write_identifier(outb, packet.dimension_name)
         buf_write_long(outb, packet.hashed_seed)
         buf_write_byte(outb, u8(packet.gamemode))
-        buf_write_byte(outb, u8(packet.prev_gamemode.? or_else Gamemode(-1))) // TODO: ensure -1 is correctly written
+        buf_write_byte(outb, u8(packet.prev_gamemode.? or_else GameMode(-1))) // TODO: ensure -1 is correctly written
         buf_write_byte(outb, u8(packet.is_debug))
         buf_write_byte(outb, u8(packet.is_flat))
         if death_location, ok := packet.death_location.?; ok {
@@ -168,12 +169,16 @@ _serialize_clientbound :: proc(packet: ClientBoundPacket, outb: ^NetworkBuffer) 
         for action in packet.players[0].actions {
             switch action in action {
             case PlayerInfoUpdateActionAddPlayer: actions_mask += {.AddPlayer}
+            case PlayerInfoUpdateActionUpdateGameMode: actions_mask += {.UpdateGameMode}
+            case PlayerInfoUpdateActionUpdateListed: actions_mask += {.UpdateListed}
             }
         }
         for player in packet.players {
             for action in player.actions {
                 switch action in action {
                 case PlayerInfoUpdateActionAddPlayer: assert(.AddPlayer in actions_mask, "mismatched action sets")
+                case PlayerInfoUpdateActionUpdateGameMode: assert(.UpdateGameMode in actions_mask, "mismatched action sets")
+                case PlayerInfoUpdateActionUpdateListed: assert(.UpdateListed in actions_mask, "mismatched action sets")
                 }
             }
         }
@@ -197,9 +202,79 @@ _serialize_clientbound :: proc(packet: ClientBoundPacket, outb: ^NetworkBuffer) 
                             buf_write_byte(outb, 0)
                         }
                     }
+                case PlayerInfoUpdateActionUpdateGameMode:
+                    buf_write_var_int(outb, VarInt(action.new_mode))
+                case PlayerInfoUpdateActionUpdateListed:
+                    buf_write_byte(outb, u8(action.listed))
                 }
             }
         }
+    case GameEventPacket:
+        // packet structure: u8 followed by f32
+        GameEventPacketId :: enum u8 {
+            NoRespawnBlockAvailable = 0,
+            BeginRaining                = 1,
+            EndRaining                  = 2,
+            ChangeGameMode              = 3,
+            WinGame                     = 4,
+            DemoEvent                   = 5,
+            ArrowHitPlayer              = 6,
+            RainLevelChange             = 7,
+            ThunderLevelChange          = 8,
+            PlayPufferfishStingSound    = 9,
+            PlayElderGuardianAppearance = 10,
+            EnableRespawnScreen         = 11,
+            SetLimitedCrafting          = 12,
+            StartWaitingForChunks       = 13,
+        }
+        
+        event_id: GameEventPacketId
+        data := f32(0)
+        
+        switch event in packet {
+        case NoRespawnBlockAvailable:
+            event_id = .NoRespawnBlockAvailable
+        case BeginRaining:
+            event_id = .BeginRaining
+        case EndRaining:
+            event_id = .EndRaining
+        case ChangeGameMode:
+            event_id = .ChangeGameMode
+            data = f32(event.new_mode)
+        case WinGame:
+            event_id = .WinGame
+            data = f32(event)
+        case DemoEvent:
+            event_id = .DemoEvent
+            data = f32(event)
+        case ArrowHitPlayer:
+            event_id = .ArrowHitPlayer
+        case RainLevelChange:
+            event_id = .RainLevelChange
+            data = f32(event.level)
+        case ThunderLevelChange:
+            event_id = .ThunderLevelChange
+            data = f32(event.level)
+        case PlayPufferfishStingSound:
+            event_id = .PlayPufferfishStingSound
+        case PlayElderGuardianAppearance:
+            event_id = .PlayElderGuardianAppearance
+        case EnableRespawnScreen:
+            event_id = .EnableRespawnScreen
+            data = f32(event)
+        case SetLimitedCrafting:
+            event_id = .SetLimitedCrafting
+            data = f32(event)
+        case StartWaitingForChunks:
+            event_id = .StartWaitingForChunks
+        }
+        
+        buf_write_byte(outb, u8(event_id))
+        buf_write_f32(outb, data)
+    case PlayerAbilitiesPacket:
+        buf_write_byte(outb, transmute(u8)packet.flags)
+        buf_write_f32(outb, packet.flying_speed)
+        buf_write_f32(outb, packet.fov_modifier)
     }
     return .None
 }

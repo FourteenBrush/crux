@@ -31,6 +31,7 @@ ServerBoundPacket :: union #no_nil {
     SetPlayerPositionPacket,
     SetPlayerPositionRotationPacket,
     ConfirmTeleportationPacket,
+    PlayerLoadedPacket,
 }
 
 ServerBoundPacketId :: enum VarInt {
@@ -62,6 +63,7 @@ ServerBoundPacketId :: enum VarInt {
     SetPlayerPosition         = 0x1d,
     SetPlayerPositionRotation = 0x1e,
     ConfirmTeleportation      = 0x00,
+    PlayerLoaded              = 0x2b,
 }
 
 ClientBoundPacket :: union #no_nil {
@@ -81,6 +83,8 @@ ClientBoundPacket :: union #no_nil {
     DisconnectPlayPacket,
     SynchronizePlayerPositionPacket,
     PlayerInfoUpdatePacket,
+    GameEventPacket,
+    PlayerAbilitiesPacket,
 }
 
 ClientBoundPacketId :: enum VarInt {
@@ -107,8 +111,11 @@ ClientBoundPacketId :: enum VarInt {
     DisconnectPlay            = 0x20,
     SynchronizePlayerPosition = 0x46,
     PlayerInfoUpdate          = 0x44,
+    GameEvent                 = 0x26,
+    PlayerAbilities           = 0x3e,
 }
 
+@(private)
 get_clientbound_packet_id :: proc(packet: ClientBoundPacket) -> ClientBoundPacketId {
     tag: i64 = reflect.get_union_variant_raw_tag(packet)
     #no_bounds_check return clientbound_packet_id_lookup[tag]
@@ -133,8 +140,11 @@ clientbound_packet_id_lookup := [intrinsics.type_union_variant_count(ClientBound
     VARIANT_IDX_OF(ClientBoundPacket, DisconnectPlayPacket)            = .DisconnectPlay,
     VARIANT_IDX_OF(ClientBoundPacket, SynchronizePlayerPositionPacket) = .SynchronizePlayerPosition,
     VARIANT_IDX_OF(ClientBoundPacket, PlayerInfoUpdatePacket)          = .PlayerInfoUpdate,
+    VARIANT_IDX_OF(ClientBoundPacket, GameEventPacket)                 = .GameEvent,
+    VARIANT_IDX_OF(ClientBoundPacket, PlayerAbilitiesPacket)           = .PlayerAbilities,
 }
 
+@(private)
 get_serverbound_packet_descriptor :: proc(packet: ServerBoundPacket) -> ServerBoundPacketDescriptor {
     tag: i64 = reflect.get_union_variant_raw_tag(packet)
     #no_bounds_check return serverbound_packet_descriptors[tag]
@@ -160,9 +170,10 @@ serverbound_packet_descriptors := [intrinsics.type_union_variant_count(ServerBou
     VARIANT_IDX_OF(ServerBoundPacket, SetPlayerPositionPacket)              = { .Play },
     VARIANT_IDX_OF(ServerBoundPacket, SetPlayerPositionRotationPacket)      = { .Play },
     VARIANT_IDX_OF(ServerBoundPacket, ConfirmTeleportationPacket)           = { .Play },
+    VARIANT_IDX_OF(ServerBoundPacket, PlayerLoadedPacket)                   = { .Play },
 }
 
-// TODO: determine the possibility of storing an "is_terminal" flag on packets
+// TODO: determine the possibility of storing an "is_terminal" flag on packet descriptors
 
 ServerBoundPacketDescriptor :: struct {
     // Client state in which this packet should arrive.
@@ -309,7 +320,9 @@ PongResponsePacket :: struct {
     payload: Long,
 }
 
-LoginSuccessPacket :: distinct GameProfile
+LoginSuccessPacket :: struct {
+    game_profile: GameProfile,
+}
 
 // A disconnect packet issued during the configuration state (disconnect resource).
 DisconnectConfigurationPacket :: struct {
@@ -531,6 +544,7 @@ Tag :: distinct string
 FinishConfigurationPacket :: struct {}
 
 GameProfile :: struct {
+    // contains multiple multiple properties in theory, but we (and the vanilla client) only ever sends one
     using _: Property,
     uuid: uuid.Identifier,
     username: string,
@@ -560,8 +574,8 @@ LoginPacket :: struct {
     dimension_type: VarInt,
     dimension_name: Identifier,
     hashed_seed: Long,
-    gamemode: Gamemode,
-    prev_gamemode: Maybe(Gamemode),
+    gamemode: GameMode,
+    prev_gamemode: Maybe(GameMode),
     is_debug: bool,
     is_flat: bool,
     death_location: Maybe(struct {
@@ -573,7 +587,7 @@ LoginPacket :: struct {
     enforces_secure_chat: bool,
 }
 
-Gamemode :: enum {
+GameMode :: enum {
     Survival  = 0,
     Creative  = 1,
     Adventure = 2,
@@ -641,6 +655,22 @@ ConfirmTeleportationPacket :: struct {
     teleport_id: VarInt,
 }
 
+PlayerLoadedPacket :: struct {}
+
+PlayerAbilitiesPacket :: struct {
+    flags: PlayerAbilityFlags,
+    flying_speed: f32,
+    fov_modifier: f32,
+}
+
+PlayerAbilityFlags :: bit_set[PlayerAbilityFlag; u8]
+PlayerAbilityFlag :: enum {
+    Invulnerable = LOG2(0x01),
+    Flying       = LOG2(0x02),
+    AllowFlying  = LOG2(0x04),
+    CreativeMode = LOG2(0x08),
+}
+
 PlayerInfoUpdatePacket :: struct {
     // TODO: replace with []ServerPlayer source of truth and place bitset back in
     players: []PlayerInfoUpdateEntry,
@@ -653,6 +683,8 @@ PlayerInfoUpdateEntry :: struct {
 
 PlayerInfoUpdateAction :: union {
     PlayerInfoUpdateActionAddPlayer,
+    PlayerInfoUpdateActionUpdateGameMode,
+    PlayerInfoUpdateActionUpdateListed,
     // TODO: add remaining actions
 }
 
@@ -661,6 +693,81 @@ PlayerInfoUpdateActionAddPlayer :: struct {
     // Properties included in this packet are the same as in LoginSuccessPacket,
     properties: []Property,
 }
+
+PlayerInfoUpdateActionUpdateGameMode :: struct {
+    new_mode: GameMode,
+}
+
+PlayerInfoUpdateActionUpdateListed :: struct {
+    // Whether the player should be listed on the tab list.
+    listed: bool,
+}
+
+GameEventPacket :: union {
+    NoRespawnBlockAvailable,
+    BeginRaining,
+    EndRaining,
+    ChangeGameMode,
+    WinGame,
+    DemoEvent,
+    ArrowHitPlayer,
+    RainLevelChange,
+    ThunderLevelChange,
+    PlayPufferfishStingSound,
+    PlayElderGuardianAppearance,
+    EnableRespawnScreen,
+    SetLimitedCrafting,
+    StartWaitingForChunks,
+}
+
+NoRespawnBlockAvailable :: struct {}
+
+BeginRaining :: struct {}
+
+EndRaining :: struct {}
+
+ChangeGameMode :: struct {
+    new_mode: GameMode,
+}
+
+WinGame :: enum {
+    Respawn           = 0,
+    CreditsAndRespawn = 1,
+}
+
+DemoEvent :: enum {
+    ShowWelcome       = 0,
+    MovementControls  = 101,
+    JumpControls      = 102,
+    InventoryControls = 103,
+    DemoEnd           = 104,
+}
+
+ArrowHitPlayer :: struct {}
+
+RainLevelChange :: struct {
+    level: f32,
+}
+
+ThunderLevelChange :: struct {
+    level: f32,
+}
+
+PlayPufferfishStingSound :: struct {}
+
+PlayElderGuardianAppearance :: struct {}
+
+EnableRespawnScreen :: enum {
+    Enable,
+    RespawnImmediately,
+}
+
+SetLimitedCrafting :: enum {
+    Disable = 0,
+    Enable  = 1,
+}
+
+StartWaitingForChunks :: struct {}
 
 Position :: bit_field i64be {
     x: i32be | 26,
