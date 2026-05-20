@@ -69,6 +69,13 @@ ClientConnection :: struct {
     rx_buf: NetworkBuffer,
     // FIXME: may in fact be a linear buffer as it is always sent at once
     tx_buf: NetworkBuffer,
+    
+    clientbound_keepalive: struct {
+        // Zero initialized if we haven't sent any.
+        sent: time.Tick,
+        id: i64,
+        awaiting_serverbound: bool,
+    },
 }
 
 // Whether a ClientConnection may be finalized after receiving a completion.
@@ -117,6 +124,33 @@ _network_worker_thread_proc :: proc(shared: ^NetworkWorkerSharedData) {
         }
 
         _network_worker_run_tick(&state)
+        
+        // send keepalive packets, required every 1-15 secs, disconnected after 20 secs
+        KEEPALIVE_INTRVAL :: 13 * time.Second
+        KEEPALIVE_TIMEOUT :: 20 * time.Second
+        // FIXME: would ideally base this of world ticks instead of monotonic clock syscalls
+        now := time.tick_now()
+        for _, &client_conn in state.connections {
+            if client_conn.state != .Play || client_conn.terminating do continue
+            
+            last_keepalive := &client_conn.clientbound_keepalive
+            if last_keepalive.awaiting_serverbound {
+                elapsed := time.tick_diff(last_keepalive.sent, now)
+                if elapsed > KEEPALIVE_TIMEOUT {
+                    _kick_client(&state, &client_conn, text_component("Timed out", .Red))
+                    continue
+                }
+            }
+            
+            elapsed := time.tick_diff(last_keepalive.sent, now)
+            if elapsed > KEEPALIVE_INTRVAL {
+                id := i64(elapsed)
+                enqueue_packet(state.io_ctx, &client_conn, KeepAlivePlayPacket { id=Long(id) })
+                last_keepalive.sent = now
+                last_keepalive.id = id
+                last_keepalive.awaiting_serverbound = true
+            }
+        }
     }
 }
 
@@ -399,6 +433,17 @@ _handle_clientbound_packet :: proc(state: ^NetworkWorkerState, packet: ServerBou
         enqueue_packet(state.io_ctx, client_conn, StartWaitingForChunks {})
     case PlayerLoadedPacket:
         // empty
+    case KeepAlivePlayPacket:
+        last_keepalive := &client_conn.clientbound_keepalive
+        if !last_keepalive.awaiting_serverbound {
+            _kick_client(state, client_conn, text_component("Unexpected keepalive", .Red))
+            return
+        }
+        if packet.id != Long(last_keepalive.id) {
+            _kick_client(state, client_conn, text_component("Keepalive id mismatch", .Red))
+            return
+        }
+        last_keepalive.awaiting_serverbound = false
     }
 }
 

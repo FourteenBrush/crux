@@ -280,6 +280,8 @@ _serialize_clientbound :: proc(outb: ^NetworkBuffer, packet: ClientBoundPacket, 
         buf_write_byte(outb, transmute(u8)packet.flags)
         buf_write_f32(outb, packet.flying_speed)
         buf_write_f32(outb, packet.fov_modifier)
+    case KeepAlivePlayPacket:
+        buf_write_long(outb, packet.id)
     }
     return .None
 }

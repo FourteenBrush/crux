@@ -32,6 +32,7 @@ ServerBoundPacket :: union #no_nil {
     SetPlayerPositionRotationPacket,
     ConfirmTeleportationPacket,
     PlayerLoadedPacket,
+    KeepAlivePlayPacket,
 }
 
 ServerBoundPacketId :: enum VarInt {
@@ -64,6 +65,7 @@ ServerBoundPacketId :: enum VarInt {
     SetPlayerPositionRotation = 0x1e,
     ConfirmTeleportation      = 0x00,
     PlayerLoaded              = 0x2b,
+    KeepAlivePlay             = 0x1b,
 }
 
 ClientBoundPacket :: union #no_nil {
@@ -85,6 +87,7 @@ ClientBoundPacket :: union #no_nil {
     PlayerInfoUpdatePacket,
     GameEventPacket,
     PlayerAbilitiesPacket,
+    KeepAlivePlayPacket,
 }
 
 ClientBoundPacketId :: enum VarInt {
@@ -113,6 +116,7 @@ ClientBoundPacketId :: enum VarInt {
     PlayerInfoUpdate          = 0x44,
     GameEvent                 = 0x26,
     PlayerAbilities           = 0x3e,
+    KeepAlivePlay             = 0x2b,
 }
 
 @(private)
@@ -146,6 +150,7 @@ clientbound_packet_descriptors := [intrinsics.type_union_variant_count(ClientBou
     VARIANT_IDX_OF(ClientBoundPacket, PlayerInfoUpdatePacket)          = { .PlayerInfoUpdate,          false },
     VARIANT_IDX_OF(ClientBoundPacket, GameEventPacket)                 = { .GameEvent,                 false },
     VARIANT_IDX_OF(ClientBoundPacket, PlayerAbilitiesPacket)           = { .PlayerAbilities,           false },
+    VARIANT_IDX_OF(ClientBoundPacket, KeepAlivePlayPacket)             = { .KeepAlivePlay,             false },
 }
 
 @(private)
@@ -175,6 +180,7 @@ serverbound_packet_descriptors := [intrinsics.type_union_variant_count(ServerBou
     VARIANT_IDX_OF(ServerBoundPacket, SetPlayerPositionRotationPacket)      = { .Play },
     VARIANT_IDX_OF(ServerBoundPacket, ConfirmTeleportationPacket)           = { .Play },
     VARIANT_IDX_OF(ServerBoundPacket, PlayerLoadedPacket)                   = { .Play },
+    VARIANT_IDX_OF(ServerBoundPacket, KeepAlivePlayPacket)                  = { .Play },
 }
 
 @(private)
@@ -667,12 +673,6 @@ ConfirmTeleportationPacket :: struct {
 
 PlayerLoadedPacket :: struct {}
 
-PlayerAbilitiesPacket :: struct {
-    flags: PlayerAbilityFlags,
-    flying_speed: f32,
-    fov_modifier: f32,
-}
-
 PlayerAbilityFlags :: bit_set[PlayerAbilityFlag; u8]
 PlayerAbilityFlag :: enum {
     Invulnerable = LOG2(0x01),
@@ -778,6 +778,16 @@ SetLimitedCrafting :: enum {
 }
 
 StartWaitingForChunks :: struct {}
+
+PlayerAbilitiesPacket :: struct {
+    flags: PlayerAbilityFlags,
+    flying_speed: f32,
+    fov_modifier: f32,
+}
+
+KeepAlivePlayPacket :: struct {
+    id: Long,
+}
 
 Position :: bit_field i64be {
     x: i32be | 26,
