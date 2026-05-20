@@ -37,7 +37,19 @@ WriteQueue :: struct {
     head_idx: int,
     // offset inside current iovec
     head_off: int,
+    // Whether we have enabled EPOLLOUT notifications for this client (not enabled for new clients).
+    // This is set to false and an epoll_ctl(.., MOD, events - {EPOLLOUT}) is executed whenever the write queue
+    // is fully drained, this to avoid unnecessary thread wakeups for data that isn't there.
+    // The opposite is done whenever a write is submitted.
+    epollout_armed: bool,
 }
+
+// NOTE: .HUP and .ERR are implicit for epoll_wait
+@(private="file")
+EPOLL_EVENTS_NO_OUT :: linux.EPoll_Event_Set { .IN, .RDHUP }
+
+@(private="file")
+EPOLL_EVENTS_OUT_ARMED :: EPOLL_EVENTS_NO_OUT | { .OUT }
 
 @(private)
 _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (ctx: IOContext, ok: bool) {
@@ -64,15 +76,12 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
     _destroy_instrumented_alloc(ctx.allocator, meta_allocator=runtime.heap_allocator())
 }
 
+// NOTE: also used by server socket
 @(private="file")
 _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
     tracy.Zone()
 
-    event := linux.EPoll_Event {
-        // NOTE: .HUP and .ERR are implicit
-        events = {.IN, .OUT, .RDHUP},
-        data = { fd = linux.Fd(client) },
-    }
+    event := _epoll_event(ctx, client, EPOLL_EVENTS_NO_OUT)
     errno := linux.epoll_ctl(ctx.epoll_fd, .ADD, linux.Fd(client), &event)
     return errno == .NONE
 }
@@ -91,7 +100,7 @@ _unregister_client :: proc(ctx: ^IOContext, conn: net.TCP_Socket) -> bool {
             operation = .Error,
             buf = stale_write.base[:stale_write.len],
         }
-        // TODO: replace with _emit_completion() here, but we do not have access to its requires params
+        // TODO: replace with _emit_completion() here, but we do not have access to its required params
         queue.append(&ctx.completion_queue, comp)
     }
     
@@ -100,7 +109,6 @@ _unregister_client :: proc(ctx: ^IOContext, conn: net.TCP_Socket) -> bool {
     return ok
 }
 
-// TODO: timeout: 0 handle returned bool correctly
 @(private)
 _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, timeout_ms: int) -> (n: int, ok: bool) {
     tracy.Zone()
@@ -251,19 +259,20 @@ _do_write :: proc(
         }
         // drop buffers to not resume on next EPOLLOUT
         _reset_write_queue(wq)
+        _ = _arm_epollout(ctx, wq, socket, .Disarm)
         return
     }
     
-    _advance_write_queue(ctx, wq, socket, nwritten, completions_out, idx_ptr)
-
-    // TODO: remove EPOLLOUT on non partial write to not constantly receive EPOLLOUT notifications
-    // when we have nothing to write
+    fully_drained := _advance_write_queue(ctx, wq, socket, nwritten, completions_out, idx_ptr)
+    if fully_drained {
+        _ = _arm_epollout(ctx, wq, socket, .Disarm)
+    }
 }
 
 // Depending on `nwritten`, which is the result of a write call for the given write queue.
 // - Emits completions for every written iovec inside the queue
 // - Advances offsets to handle partial writes
-@(private="file")
+@(private="file", require_results)
 _advance_write_queue :: proc(
     ctx: ^IOContext,
     wq: ^WriteQueue,
@@ -272,7 +281,7 @@ _advance_write_queue :: proc(
     // params from _emit_completion()
     completions_out: []Completion,
     idx_ptr: ^int,
-) {
+) -> (fully_drained: bool) {
     // for partial writes: advance cursor and resume sending on the next EPOLLOUT.
     // every iovec corresponds to a write operation so send completions for all fully written ones
 
@@ -304,7 +313,9 @@ _advance_write_queue :: proc(
     // queue fully drained
     if wq.head_idx >= len(wq.iovecs) {
         _reset_write_queue(wq)
+        return true
     }
+    return false
 }
 
 @(private="file")
@@ -340,13 +351,33 @@ _release_recv_buf :: proc(ctx: ^IOContext, buf: []u8) {
 
 @(private)
 _submit_write_copy :: proc(ctx: ^IOContext, conn: net.TCP_Socket, data: []u8) -> bool {
-    // TODO: rearm epoll_ctl with EPOLL_CTL_MOD to achieve EPOLLOUT notifications
     _, write_queue, zeroed_insert, _ := map_entry(&ctx.pending_writes, conn)
     if zeroed_insert {
         write_queue.iovecs.allocator = ctx.allocator
     }
     
+    if !write_queue.epollout_armed {
+        _arm_epollout(ctx, write_queue, conn, .Arm) or_return
+    }
+    
     append(&write_queue.iovecs, linux.IO_Vec { raw_data(data), len(data) })
+    return true
+}
+
+@(private="file")
+_epoll_event :: proc(ctx: ^IOContext, socket: net.TCP_Socket, events: linux.EPoll_Event_Set) -> (ev: linux.EPoll_Event) {
+    ev.events = events
+    ev.data.fd = linux.Fd(socket)
+    return
+}
+
+@(private="file", require_results)
+_arm_epollout :: proc(ctx: ^IOContext, wq: ^WriteQueue, socket: net.TCP_Socket, mode: enum { Arm, Disarm }) -> bool {
+    event := _epoll_event(ctx, socket, mode == .Arm ? EPOLL_EVENTS_OUT_ARMED : EPOLL_EVENTS_NO_OUT)
+    errno := linux.epoll_ctl(ctx.epoll_fd, .MOD, linux.Fd(socket), &event)
+    if errno != .NONE do return false
+    
+    wq.epollout_armed = mode == .Arm
     return true
 }
 
