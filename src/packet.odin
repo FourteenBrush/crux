@@ -33,6 +33,7 @@ ServerBoundPacket :: union #no_nil {
     ConfirmTeleportationPacket,
     PlayerLoadedPacket,
     KeepAlivePlayPacket,
+    SwingArmPacket,
 }
 
 ServerBoundPacketId :: enum VarInt {
@@ -66,6 +67,7 @@ ServerBoundPacketId :: enum VarInt {
     ConfirmTeleportation      = 0x00,
     PlayerLoaded              = 0x2b,
     KeepAlivePlay             = 0x1b,
+    SwingArm                  = 0x3c,
 }
 
 ClientBoundPacket :: union #no_nil {
@@ -181,6 +183,7 @@ serverbound_packet_descriptors := [intrinsics.type_union_variant_count(ServerBou
     VARIANT_IDX_OF(ServerBoundPacket, ConfirmTeleportationPacket)           = { .Play },
     VARIANT_IDX_OF(ServerBoundPacket, PlayerLoadedPacket)                   = { .Play },
     VARIANT_IDX_OF(ServerBoundPacket, KeepAlivePlayPacket)                  = { .Play },
+    VARIANT_IDX_OF(ServerBoundPacket, SwingArmPacket)                       = { .Play },
 }
 
 @(private)
@@ -672,6 +675,11 @@ ConfirmTeleportationPacket :: struct {
 }
 
 PlayerLoadedPacket :: struct {}
+
+SwingArmPacket :: struct {
+    hand: Hand,
+}
+Hand :: enum { MainHand = 0, OffHand = 1 }
 
 PlayerAbilityFlags :: bit_set[PlayerAbilityFlag; u8]
 PlayerAbilityFlag :: enum {

@@ -116,6 +116,9 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
     case .KeepAlivePlay:
         id := buf_read_long(b) or_return
         return KeepAlivePlayPacket { id=id }, .None
+    case .SwingArm:
+        hand := buf_read_var_int_enum(b, Hand) or_return
+        return SwingArmPacket { hand=hand }, .None
     case:
         log.warn("unhandled packet id:", ServerBoundPacketId(id), "kicking with .InvalidData")
         return p, .InvalidData

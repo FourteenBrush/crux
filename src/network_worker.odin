@@ -60,7 +60,14 @@ ClientConnection :: struct {
     // needing to be deallocated problem), it remains important that we do not close this connection till all
     // writes are flushed (as there may be a terminal packet at the end of the tx buf, which definitely needs to be transferred).
     // When this number reaches zero, and `terminating` is true, this connection will be fully closed and cleaned up.
-    outstanding_writes: int,
+    outstanding_writes: u32,
+    
+    clientbound_keepalive: struct {
+        // Zero initialized if we haven't sent any.
+        sent: time.Tick,
+        id: i64,
+        awaiting_serverbound: bool,
+    },
     
     // Allocator to deal with all packet related allocations, overwriting itself
     // if there is too much backpressure.
@@ -69,13 +76,6 @@ ClientConnection :: struct {
     rx_buf: NetworkBuffer,
     // FIXME: may in fact be a linear buffer as it is always sent at once
     tx_buf: NetworkBuffer,
-    
-    clientbound_keepalive: struct {
-        // Zero initialized if we haven't sent any.
-        sent: time.Tick,
-        id: i64,
-        awaiting_serverbound: bool,
-    },
 }
 
 // Whether a ClientConnection may be finalized after receiving a completion.
@@ -125,10 +125,10 @@ _network_worker_thread_proc :: proc(shared: ^NetworkWorkerSharedData) {
 
         _network_worker_run_tick(&state)
         
-        // send keepalive packets, required every 1-15 secs, disconnected after 20 secs
+        // send keepalive packets, required every 1-15 secs, disconnect after 20 secs
         KEEPALIVE_INTRVAL :: 13 * time.Second
         KEEPALIVE_TIMEOUT :: 20 * time.Second
-        // FIXME: would ideally base this of world ticks instead of monotonic clock syscalls
+        // FIXME: would ideally base this off world ticks instead of monotonic clock syscalls
         now := time.tick_now()
         for _, &client_conn in state.connections {
             if client_conn.state != .Play || client_conn.terminating do continue
@@ -444,6 +444,8 @@ _handle_clientbound_packet :: proc(state: ^NetworkWorkerState, packet: ServerBou
             return
         }
         last_keepalive.awaiting_serverbound = false
+    case SwingArmPacket:
+        // empty
     }
 }
 
