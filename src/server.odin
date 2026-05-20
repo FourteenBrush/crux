@@ -14,7 +14,7 @@ import "src:reactor"
 
 import "lib:tracy"
 
-PROTOCOL_VERSION :: ProtocolVersion.V1_20_2
+PROTOCOL_VERSION :: ProtocolVersion.V1_21_10
 GAME_VERSION_STR :: "1.21.10"
 
 TARGET_TPS :: 20
@@ -65,7 +65,7 @@ run :: proc() -> bool {
 
     init_context := context
     init_context.allocator = mem.panic_allocator()
-    net_worker_thread := thread.create_and_start_with_poly_data(&net_worker_state, _network_worker_proc, init_context=init_context)
+    net_worker_thread := thread.create_and_start_with_poly_data(&net_worker_state, _network_worker_thread_proc, init_context=init_context)
     if net_worker_thread == nil {
         return fatal("failed to start worker thread")
     }
@@ -146,23 +146,6 @@ _setup_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator)
         return io_ctx, false
     }
     return io_ctx, true
-}
-
-// IO client context.
-ClientConnection :: struct {
-    // Non blocking socket
-    socket: net.TCP_Socket,
-    state: ClientState,
-    // Whether this connection needs to be closed after flushing all packets
-    // TODO: rename and document the exact purpose of this field.
-    close_after_flushing: bool,
-    
-    // Allocator to deal with all packet related allocations, overwriting itself
-    // if there is too much backpressure.
-    packet_scratch_alloc: mem.Allocator,
-
-    rx_buf: NetworkBuffer,
-    tx_buf: NetworkBuffer,
 }
 
 // IMPORTANT NOTE: values must match respective values from HandshakeIntent to allow casting

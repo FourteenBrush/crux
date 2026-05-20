@@ -15,23 +15,29 @@ LOG2 :: intrinsics.constant_log2
 // TODO: propagate errors and close connection
 enqueue_packet :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnection, packet: ClientBoundPacket) {
     tracy.Zone()
+    if client_conn.terminating do return
     log.log(LOG_LEVEL_OUTBOUND, "Sending packet", packet)
 
-    _serialize_clientbound(packet, &client_conn.tx_buf)
+    descriptor := get_clientbound_packet_descriptor(packet)
+    _serialize_clientbound(&client_conn.tx_buf, packet, descriptor)
     
     // freed by network worker after receiving write completion
     outb := make([]u8, buf_length(client_conn.tx_buf), client_conn.packet_scratch_alloc) \
         or_else panic("OOM: write submission")
+
     read_err := buf_copy_into(&client_conn.tx_buf, outb)
     assert(read_err == .None, "invariant, copied full length")
 
     submission_ok := reactor.submit_write_copy(io_ctx, client_conn.socket, outb)
     assert(submission_ok, "TODO: submission errors")
     buf_advance_pos_unchecked(&client_conn.tx_buf, len(outb))
+    
+    client_conn.outstanding_writes += 1
+    client_conn.terminating |= descriptor.is_terminal
 }
 
 @(private="file")
-_serialize_clientbound :: proc(packet: ClientBoundPacket, outb: ^NetworkBuffer) -> WriteError {
+_serialize_clientbound :: proc(outb: ^NetworkBuffer, packet: ClientBoundPacket, descriptor: ClientBoundPacketDescriptor) -> WriteError {
     initial_len := buf_length(outb^)
     begin_payload_mark := buf_emit_write_mark(outb^)
     defer {
@@ -41,8 +47,7 @@ _serialize_clientbound :: proc(packet: ClientBoundPacket, outb: ^NetworkBuffer) 
         assert(err == .None, "invariant, mark could not have become invalid")
     }
 
-    packet_id := get_clientbound_packet_id(packet)
-    buf_write_var_int(outb, VarInt(packet_id))
+    buf_write_var_int(outb, VarInt(descriptor.packet_id))
 
     switch packet in packet {
     case StatusResponsePacket:

@@ -21,7 +21,7 @@ WORKER_TARGET_MSPT :: 5
 // The capacity of the allocator that allocates per client packet specific data, if this allocator
 // fills up, old data will be overwritten.
 @(private="file")
-PACKET_SCRATCH_BUFFER_SIZE :: 256 * 2 * 1024
+PACKET_SCRATCH_BUFFER_SIZE :: 256 * 1024
 
 NetworkWorkerSharedData :: struct {
     io_ctx: ^reactor.IOContext,
@@ -45,14 +45,47 @@ NetworkWorkerState :: struct {
     sessions: map[net.TCP_Socket]SessionData,
 }
 
+// IO client context.
+ClientConnection :: struct {
+    // Non blocking socket
+    socket: net.TCP_Socket,
+    state: ClientState,
+    // Whether a packet has been sent with an `is_terminal` flag set to true or an explicit termination
+    // request was issued, this indicates that this connection will be closed shortly
+    // and any consecutive `enqueue_packet` calls will silently ignore that packet.
+    terminating: bool,
+    // Number of outstanding write operations, which has not yet received a completion.
+    // This acts as a refcount to the allocator data being stored here, to ensure all writes are properly deallocated.
+    // While it is not an issue to just clear the whole allocator at once (effectively getting rid of the writes
+    // needing to be deallocated problem), it remains important that we do not close this connection till all
+    // writes are flushed (as there may be a terminal packet at the end of the tx buf, which definitely needs to be transferred).
+    // When this number reaches zero, and `terminating` is true, this connection will be fully closed and cleaned up.
+    outstanding_writes: int,
+    
+    // Allocator to deal with all packet related allocations, overwriting itself
+    // if there is too much backpressure.
+    packet_scratch_alloc: mem.Allocator,
+
+    rx_buf: NetworkBuffer,
+    // FIXME: may in fact be a linear buffer as it is always sent at once
+    tx_buf: NetworkBuffer,
+}
+
+// Whether a ClientConnection may be finalized after receiving a completion.
+@(private="file")
+_should_finalize_disconnect :: proc(conn: ClientConnection) -> bool {
+    return conn.terminating && conn.outstanding_writes == 0
+}
+
 @(private="file")
 SessionData :: struct {
-    game_profile: GameProfile,
     protocol_version: ProtocolVersion,
+    game_profile: GameProfile,
 }
 
 // TODO: logger is not threadsafe
-_network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
+@(private)
+_network_worker_thread_proc :: proc(shared: ^NetworkWorkerSharedData) {
     tracy.SetThreadName("crux-NetWorker")
     state := NetworkWorkerState {
         shared = shared^,
@@ -83,87 +116,94 @@ _network_worker_proc :: proc(shared: ^NetworkWorkerSharedData) {
             tracy.FrameMark("Worker")
         }
 
-        REACTOR_TIMEOUT_MS :: 1
-        #assert(REACTOR_TIMEOUT_MS < WORKER_TARGET_MSPT)
+        _network_worker_run_tick(&state)
+    }
+}
 
-        completions: [512]reactor.Completion
-        // NOTE: do not indefinitely block or this thread can't be joined
-        // TODO: scale down timer resolution when no clients are connected
-        nready, await_ok := reactor.await_io_completions(state.io_ctx, completions[:], timeout_ms=REACTOR_TIMEOUT_MS)
-        assert(await_ok, "failed to await io events") // TODO: proper error handling
+@(private="file")
+_network_worker_run_tick :: proc(state: ^NetworkWorkerState) {
+    REACTOR_TIMEOUT_MS :: 1
+    #assert(REACTOR_TIMEOUT_MS < WORKER_TARGET_MSPT)
 
-        for comp in completions[:nready] {
-            client_conn := &state.connections[comp.socket]
-            if client_conn == nil && comp.operation != .NewConnection && comp.operation != .PeerHangup && comp.operation == .Error {
-                // stale completion arrived after a disconnect was issued (peer hangup confirmation, io completion
-                // that could not be canceled in time or an allocated written back passed back to deallocate)
-                // TODO: where is memory deallocated then?
+    completions: [512]reactor.Completion
+    // NOTE: do not indefinitely block or this thread can't be joined
+    // TODO: scale down timer resolution when no clients are connected
+    nready, await_ok := reactor.await_io_completions(state.io_ctx, completions[:], timeout_ms=REACTOR_TIMEOUT_MS)
+    assert(await_ok, "failed to await io events") // TODO: proper error handling
+
+    for comp in completions[:nready] {
+        tracy.ZoneN("ProcessCompletion")
+        
+        client_conn := &state.connections[comp.socket]
+        comp_holds_conn_alive := comp.operation == .Write || (comp.operation == .Error && comp.buf != nil)
+        assert(
+            client_conn != nil || !comp_holds_conn_alive,
+            "completion with outstanding write ownership arrived after ClientConnection destruction",
+        )
+        if comp_holds_conn_alive {
+            client_conn.outstanding_writes -= 1
+        }
+
+        switch comp.operation {
+        case .Error:
+            log.debug("client socket error")
+            // if caused by a write operation, free our allocated submission which was returned back to us
+            if comp.buf != nil {
+                assert(client_conn != nil)
+                delete(comp.buf, client_conn.packet_scratch_alloc)
+            }
+            if _should_finalize_disconnect(client_conn^) {
+                _finalize_client(state, client_conn^)
+            }
+        case .PeerHangup:
+            log.debug("client socket hangup")
+            // client_conn is nil when we disconnected from the peer first, thus only serving as a confirmation
+            if client_conn != nil {
+                client_conn.terminating = true
+                if _should_finalize_disconnect(client_conn^) {
+                    _finalize_client(state, client_conn^)
+                }
+            }
+        case .Read:
+            defer reactor.release_recv_buf(state.io_ctx, comp)
+            if client_conn == nil || client_conn.terminating {
                 continue
             }
-            tracy.ZoneN("ProcessCompletion")
-
-            switch comp.operation {
-            case .Error:
-                log.debug("client socket error")
-                // if caused by a write operation, free our allocated submission which was returned back to us
-                if comp.buf != nil {
-                    delete(comp.buf, client_conn.packet_scratch_alloc)
-                }
-                if client_conn != nil {
-                    _disconnect_client(&state, client_conn^)
-                }
-            case .PeerHangup:
-                log.debug("client socket hangup")
-                // client_conn is nil when we disconnected from the peer first, thus only serving as a confirmation
-                if client_conn != nil {
-                    _disconnect_client(&state, client_conn^)
-                }
-            case .Read:
-                defer reactor.release_recv_buf(state.io_ctx, comp)
-                if client_conn.close_after_flushing {
-                    // TODO: we need closing logic here?
-                    continue
-                }
-                buf_write_bytes(&client_conn.rx_buf, comp.buf) // copies
-                _drain_serverbound_packets(&state, client_conn)
-            case .Write:
-                // TODO: client_conn may be null for some reason after getting disconnected a few times (eg enabling f3+f2)
-                // possibly because we receive multiple Write completions and already remove the conn on the first?
-                // Also, _disconnect_client deletes the whole scratch buf, can we just avoid deallocation, or does the lifetime
-                // of the buffer submitted to the kernel becomes dangerous here?
-
-                // must be freed using the same allocator the reactor write call was made with
-                delete(comp.buf, client_conn.packet_scratch_alloc)
-                if client_conn.close_after_flushing {
-                    log.debug("disconnecting client as requested")
-                    _disconnect_client(&state, client_conn^)
-                }
-            case .NewConnection:
-                packet_scratch := new(mem.Scratch, os.heap_allocator())
-                mem.scratch_init(packet_scratch, PACKET_SCRATCH_BUFFER_SIZE, backup_allocator=os.heap_allocator())
-                // NOTE: disallow out of band allocations larger than allocator cap, as they would be leaked either way
-                packet_scratch.backup_allocator = mem.panic_allocator()
-                packet_scratch.leaked_allocations.allocator = mem.panic_allocator()
-                
-                state.connections[comp.socket] = ClientConnection {
-	                socket = comp.socket,
-	                state  = .Handshake,
-                    
-                    packet_scratch_alloc = mem.scratch_allocator(packet_scratch),
-                    rx_buf = create_network_buf(10240, allocator=os.heap_allocator()),
-                    tx_buf = create_network_buf(10240, allocator=os.heap_allocator()),
-                }
-
-                log.debugf("client connected (fd %d)", comp.socket)
+            buf_write_bytes(&client_conn.rx_buf, comp.buf) // copies
+            _drain_serverbound_packets(state, client_conn)
+        case .Write:
+            // must be freed using the same allocator the reactor write call was made with
+            delete(comp.buf, client_conn.packet_scratch_alloc)
+            if _should_finalize_disconnect(client_conn^) {
+                log.debug("disconnecting client as requested")
+                _finalize_client(state, client_conn^)
             }
+        case .NewConnection:
+            packet_scratch := new(mem.Scratch, os.heap_allocator())
+            mem.scratch_init(packet_scratch, PACKET_SCRATCH_BUFFER_SIZE, backup_allocator=os.heap_allocator())
+            // NOTE: disallow out of band allocations larger than allocator cap, as they would be leaked either way
+            packet_scratch.backup_allocator = mem.panic_allocator()
+            packet_scratch.leaked_allocations.allocator = mem.panic_allocator()
+            
+            state.connections[comp.socket] = ClientConnection {
+                socket = comp.socket,
+                state  = .Handshake,
+                
+                packet_scratch_alloc = mem.scratch_allocator(packet_scratch),
+                rx_buf = create_network_buf(10240, allocator=os.heap_allocator()),
+                tx_buf = create_network_buf(10240, allocator=os.heap_allocator()),
+            }
+
+            log.debugf("client connected (fd %d)", comp.socket)
         }
     }
 }
 
 @(private="file")
 _network_worker_atexit :: proc(state: ^NetworkWorkerState) {
+    // TODO: linger to ensure all client bufs are flushed, maybe even send "Server Closed" disconnect packet
     for _, client_conn in state.connections {
-        _disconnect_client(state, client_conn)
+        _finalize_client(state, client_conn)
     }
     delete(state.connections)
 }
@@ -185,7 +225,7 @@ _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^Cli
             packet_desc := get_serverbound_packet_descriptor(packet)
             if packet_desc.expected_client_state != client_conn.state {
                 log.debugf("client sent packet in wrong client state (%v != %v): %v", client_conn.state, packet_desc.expected_client_state, packet)
-                _disconnect_client(state, client_conn^)
+                _finalize_client(state, client_conn^)
                 break loop
             }
 
@@ -195,7 +235,7 @@ _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^Cli
                 // TODO: do we even need a channel, what about a futex/atomic mutex and a darray?
                 log.error("tried sending packet to main thread but channel buf is full")
             }
-            if client_conn.close_after_flushing do break loop
+            if client_conn.terminating do break loop
         }
     }
 }
@@ -209,7 +249,7 @@ _handle_clientbound_packet :: proc(state: ^NetworkWorkerState, packet: ServerBou
 
     switch packet in packet {
     case LegacyServerListPingPacket:
-        _disconnect_client(state, client_conn^)
+        _finalize_client(state, client_conn^)
         return
     case HandshakePacket:
         if packet.intent == .Login {
@@ -244,7 +284,7 @@ _handle_clientbound_packet :: proc(state: ^NetworkWorkerState, packet: ServerBou
         enqueue_packet(state.io_ctx, client_conn, status_response)
     case PingRequestPacket:
         enqueue_packet(state.io_ctx, client_conn, PongResponsePacket { payload=packet.payload })
-        client_conn.close_after_flushing = true
+        client_conn.terminating = true
     case LoginStartPacket:
         session_data := _get_session(state, client_conn)
         if session_data.protocol_version != PROTOCOL_VERSION {
@@ -364,7 +404,7 @@ _handle_clientbound_packet :: proc(state: ^NetworkWorkerState, packet: ServerBou
 
 @(private="file")
 _get_session :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection) -> ^SessionData {
-    assert(client_conn.state > .Status, "attempted to get unexistent session due to wrong client state")
+    assert(client_conn.state > .Status, "attempted to get unexistent session in wrong client state")
     return &state.sessions[client_conn.socket]
 }
 
@@ -557,6 +597,7 @@ _send_registry_data :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConn
     })
 }
 
+// Kicks a client with a message, begins client termination.
 @(private="file")
 _kick_client :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection, reason: TextComponent) {
     // TODO: add DisconnectLoginPacket and implement TextComponent -> json
@@ -568,13 +609,16 @@ _kick_client :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection,
     case:
         panic(#procedure + " in wrong client state")
     }
-    client_conn.close_after_flushing = true
+    client_conn.terminating = true
 }
 
-// Unregisters a client and shuts down the connection without transmitting any more data.
+// Shuts down and unregisters a connection from all subsystems, and deallocates it.
 @(private="file")
-_disconnect_client :: proc(state: ^NetworkWorkerState, client_conn: ClientConnection) {
+_finalize_client :: proc(state: ^NetworkWorkerState, client_conn: ClientConnection) {
     tracy.Zone()
+    // ensure termination has been initiated and pending work is flushed, otherwise we would leak memory
+    // and risk terminal packets not being sent.
+    assert(_should_finalize_disconnect(client_conn))
 
     // FIXME: probably want to handle error
     reactor.unregister_client(state.io_ctx, client_conn.socket)

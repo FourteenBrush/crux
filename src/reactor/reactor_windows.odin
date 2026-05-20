@@ -402,6 +402,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
         if io_status == .OPERATION_ABORTED {
             tracy.ZoneN("Stale Completion")
             // TODO: what happens with last write operation, this contains an user allocated buffer, how do we pass it back?
+            // TODO: pass writes back
             
             if op_data.op == .Read {
 	           	_release_recv_buf(ctx, op_data.read.buf)

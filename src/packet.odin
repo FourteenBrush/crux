@@ -116,9 +116,9 @@ ClientBoundPacketId :: enum VarInt {
 }
 
 @(private)
-get_clientbound_packet_id :: proc(packet: ClientBoundPacket) -> ClientBoundPacketId {
+get_clientbound_packet_descriptor :: proc(packet: ClientBoundPacket) -> ClientBoundPacketDescriptor {
     tag: i64 = reflect.get_union_variant_raw_tag(packet)
-    #no_bounds_check return clientbound_packet_id_lookup[tag]
+    #no_bounds_check return clientbound_packet_descriptors[tag]
 }
 
 @(private="file")
@@ -127,21 +127,25 @@ VARIANT_IDX_OF :: intrinsics.type_variant_index_of
 // mapping of ClientBoundPacket raw union tags to packet ids
 // IMPORTANT NOTE: ClientBoundPacket must be #no_nil or we need a +1 on the variant idx
 @(rodata, private="file")
-clientbound_packet_id_lookup := [intrinsics.type_union_variant_count(ClientBoundPacket)]ClientBoundPacketId {
-    VARIANT_IDX_OF(ClientBoundPacket, StatusResponsePacket)            = .StatusResponse,
-    VARIANT_IDX_OF(ClientBoundPacket, PongResponsePacket)              = .PongResponse,
-    VARIANT_IDX_OF(ClientBoundPacket, LoginSuccessPacket)              = .LoginSuccess,
-    VARIANT_IDX_OF(ClientBoundPacket, PluginMessagePacket)             = .PluginMessage,
-    VARIANT_IDX_OF(ClientBoundPacket, DisconnectConfigurationPacket)   = .DisconnectConfiguration,
-    VARIANT_IDX_OF(ClientBoundPacket, KnownPacksPacket)                = .KnownPacks,
-    VARIANT_IDX_OF(ClientBoundPacket, RegistryDataPacket)              = .RegistryData,
-    VARIANT_IDX_OF(ClientBoundPacket, FinishConfigurationPacket)       = .FinishConfiguration,
-    VARIANT_IDX_OF(ClientBoundPacket, LoginPacket)                     = .Login,
-    VARIANT_IDX_OF(ClientBoundPacket, DisconnectPlayPacket)            = .DisconnectPlay,
-    VARIANT_IDX_OF(ClientBoundPacket, SynchronizePlayerPositionPacket) = .SynchronizePlayerPosition,
-    VARIANT_IDX_OF(ClientBoundPacket, PlayerInfoUpdatePacket)          = .PlayerInfoUpdate,
-    VARIANT_IDX_OF(ClientBoundPacket, GameEventPacket)                 = .GameEvent,
-    VARIANT_IDX_OF(ClientBoundPacket, PlayerAbilitiesPacket)           = .PlayerAbilities,
+clientbound_packet_descriptors := [intrinsics.type_union_variant_count(ClientBoundPacket)]ClientBoundPacketDescriptor {
+    // sent in Status state
+    VARIANT_IDX_OF(ClientBoundPacket, StatusResponsePacket)            = { .StatusResponse,            false },
+    VARIANT_IDX_OF(ClientBoundPacket, PongResponsePacket)              = { .PongResponse,              true  },
+    // sent in Login state
+    VARIANT_IDX_OF(ClientBoundPacket, LoginSuccessPacket)              = { .LoginSuccess,              false },
+    // sent in Configuration state
+    VARIANT_IDX_OF(ClientBoundPacket, PluginMessagePacket)             = { .PluginMessage,             false },
+    VARIANT_IDX_OF(ClientBoundPacket, DisconnectConfigurationPacket)   = { .DisconnectConfiguration,   true  },
+    VARIANT_IDX_OF(ClientBoundPacket, KnownPacksPacket)                = { .KnownPacks,                false },
+    VARIANT_IDX_OF(ClientBoundPacket, RegistryDataPacket)              = { .RegistryData,              false },
+    VARIANT_IDX_OF(ClientBoundPacket, FinishConfigurationPacket)       = { .FinishConfiguration,       false },
+    // sent in Play state
+    VARIANT_IDX_OF(ClientBoundPacket, LoginPacket)                     = { .Login,                     false },
+    VARIANT_IDX_OF(ClientBoundPacket, DisconnectPlayPacket)            = { .DisconnectPlay,            true  },
+    VARIANT_IDX_OF(ClientBoundPacket, SynchronizePlayerPositionPacket) = { .SynchronizePlayerPosition, false },
+    VARIANT_IDX_OF(ClientBoundPacket, PlayerInfoUpdatePacket)          = { .PlayerInfoUpdate,          false },
+    VARIANT_IDX_OF(ClientBoundPacket, GameEventPacket)                 = { .GameEvent,                 false },
+    VARIANT_IDX_OF(ClientBoundPacket, PlayerAbilitiesPacket)           = { .PlayerAbilities,           false },
 }
 
 @(private)
@@ -173,8 +177,14 @@ serverbound_packet_descriptors := [intrinsics.type_union_variant_count(ServerBou
     VARIANT_IDX_OF(ServerBoundPacket, PlayerLoadedPacket)                   = { .Play },
 }
 
-// TODO: determine the possibility of storing an "is_terminal" flag on packet descriptors
+@(private)
+ClientBoundPacketDescriptor :: struct {
+    packet_id: ClientBoundPacketId,
+    // Whether the `ClientConnection` sending this packet will enter a terminating state.
+    is_terminal: bool,
+}
 
+@(private)
 ServerBoundPacketDescriptor :: struct {
     // Client state in which this packet should arrive.
     expected_client_state: ClientState,

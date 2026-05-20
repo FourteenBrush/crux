@@ -82,7 +82,19 @@ _unregister_client :: proc(ctx: ^IOContext, conn: net.TCP_Socket) -> bool {
     tracy.Zone()
 
     ok := linux.epoll_ctl(ctx.epoll_fd, .DEL, linux.Fd(conn), nil) == .NONE
+    
     _, pending_writes := delete_key(&ctx.pending_writes, conn)
+    // emit completions for all aborted/partial writes
+    for stale_write in pending_writes.iovecs[pending_writes.head_idx:] {
+        comp := Completion {
+            socket = conn,
+            operation = .Error,
+            buf = stale_write.base[:stale_write.len],
+        }
+        // TODO: replace with _emit_completion() here, but we do not have access to its requires params
+        queue.append(&ctx.completion_queue, comp)
+    }
+    
     delete(pending_writes.iovecs)
     net.close(conn)
     return ok
