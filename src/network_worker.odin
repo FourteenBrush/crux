@@ -2,6 +2,9 @@
 // IO on client sockets, (de)serialization and transmission of packets.
 package crux
 
+import "core:fmt"
+import "core:strings"
+import "core:encoding/base64"
 import "core:os"
 import "core:time"
 import "core:log"
@@ -140,15 +143,15 @@ _network_worker_thread_proc :: proc(shared: ^NetworkWorkerSharedData) {
                     _kick_client(&state, &client_conn, text_component("Timed out", .Red))
                     continue
                 }
-            }
-            
-            elapsed := time.tick_diff(last_keepalive.sent, now)
-            if elapsed > KEEPALIVE_INTRVAL {
-                id := i64(elapsed)
-                enqueue_packet(state.io_ctx, &client_conn, KeepAlivePlayPacket { id=Long(id) })
-                last_keepalive.sent = now
-                last_keepalive.id = id
-                last_keepalive.awaiting_serverbound = true
+            } else {
+                elapsed := time.tick_diff(last_keepalive.sent, now)
+                if elapsed > KEEPALIVE_INTRVAL {
+                    id := i64(elapsed)
+                    enqueue_packet(state.io_ctx, &client_conn, KeepAlivePlayPacket { id=Long(id) })
+                    last_keepalive.sent = now
+                    last_keepalive.id = id
+                    last_keepalive.awaiting_serverbound = true
+                }
             }
         }
     }
@@ -283,6 +286,7 @@ _handle_clientbound_packet :: proc(state: ^NetworkWorkerState, packet: ServerBou
 
     switch packet in packet {
     case LegacyServerListPingPacket:
+        client_conn.terminating = true
         _finalize_client(state, client_conn^)
         return
     case HandshakePacket:
@@ -301,7 +305,7 @@ _handle_clientbound_packet :: proc(state: ^NetworkWorkerState, packet: ServerBou
         for _, conn in state.connections do if conn.state == .Play {
             online_players += 1
         }
-
+        
         status_response := StatusResponsePacket {
             version = {
                 name = GAME_VERSION_STR,
@@ -311,8 +315,8 @@ _handle_clientbound_packet :: proc(state: ^NetworkWorkerState, packet: ServerBou
                 max = 100,
                 online = uint(online_players),
             },
-            description = text_component("Some Server", .DarkAqua),
-            favicon = "data:image/png;base64,<data>",
+            // description = text_component("Some Server", .DarkAqua),
+            favicon = _load_favicon(),
             enforces_secure_chat = false,
         }
         enqueue_packet(state.io_ctx, client_conn, status_response)
@@ -445,6 +449,8 @@ _handle_clientbound_packet :: proc(state: ^NetworkWorkerState, packet: ServerBou
         }
         last_keepalive.awaiting_serverbound = false
     case SwingArmPacket:
+        // empty
+    case PlayerInputPacket:
         // empty
     }
 }
@@ -642,6 +648,20 @@ _send_registry_data :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConn
             { id = Identifier("minecraft:plains"), data = nil },
         },
     })
+}
+
+@(private="file")
+_load_favicon :: proc() -> string {
+    @(static) favicon_encoded: string
+    
+    if favicon_encoded == "" {
+        prefix :: "data:image/png;base64,"
+        sb := strings.builder_make(os.heap_allocator())
+        fmt.sbprint(&sb, prefix, sep="")
+        base64.encode_into(strings.to_writer(&sb), #load("../favicon.png"))
+        favicon_encoded = strings.to_string(sb)
+    }
+    return favicon_encoded
 }
 
 // Kicks a client with a message, begins client termination.
