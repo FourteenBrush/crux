@@ -329,6 +329,22 @@ insert_var_int_5bytes_negative :: proc(t: ^testing.T) {
     expect_buf_state(t, buf, length=5, raw_data=[]u8{ 0x80, 0x80, 0x80, 0x80, 0x08 })
 }
 
+@(test)
+write_var_int_at_start_buffer :: proc(t: ^testing.T) {
+    using crux
+    buf := scoped_create_network_buf(cap=3)
+    
+    wmark := buf_emit_write_mark(buf)
+    data := []u8{ 0x00, 0xe4, 0x53, 0x7b }
+    buf_write_bytes(&buf, data)
+    expect_buf_state(t, buf, length=len(data), r_offset=0, raw_data=data)
+    
+    buf_write_var_int_at(&buf, wmark, VarInt(13159 /*0xe7, 0x66*/))
+    
+    expect_buf_state(t, buf, length=len(data) + 2, raw_data=[]u8{ 0xe7, 0x66, 0x00, 0xe4, 0x53, 0x7b })
+    buf_dump(buf)
+}
+
 @(private="file")
 expect_buf_state :: proc(
     t: ^testing.T,
