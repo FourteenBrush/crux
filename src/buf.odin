@@ -80,12 +80,14 @@ WriteError :: enum {
 BufWriteMark :: distinct int
 
 // Dumps a NetworkBuffer to stdout, for debugging purposes.
-buf_dump :: proc(buf: NetworkBuffer) #no_bounds_check {
-    linear_buf := make([]u8, buf_length(buf), context.temp_allocator)
+buf_dump :: proc(buf: NetworkBuffer, limit: Maybe(int) = nil) #no_bounds_check {
+    dumped_len := min(limit.?, buf_length(buf)) if limit != nil else buf_length(buf)
+    linear_buf := make([]u8, dumped_len, context.temp_allocator)
     buf := buf // copy is fine here
     assert(buf_copy_into(&buf, linear_buf) == .None)
-    fmt.printfln("NetworkBuffer{{len=%d, r_offset=%d, linear_data=%2x (len=%d) (hex)}}",
+    fmt.printfln("NetworkBuffer{{len=%d, r_offset=%d, linear_data=%2x (len=%d) %s (hex)}}",
         len(buf.data), buf.r_offset, linear_buf, len(buf.data),
+        "(limited)" if limit != nil && limit.? != buf_length(buf) else "",
     )
 }
 
@@ -192,7 +194,9 @@ buf_write_var_int_at :: proc(buf: ^NetworkBuffer, mark: BufWriteMark, val: VarIn
     vbuf, vlen := _buf_prepare_var_int(val)
     space := cap(buf.data) - len(buf.data)
     if space < vlen {
-        _buf_reserve_exact(buf, len(buf.data) + vlen)
+        _buf_grow(buf)
+        // recompute w_offset to correctly calculate move_len, consider a full buffer where w_offset = 0 and mark = 0
+        w_offset = (buf.r_offset + len(buf.data)) % cap(buf.data)
     }
 
     // |     | /// | /// |     |
@@ -204,7 +208,7 @@ buf_write_var_int_at :: proc(buf: ^NetworkBuffer, mark: BufWriteMark, val: VarIn
         panic("yet to be implemented")
     } else {
         // W >= M for all cases
-        move_len := w_offset - mark_idx // >= 0
+        move_len := w_offset - mark_idx // >= 0, 0 if writing to empty buffer at idx 0
         
         if move_len > 0 {
             // amount of bytes that can be positioned behind the newly inserted vbuf (can be pos/neg/zero) (<= move_len)
@@ -260,7 +264,7 @@ buf_write_long :: proc(buf: ^NetworkBuffer, val: Long) {
 buf_write_byte :: proc(buf: ^NetworkBuffer, b: u8) #no_bounds_check {
     space := cap(buf.data) - len(buf.data)
     if space == 0 {
-        _buf_reserve(buf)
+        _buf_grow(buf)
     }
     buf.data[buf.r_offset + len(buf.data)] = b
     (cast(^mem.Raw_Dynamic_Array)&buf.data).len += 1
@@ -268,8 +272,9 @@ buf_write_byte :: proc(buf: ^NetworkBuffer, b: u8) #no_bounds_check {
 
 // FIXME: inline?
 @(private="file")
-_buf_reserve :: proc(buf: ^NetworkBuffer) {
-    _buf_reserve_exact(buf, max(16, len(buf.data) * 2))
+_buf_grow :: proc(buf: ^NetworkBuffer) {
+    // need to ensure we grow at least the size of a scalar type
+    _buf_reserve_exact(buf, max(32, len(buf.data) * 2))
 }
 
 // TODO: get rid of this and use a * 2 growth strategy
