@@ -119,8 +119,16 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
     case .SwingArm:
         hand := buf_read_var_int_enum(b, Hand) or_return
         return SwingArmPacket { hand=hand }, .None
+    case .PlayerInput:
+        // TODO: buf_read_byte_enum/flags
+        flags := buf_read_byte(b) or_return
+        return PlayerInputPacket { flags=transmute(PlayerInputs)flags }, .None
+    case .FlightChange:
+        // TODO: buf_read_byte_enum/flags
+        flags := buf_read_byte(b) or_return
+        return PlayerFlightChangePacket { flags=transmute(PlayerFlightChangeFlags)flags }, .None
     case:
-        log.warn("unhandled packet id:", ServerBoundPacketId(id), "kicking with .InvalidData")
+        log.warnf("unhandled packet id: 0x%x, kicking with .InvalidData", id)
         return p, .InvalidData
     }
 }

@@ -129,7 +129,7 @@ _network_worker_thread_proc :: proc(shared: ^NetworkWorkerSharedData) {
         _network_worker_run_tick(&state)
         
         // send keepalive packets, required every 1-15 secs, disconnect after 20 secs
-        KEEPALIVE_INTRVAL :: 13 * time.Second
+        KEEPALIVE_INTERVAL :: 13 * time.Second
         KEEPALIVE_TIMEOUT :: 20 * time.Second
         // FIXME: would ideally base this off world ticks instead of monotonic clock syscalls
         now := time.tick_now()
@@ -137,21 +137,18 @@ _network_worker_thread_proc :: proc(shared: ^NetworkWorkerSharedData) {
             if client_conn.state != .Play || client_conn.terminating do continue
             
             last_keepalive := &client_conn.clientbound_keepalive
+            elapsed := time.tick_diff(last_keepalive.sent, now)
             if last_keepalive.awaiting_serverbound {
-                elapsed := time.tick_diff(last_keepalive.sent, now)
                 if elapsed > KEEPALIVE_TIMEOUT {
                     _kick_client(&state, &client_conn, text_component("Timed out", .Red))
                     continue
                 }
-            } else {
-                elapsed := time.tick_diff(last_keepalive.sent, now)
-                if elapsed > KEEPALIVE_INTRVAL {
-                    id := i64(elapsed)
-                    enqueue_packet(state.io_ctx, &client_conn, KeepAlivePlayPacket { id=Long(id) })
-                    last_keepalive.sent = now
-                    last_keepalive.id = id
-                    last_keepalive.awaiting_serverbound = true
-                }
+            } else if elapsed > KEEPALIVE_INTERVAL {
+                id := i64(elapsed)
+                enqueue_packet(state.io_ctx, &client_conn, KeepAlivePlayPacket { id=Long(id) })
+                last_keepalive.sent = now
+                last_keepalive.id = id
+                last_keepalive.awaiting_serverbound = true
             }
         }
     }
@@ -451,6 +448,8 @@ _handle_clientbound_packet :: proc(state: ^NetworkWorkerState, packet: ServerBou
     case SwingArmPacket:
         // empty
     case PlayerInputPacket:
+        // empty
+    case PlayerFlightChangePacket:
         // empty
     }
 }

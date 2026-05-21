@@ -34,6 +34,8 @@ ServerBoundPacket :: union #no_nil {
     PlayerLoadedPacket,
     KeepAlivePlayPacket,
     SwingArmPacket,
+    PlayerInputPacket,
+    PlayerFlightChangePacket,
 }
 
 ServerBoundPacketId :: enum VarInt {
@@ -68,6 +70,9 @@ ServerBoundPacketId :: enum VarInt {
     PlayerLoaded              = 0x2b,
     KeepAlivePlay             = 0x1b,
     SwingArm                  = 0x3c,
+    PlayerInput               = 0x2a,
+    // player abilities
+    FlightChange              = 0x27,
 }
 
 ClientBoundPacket :: union #no_nil {
@@ -184,6 +189,8 @@ serverbound_packet_descriptors := [intrinsics.type_union_variant_count(ServerBou
     VARIANT_IDX_OF(ServerBoundPacket, PlayerLoadedPacket)                   = { .Play },
     VARIANT_IDX_OF(ServerBoundPacket, KeepAlivePlayPacket)                  = { .Play },
     VARIANT_IDX_OF(ServerBoundPacket, SwingArmPacket)                       = { .Play },
+    VARIANT_IDX_OF(ServerBoundPacket, PlayerInputPacket)                    = { .Play },
+    VARIANT_IDX_OF(ServerBoundPacket, PlayerFlightChangePacket)             = { .Play },
 }
 
 @(private)
@@ -200,8 +207,21 @@ ServerBoundPacketDescriptor :: struct {
 }
 
 // ---------------------------------------- 
-// Handshake phase related packets
+// Serverbound Handshake state related packets
 // ---------------------------------------- 
+
+LegacyServerListPingPacket :: struct {
+    v1_6_extension: Maybe(LegacyServerListPingV1_6Extension),
+}
+
+// TODO: use string16 type when odin tagged release appears (actually dont and revision if this is even a utf16 string)
+LegacyServerListPingV1_6Extension :: struct {
+    plugin_msg_packet_id: u8,
+    channel: Utf16String,
+    protocol_version: u8,
+    hostname: Utf16String,
+    port: i32be,
+}
 
 HandshakePacket :: struct {
     protocol_version: ProtocolVersion,
@@ -217,21 +237,8 @@ HandshakeIntent :: enum VarInt {
     Transfer  = 3,
 }
 
-LegacyServerListPingPacket :: struct {
-    v1_6_extension: Maybe(LegacyServerListPingV1_6Extension),
-}
-
-// TODO: use string16 type when odin tagged release appears (actually dont and revision if this is even a utf16 string)
-LegacyServerListPingV1_6Extension :: struct {
-    plugin_msg_packet_id: u8,
-    channel: Utf16String,
-    protocol_version: u8,
-    hostname: Utf16String,
-    port: i32be,
-}
-
 // ---------------------------------------- 
-// Status phase related packets
+// Serverbound Status state related packets
 // ---------------------------------------- 
 
 StatusRequestPacket :: struct {}
@@ -241,7 +248,7 @@ PingRequestPacket :: struct {
 }
 
 // ---------------------------------------- 
-// Login phase related packets
+// Serverbound Login state related packets
 // ---------------------------------------- 
 
 LoginStartPacket :: struct {
@@ -252,7 +259,7 @@ LoginStartPacket :: struct {
 LoginAcknowledgedPacket :: struct {}
 
 // ---------------------------------------- 
-// Configuration phase related packets
+// Serverbound Configuration state related packets
 // ---------------------------------------- 
 
 PluginMessagePacket :: struct {
@@ -301,12 +308,6 @@ ParticleStatus :: enum VarInt {
     Minimal   = 2,
 }
 
-ConnectionState :: enum VarInt {
-    Status = 1,
-    Login = 2,
-    Transfer = 3,
-}
-
 KnownPacksPacket :: struct {
     known_packs: []KnownPack,
 }
@@ -319,8 +320,74 @@ KnownPack :: struct {
 
 AcknowledgeFinishConfigurationPacket :: struct {}
 
-// Namespaced location thing, in the form of `minecraft:thing`, when no namespace is provided, it defaults to `minecraft`.
-Identifier :: distinct string
+// ---------------------------------------- 
+// Serverbound Play state related packets
+// ---------------------------------------- 
+
+ClientTickEndPacket :: struct {}
+
+SetPlayerRotationPacket :: struct {
+    yaw: f32,
+    pitch: f32,
+    // TODO: change to bitfield and fix decoding invalid values
+    flags: u8,
+}
+
+SetPlayerPositionPacket :: struct {
+    x: f64,
+    feet_y: f64,
+    z: f64,
+    // TODO: change to bitfield and fix decoding invalid values
+    flags: u8,
+}
+
+SetPlayerPositionRotationPacket :: struct {
+    x: f64,
+    feet_y: f64,
+    z: f64,
+    yaw: f32,
+    pitch: f32,
+    // TODO: change to bitfield and fix decoding invalid values
+    flags: u8,
+}
+
+ConfirmTeleportationPacket :: struct {
+    teleport_id: VarInt,
+}
+
+PlayerLoadedPacket :: struct {}
+
+SwingArmPacket :: struct {
+    hand: Hand,
+}
+Hand :: enum { MainHand = 0, OffHand = 1 }
+
+PlayerInputPacket :: struct {
+    flags: PlayerInputs,
+}
+PlayerInputs :: bit_set[PlayerInput; u8]
+PlayerInput :: enum {
+    Forward  = LOG2(0x01),
+    Backward = LOG2(0x02),
+    Left     = LOG2(0x04),
+    Right    = LOG2(0x08),
+    Jump     = LOG2(0x10),
+    Sneak    = LOG2(0x20),
+    Sprint   = LOG2(0x40),
+}
+
+PlayerFlightChangePacket :: struct {
+    flags: PlayerFlightChangeFlags,
+}
+PlayerFlightChangeFlags :: bit_set[enum { Flying = LOG2(0x02) }; u8]
+
+// ================================================================================
+// CLIENTBOUND PACKETS
+// ================================================================================
+
+// ---------------------------------------- 
+// Clientbound Status state related packets
+// ---------------------------------------- 
 
 // Only the version.name field should be considered mandatory
 // TODO: place json:omitempty tags
@@ -330,8 +397,8 @@ StatusResponsePacket :: struct {
         protocol: ProtocolVersion `json:"protocol"`,
     },
     players: struct { max: uint, online: uint },
-    description: TextComponent,
-    favicon: string,
+    // description: TextComponent,
+    favicon: string `fmt:"-"`,
     enforces_secure_chat: bool `json:"enforcesSecureChat"`,
 }
 
@@ -339,9 +406,17 @@ PongResponsePacket :: struct {
     payload: Long,
 }
 
+// ---------------------------------------- 
+// Clientbound Login state related packets
+// ---------------------------------------- 
+
 LoginSuccessPacket :: struct {
     game_profile: GameProfile,
 }
+
+// ---------------------------------------- 
+// Clientbound Configuration state related packets
+// ---------------------------------------- 
 
 // A disconnect packet issued during the configuration state (disconnect resource).
 DisconnectConfigurationPacket :: struct {
@@ -557,27 +632,10 @@ Biome :: struct {
     // spawners: 
 }
 
-// Tag starting with #
-Tag :: distinct string
-
 FinishConfigurationPacket :: struct {}
 
-GameProfile :: struct {
-    // contains multiple multiple properties in theory, but we (and the vanilla client) only ever sends one
-    using _: Property,
-    uuid: uuid.Identifier,
-    username: string,
-}
-
-// Key-value pair, optionally signed
-Property :: struct {
-    name: string /*(64)*/,
-    value: string /*(32767)*/,
-    signature: Maybe(string) /*(1024)*/,
-}
-
 // ---------------------------------------- 
-//  Play phase related packets
+//  Clientbound Play state related packets
 // ---------------------------------------- 
 
 LoginPacket :: struct {
@@ -641,52 +699,6 @@ TeleportFlag :: enum {
     RelativeVelocityY = LOG2(0x0040),
     RelativeVelocityZ = LOG2(0x0080),
     RotateVelocity    = LOG2(0x100),
-}
-
-ClientTickEndPacket :: struct {}
-
-SetPlayerRotationPacket :: struct {
-    yaw: f32,
-    pitch: f32,
-    // TODO: change to bitfield and fix decoding invalid values
-    flags: u8,
-}
-
-SetPlayerPositionPacket :: struct {
-    x: f64,
-    feet_y: f64,
-    z: f64,
-    // TODO: change to bitfield and fix decoding invalid values
-    flags: u8,
-}
-
-SetPlayerPositionRotationPacket :: struct {
-    x: f64,
-    feet_y: f64,
-    z: f64,
-    yaw: f32,
-    pitch: f32,
-    // TODO: change to bitfield and fix decoding invalid values
-    flags: u8,
-}
-
-ConfirmTeleportationPacket :: struct {
-    teleport_id: VarInt,
-}
-
-PlayerLoadedPacket :: struct {}
-
-SwingArmPacket :: struct {
-    hand: Hand,
-}
-Hand :: enum { MainHand = 0, OffHand = 1 }
-
-PlayerAbilityFlags :: bit_set[PlayerAbilityFlag; u8]
-PlayerAbilityFlag :: enum {
-    Invulnerable = LOG2(0x01),
-    Flying       = LOG2(0x02),
-    AllowFlying  = LOG2(0x04),
-    CreativeMode = LOG2(0x08),
 }
 
 PlayerInfoUpdatePacket :: struct {
@@ -792,9 +804,31 @@ PlayerAbilitiesPacket :: struct {
     flying_speed: f32,
     fov_modifier: f32,
 }
+PlayerAbilityFlags :: bit_set[PlayerAbilityFlag; u8]
+PlayerAbilityFlag :: enum {
+    Invulnerable = LOG2(0x01),
+    Flying       = LOG2(0x02),
+    AllowFlying  = LOG2(0x04),
+    CreativeMode = LOG2(0x08),
+}
 
 KeepAlivePlayPacket :: struct {
     id: Long,
+}
+
+
+GameProfile :: struct {
+    // contains multiple properties in theory, but we (and the vanilla client) only ever sends one
+    using _: Property,
+    uuid: uuid.Identifier,
+    username: string,
+}
+
+// Key-value pair, optionally signed
+Property :: struct {
+    name: string /*(64)*/,
+    value: string /*(32767)*/,
+    signature: Maybe(string) /*(1024)*/,
 }
 
 Position :: bit_field i64be {
@@ -802,3 +836,9 @@ Position :: bit_field i64be {
     z: i32be | 26,
     y: i16be | 12,
 }
+
+// Namespaced location thing, in the form of `minecraft:thing`, when no namespace is provided, it defaults to `minecraft`.
+Identifier :: distinct string
+
+// Tag starting with #
+Tag :: distinct string
