@@ -127,6 +127,12 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
         // TODO: buf_read_byte_enum/flags
         flags := buf_read_byte(b) or_return
         return PlayerFlightChangePacket { flags=transmute(PlayerFlightChangeFlags)flags }, .None
+    case .StoreCookiePlay:
+        key := buf_read_identifier(b, allocator) or_return
+        payload_len := buf_read_var_int(b) or_return
+        payload := mem.alloc_bytes_non_zeroed(int(payload_len), align_of(u8), allocator) or_else panic("OOM")
+        buf_read_bytes(b, payload) or_return
+        return StoreCookiePlayPacket { key=key, payload=payload }, .None
     case:
         log.warnf("unhandled packet id: 0x%x, kicking with .InvalidData", id)
         return p, .InvalidData

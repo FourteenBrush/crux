@@ -36,6 +36,7 @@ ServerBoundPacket :: union #no_nil {
     SwingArmPacket,
     PlayerInputPacket,
     PlayerFlightChangePacket,
+    StoreCookiePlayPacket,
 }
 
 ServerBoundPacketId :: enum VarInt {
@@ -73,6 +74,7 @@ ServerBoundPacketId :: enum VarInt {
     PlayerInput               = 0x2a,
     // player abilities
     FlightChange              = 0x27,
+    StoreCookiePlay           = 0x76,
 }
 
 ClientBoundPacket :: union #no_nil {
@@ -191,6 +193,7 @@ serverbound_packet_descriptors := [intrinsics.type_union_variant_count(ServerBou
     VARIANT_IDX_OF(ServerBoundPacket, SwingArmPacket)                       = { .Play },
     VARIANT_IDX_OF(ServerBoundPacket, PlayerInputPacket)                    = { .Play },
     VARIANT_IDX_OF(ServerBoundPacket, PlayerFlightChangePacket)             = { .Play },
+    VARIANT_IDX_OF(ServerBoundPacket, StoreCookiePlayPacket)                = { .Play },
 }
 
 @(private)
@@ -380,6 +383,11 @@ PlayerFlightChangePacket :: struct {
     flags: PlayerFlightChangeFlags,
 }
 PlayerFlightChangeFlags :: bit_set[enum { Flying = LOG2(0x02) }; u8]
+
+StoreCookiePlayPacket :: struct {
+    key: Identifier,
+    payload: []u8,
+}
 
 // ================================================================================
 // CLIENTBOUND PACKETS
