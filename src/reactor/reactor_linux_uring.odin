@@ -206,9 +206,10 @@ when USE_IO_URING {
     _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, timeout_ms: int) -> (n: int, ok: bool) {
         tracy.Zone()
 
+        // TODO: is _nsec:0 be supported for infinite blocking?
         nconsumed, errno := linux.io_uring_enter2(ctx.ring_fd, ctx.sq.to_submit, 1, {.GETEVENTS, .EXT_ARG}, &linux.IO_Uring_Getevents_Arg {
             // pass wait timeout, requires EXT_ARG and a kernel version >= 5.11
-            ts = &linux.Time_Spec { time_nsec = 1 * 1000 * 1000 },
+            ts = &linux.Time_Spec { time_nsec = timeout_ms * 1000 * 1000 },
         })
         if errno != .NONE && errno != .ETIME do return
         ctx.sq.to_submit = 0
