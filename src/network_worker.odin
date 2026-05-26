@@ -229,8 +229,7 @@ _network_worker_run_tick :: proc(state: ^NetworkWorkerState) {
             }
         case .NewConnection:
             state.connections[comp.socket] = _create_client_connection(comp.socket)
-            // TODO: get access to Endpoint here
-            log.debugf("client connected (fd %d)", comp.socket)
+            log.info("new connection from", net.endpoint_to_string_allocator(comp.endpoint, context.temp_allocator))
         }
     }
 }

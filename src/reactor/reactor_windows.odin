@@ -9,9 +9,14 @@ import win32 "core:sys/windows"
 
 import "lib:tracy"
 
+// TODO: add support for _wakeup through PostQueuedCompletionStatus
+@(private)
+_TIMEOUT_INFINITE :: win32.INFINITE
+
 // Required size to store ipv4 socket addr for AcceptEx calls (see docs)
 @(private="file")
 ADDR_BUF_SIZE :: size_of(win32.sockaddr_in) + 16
+#assert(size_of(win32.SOCKADDR_STORAGE_LH) >= ADDR_BUF_SIZE)
 
 // How many bytes of actual data to receive into the AcceptEx buffer
 @(private="file")
@@ -430,11 +435,12 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
                 discard_entry = true
             }
 
-            _configure_accepted_client(ctx, client_sock) or_continue
+            remote_addr := _configure_accepted_client(ctx, client_sock) or_continue
             _register_client(ctx, client_sock) or_continue
             
             comp.operation = .NewConnection
             comp.socket = net.TCP_Socket(client_sock)
+            comp.endpoint = _sockaddr_to_endpoint(remote_addr)
             accept_success = true
 
             // re-arm accept handler, NOTE: fatal if this fails, no new connections can be accepted
@@ -474,6 +480,26 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 	return int(nready), true
 }
 
+@(private="file")
+_sockaddr_to_endpoint :: proc(addr: ^win32.sockaddr) -> net.Endpoint {
+    switch addr.sa_family {
+    case u16(win32.AF_INET):
+        addr := cast(^win32.sockaddr_in)addr
+        return net.Endpoint {
+            address = net.IP4_Address(transmute([4]u8)addr.sin_addr),
+            port = int(addr.sin_port),
+        }
+    case u16(win32.AF_INET6):
+        addr := cast(^win32.sockaddr_in6)addr
+        port := int(addr.sin6_port)
+        return net.Endpoint {
+            address = net.IP6_Address(transmute([8]u16be)addr.sin6_addr),
+            port = int(addr.sin6_port),
+        }
+    case: panic("neither ipv4 nor ipv6 address")
+    }
+}
+
 @(private)
 _release_recv_buf :: proc(ctx: ^IOContext, buf: []u8) {
     tracy.Zone()
@@ -486,6 +512,11 @@ _submit_write_copy :: proc(ctx: ^IOContext, conn: net.TCP_Socket, data: []u8) ->
     tracy.Zone()
 
     return _initiate_send(ctx, win32.SOCKET(conn), data)
+}
+
+@(private)
+_wakeup :: proc(ctx: ^IOContext) {
+    unimplemented()
 }
 
 @(private="file")
@@ -518,7 +549,7 @@ _initiate_send :: proc(ctx: ^IOContext, socket: win32.SOCKET, data: []u8, partia
 }
 
 @(private="file")
-_configure_accepted_client :: proc(ctx: ^IOContext, client_sock: win32.SOCKET) -> bool {
+_configure_accepted_client :: proc(ctx: ^IOContext, client_sock: win32.SOCKET) -> (remote: ^win32.sockaddr, ok: bool) {
     tracy.Zone()
 
     // parse AcceptEx buffer to find addresses (unused) and unblock socket
@@ -546,16 +577,16 @@ _configure_accepted_client :: proc(ctx: ^IOContext, client_sock: win32.SOCKET) -
         &ctx.server_sock, size_of(ctx.server_sock),
 	)
 	if result != 0 {
-	    return false
+	    return
 	}
 
 	if net.set_blocking(net.TCP_Socket(client_sock), false) != .None {
-	    return false
+	    return
 	}
 	if net.set_option(net.TCP_Socket(client_sock), .TCP_Nodelay, true) != .None {
-	    return false
+	    return
 	}
-	return true
+	return remote_addr, true
 }
 
 @(private="file")
