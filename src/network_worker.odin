@@ -2,9 +2,6 @@
 // IO on client sockets, (de)serialization and transmission of packets.
 package crux
 
-import "core:fmt"
-import "core:strings"
-import "core:encoding/base64"
 import "core:os"
 import "core:time"
 import "core:log"
@@ -12,7 +9,7 @@ import "core:mem"
 import "core:net"
 import "core:sync"
 import "base:runtime"
-import "core:sync/chan"
+import "core:container/queue"
 
 import "src:reactor"
 
@@ -34,8 +31,9 @@ NetworkWorkerSharedData :: struct {
     threadsafe_alloc: mem.Allocator,
     // Ptr to atomic bool, indicating whether to continue running, modified upstream.
     execution_permit: ^bool,
-    // Packet channel back to main thread.
-    packet_bridge: chan.Chan(Packet, .Send),
+    // Packet channel to main thread.
+    outbound_queue: ^SPSC(BridgeMessage(ServerBoundPacket)),
+    inbound_queue: ^SPSC(BridgeMessage(ClientBoundPacket)),
 }
 
 // All members are explicitly owned by this thread, unless specified otherwise.
@@ -43,12 +41,50 @@ NetworkWorkerSharedData :: struct {
 NetworkWorkerState :: struct {
     using shared: NetworkWorkerSharedData,
     connections: map[net.TCP_Socket]ClientConnection,
+}
+
+@(private)
+BridgeMessage :: union($P: typeid) #no_nil {
+    PacketTransfer(P),
+    TerminateClientRequest,
+}
+
+@(private)
+TerminateClientRequest :: struct {
+    client: net.TCP_Socket,
+}
     
-    // World data essentially, TODO: move this out to some world abstraction once this is established
-    sessions: map[net.TCP_Socket]SessionData,
+@(private)
+PacketTransfer :: struct($P: typeid) {
+    socket: net.TCP_Socket,
+    // FIXME: store packet ptr instead, and epoch for recycling
+    packet: P,
+}
+
+// TODO: make this a wait-free ringbuffer instead of whatever nonsense this is
+@(private)
+SPSC :: struct($E: typeid) {
+    data: queue.Queue(E),
+    mutex: sync.Atomic_Mutex,
+}
+
+@(private)
+spsc_enqueue :: proc(q: ^SPSC($E), elem: E) {
+    if sync.guard(&q.mutex) {
+        _ = queue.push(&q.data, elem) or_else panic(#procedure + ": OOM")
+    }
+}
+
+@(private)
+spsc_dequeue :: proc(q: ^SPSC($E)) -> (E, bool) {
+    if sync.guard(&q.mutex) {
+        return queue.pop_front_safe(&q.data)
+    }
+    unreachable()
 }
 
 // IO client context.
+@(private="file")
 ClientConnection :: struct {
     // Non blocking socket
     socket: net.TCP_Socket,
@@ -65,13 +101,6 @@ ClientConnection :: struct {
     // When this number reaches zero, and `terminating` is true, this connection will be fully closed and cleaned up.
     outstanding_writes: u32,
     
-    clientbound_keepalive: struct {
-        // Zero initialized if we haven't sent any.
-        sent: time.Tick,
-        id: i64,
-        awaiting_serverbound: bool,
-    },
-    
     // Allocator to deal with all packet related allocations, overwriting itself
     // if there is too much backpressure.
     packet_scratch_alloc: mem.Allocator,
@@ -87,12 +116,6 @@ _should_finalize_disconnect :: proc(conn: ClientConnection) -> bool {
     return conn.terminating && conn.outstanding_writes == 0
 }
 
-@(private="file")
-SessionData :: struct {
-    protocol_version: ProtocolVersion,
-    game_profile: GameProfile,
-}
-
 // TODO: logger is not threadsafe
 @(private)
 _network_worker_thread_proc :: proc(shared: ^NetworkWorkerSharedData) {
@@ -100,7 +123,6 @@ _network_worker_thread_proc :: proc(shared: ^NetworkWorkerSharedData) {
     state := NetworkWorkerState {
         shared = shared^,
         connections = make(map[net.TCP_Socket]ClientConnection, 16, os.heap_allocator()),
-        sessions = make(map[net.TCP_Socket]SessionData, 16, os.heap_allocator()),
     }
 
     defer cleanup: {
@@ -127,30 +149,6 @@ _network_worker_thread_proc :: proc(shared: ^NetworkWorkerSharedData) {
         }
 
         _network_worker_run_tick(&state)
-        
-        // send keepalive packets, required every 1-15 secs, disconnect after 20 secs
-        KEEPALIVE_INTERVAL :: 13 * time.Second
-        KEEPALIVE_TIMEOUT :: 20 * time.Second
-        // FIXME: would ideally base this off world ticks instead of monotonic clock syscalls
-        now := time.tick_now()
-        for _, &client_conn in state.connections {
-            if client_conn.state != .Play || client_conn.terminating do continue
-            
-            last_keepalive := &client_conn.clientbound_keepalive
-            elapsed := time.tick_diff(last_keepalive.sent, now)
-            if last_keepalive.awaiting_serverbound {
-                if elapsed > KEEPALIVE_TIMEOUT {
-                    _kick_client(&state, &client_conn, text_component("Timed out", .Red))
-                    continue
-                }
-            } else if elapsed > KEEPALIVE_INTERVAL {
-                id := i64(elapsed)
-                enqueue_packet(state.io_ctx, &client_conn, KeepAlivePlayPacket { id=Long(id) })
-                last_keepalive.sent = now
-                last_keepalive.id = id
-                last_keepalive.awaiting_serverbound = true
-            }
-        }
     }
 }
 
@@ -158,13 +156,29 @@ _network_worker_thread_proc :: proc(shared: ^NetworkWorkerSharedData) {
 _network_worker_run_tick :: proc(state: ^NetworkWorkerState) {
     REACTOR_TIMEOUT_MS :: 1
     #assert(REACTOR_TIMEOUT_MS < WORKER_TARGET_MSPT)
-
+    
+    // process clientbound packets coming from the main thread
+    for message in spsc_dequeue(state.inbound_queue) {
+        s: switch message in message {
+        case TerminateClientRequest:
+            // may be a stale request
+            client_conn := (&state.connections[message.client]) or_break s
+            client_conn.terminating = true
+        case PacketTransfer(ClientBoundPacket):
+            client_conn := &state.connections[message.socket]
+            if client_conn.terminating do break s
+            _enqueue_packet(state.io_ctx, client_conn, message.packet)
+        }
+    }
+    
     completions: [512]reactor.Completion
     // NOTE: do not indefinitely block or this thread can't be joined
     // TODO: scale down timer resolution when no clients are connected
-    nready, await_ok := reactor.await_io_completions(state.io_ctx, completions[:], timeout_ms=REACTOR_TIMEOUT_MS)
+    nready, await_ok := reactor.await_io_completions(state.io_ctx, completions[:], timeout_ms=reactor.TIMEOUT_INFINITE)
     assert(await_ok, "failed to await io events") // TODO: proper error handling
 
+    // TODO: await_completions(..., INFINITE), as a thread join will call reactor.wakeup() before doing so
+    // log.error("epoll_wait wakeup, nready=", nready)
     for comp in completions[:nready] {
         tracy.ZoneN("ProcessCompletion")
         
@@ -175,6 +189,7 @@ _network_worker_run_tick :: proc(state: ^NetworkWorkerState) {
             "completion with outstanding write ownership arrived after ClientConnection destruction",
         )
         if comp_holds_conn_alive {
+            assert(client_conn.outstanding_writes > 0)
             client_conn.outstanding_writes -= 1
         }
 
@@ -213,21 +228,8 @@ _network_worker_run_tick :: proc(state: ^NetworkWorkerState) {
                 _finalize_client(state, client_conn^)
             }
         case .NewConnection:
-            packet_scratch := new(mem.Scratch, os.heap_allocator())
-            mem.scratch_init(packet_scratch, PACKET_SCRATCH_BUFFER_SIZE, backup_allocator=os.heap_allocator())
-            // NOTE: disallow out of band allocations larger than allocator cap, as they would be leaked either way
-            packet_scratch.backup_allocator = mem.panic_allocator()
-            packet_scratch.leaked_allocations.allocator = mem.panic_allocator()
-            
-            state.connections[comp.socket] = ClientConnection {
-                socket = comp.socket,
-                state  = .Handshake,
-                
-                packet_scratch_alloc = mem.scratch_allocator(packet_scratch),
-                rx_buf = create_network_buf(10240, allocator=os.heap_allocator()),
-                tx_buf = create_network_buf(10240, allocator=os.heap_allocator()),
-            }
-
+            state.connections[comp.socket] = _create_client_connection(comp.socket)
+            // TODO: get access to Endpoint here
             log.debugf("client connected (fd %d)", comp.socket)
         }
     }
@@ -263,419 +265,83 @@ _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^Cli
                 break loop
             }
 
-            _handle_clientbound_packet(state, packet, client_conn)
-            success := chan.try_send(state.packet_bridge, packet)
-            if !success {
-                // TODO: do we even need a channel, what about a futex/atomic mutex and a darray?
-                log.error("tried sending packet to main thread but channel buf is full")
+            // tap into inbound packets to keep our client state in sync with the main thread
+            // TODO: do this in a cleaner way
+            #partial switch packet in packet {
+            case HandshakePacket: client_conn.state = ClientState(packet.intent) // safe to cast
+            case LoginAcknowledgedPacket: client_conn.state = .Configuration
+            case AcknowledgeFinishConfigurationPacket: client_conn.state = .Play
             }
+            
+            message := PacketTransfer(ServerBoundPacket) { socket=client_conn.socket, packet=packet }
+            spsc_enqueue(state.outbound_queue, message)
             if client_conn.terminating do break loop
         }
     }
 }
 
+// TODO: propagate errors and close connection
 @(private="file")
-_handle_clientbound_packet :: proc(state: ^NetworkWorkerState, packet: ServerBoundPacket, client_conn: ^ClientConnection) {
-    // get rid of some of the packet spam
-    if _, is_client_tick := packet.(ClientTickEndPacket); !is_client_tick {
-        log.log(LOG_LEVEL_INBOUND, "Received Packet", packet)
-    }
-
-    switch packet in packet {
-    case LegacyServerListPingPacket:
-        client_conn.terminating = true
-        _finalize_client(state, client_conn^)
-        return
-    case HandshakePacket:
-        if packet.intent == .Login {
-            // client may have an unsupported protocol version, but there is no way to kick them with a custom message here
-            // (no disconnect packet for Handshake state exist), so we wait till the first Login state packet (LoginStart)
-            // and kick them there.
-            map_insert(&state.sessions, client_conn.socket, SessionData { 
-                protocol_version = packet.protocol_version,
-                game_profile = {}, // filled in on LoginStart
-            })
-        }
-        client_conn.state = ClientState(packet.intent) // safe to cast
-    case StatusRequestPacket:
-        online_players := 0
-        for _, conn in state.connections do if conn.state == .Play {
-            online_players += 1
-        }
-        
-        status_response := StatusResponsePacket {
-            version = {
-                name = GAME_VERSION_STR,
-                protocol = PROTOCOL_VERSION,
-            },
-            players = {
-                max = 100,
-                online = uint(online_players),
-            },
-            // description = text_component("Some Server", .DarkAqua),
-            favicon = _load_favicon(),
-            enforces_secure_chat = false,
-        }
-        enqueue_packet(state.io_ctx, client_conn, status_response)
-    case PingRequestPacket:
-        enqueue_packet(state.io_ctx, client_conn, PongResponsePacket { payload=packet.payload })
-        client_conn.terminating = true
-    case LoginStartPacket:
-        session_data := _get_session(state, client_conn)
-        if session_data.protocol_version != PROTOCOL_VERSION {
-            _kick_client(state, client_conn, text_component("Unsupported protocol version", .Red))
-            return
-        }
-        // FIXME: negotiate compression here
-
-        // TODO: fetch skin here and cache
-        session_data.game_profile = GameProfile {
-            uuid = packet.uuid,
-            username = packet.username,
-            name = "textures",
-            value = "somestringhere",
-            signature = nil,
-        }
-        enqueue_packet(state.io_ctx, client_conn, LoginSuccessPacket { game_profile=session_data.game_profile })
-    case LoginAcknowledgedPacket:
-        client_conn.state = .Configuration
-    case PluginMessagePacket:
-        // empty
-    case ClientInformationPacket:
-        // from here on, send server configuration until we reach a serverbound finish config ack
-        enqueue_packet(state.io_ctx, client_conn, PluginMessagePacket {
-            channel = "minecraft:brand",
-            // TODO: hand crafted for now, will we store the payload as a NetworkBuffer in the future?
-            // payload for minecraft:brand is a length prefixed string
-            payload = { len("crux"), 'c', 'r', 'u', 'x' },
-        })
-        enqueue_packet(state.io_ctx, client_conn, KnownPacksPacket {
-            known_packs = {
-                { namespace = "minecraft", id = "core", version = "1.21.10" },
-            },
-        })
-    case KnownPacksPacket:
-        ensure_has_core: for pack, i in packet.known_packs {
-            if pack.namespace != "minecraft" && pack.id != "core" {
-                if i == len(packet.known_packs) - 1 {
-                    kick_reason := text_component("No mutual minecraft:core known packs", TextColor(0xffaacc), {.Bold})
-                    _kick_client(state, client_conn, kick_reason)
-                    break ensure_has_core
-                }
-            }
-        }
-        
-        // TODO: send remaining registries with nil data if known pack minecraft:core is present
-        _send_registry_data(state.io_ctx, client_conn)
-        
-        enqueue_packet(state.io_ctx, client_conn, FinishConfigurationPacket {})
-    case AcknowledgeFinishConfigurationPacket:
-        client_conn.state = .Play
-        enqueue_packet(state.io_ctx, client_conn, LoginPacket {
-            entity_id = 2,
-            is_hardcore = false,
-            dimension_names = {Identifier("minecraft:overworld")},
-            max_players = 100,
-            view_distance = 8,
-            simulation_distance = 6,
-            reduced_debug_info = false,
-            enable_respawn_screen = true,
-            do_limited_crafting = true,
-            dimension_type = 0,
-            dimension_name = Identifier("minecraft:overworld"),
-            hashed_seed = 0x6816257285065639, // random
-            gamemode = .Survival,
-            prev_gamemode = nil,
-            is_debug = false,
-            is_flat = false,
-            death_location = nil,
-            portal_cooldown = 40,
-            sea_level = 65,
-            enforces_secure_chat = false,
-        })
-        
-        // if we do not send a position sync, the client keeps sending set player position packets
-        // with an incrementally decreasing height field.
-        // Will be confirmed with a ConfirmTeleportationPacket
-        enqueue_packet(state.io_ctx, client_conn, SynchronizePlayerPositionPacket {
-            y = 65,
-        })
-    case ClientTickEndPacket:
-        // empty
-    case SetPlayerRotationPacket:
-        // empty
-    case SetPlayerPositionPacket:
-        // empty
-    case SetPlayerPositionRotationPacket:
-        // empty
-    case ConfirmTeleportationPacket:
-        // initial play state position sync got acknowledged, prepare for player spawning
-        // TODO: this only has to be sent to other players, vanilla client ignores it though
-        session_data := _get_session(state, client_conn)
-        
-        add_player_action := PlayerInfoUpdateActionAddPlayer {
-            username = session_data.game_profile.username,
-            properties = {},
-        }
-        gamemode_change := PlayerInfoUpdateActionUpdateGameMode {
-            new_mode = .Spectator,
-        }
-        add_to_tablist := PlayerInfoUpdateActionUpdateListed { listed=true }
-        enqueue_packet(state.io_ctx, client_conn, PlayerInfoUpdatePacket {
-            players = {
-                { uuid = session_data.game_profile.uuid, actions = { add_player_action, gamemode_change, add_to_tablist } },
-            },
-        })
-        enqueue_packet(state.io_ctx, client_conn, PlayerAbilitiesPacket {
-            flags = {.AllowFlying, .Flying},
-            flying_speed = 0.05,
-            fov_modifier = 0.1,
-        })
-        enqueue_packet(state.io_ctx, client_conn, StartWaitingForChunks {})
-    case PlayerLoadedPacket:
-        // empty
-    case KeepAlivePlayPacket:
-        last_keepalive := &client_conn.clientbound_keepalive
-        if !last_keepalive.awaiting_serverbound {
-            _kick_client(state, client_conn, text_component("Unexpected keepalive", .Red))
-            return
-        }
-        if packet.id != Long(last_keepalive.id) {
-            _kick_client(state, client_conn, text_component("Keepalive id mismatch", .Red))
-            return
-        }
-        last_keepalive.awaiting_serverbound = false
-    case SwingArmPacket:
-        // empty
-    case PlayerInputPacket:
-        // empty
-    case PlayerFlightChangePacket:
-        // empty
-    }
-}
-
-@(private="file")
-_get_session :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection) -> ^SessionData {
-    assert(client_conn.state > .Status, "attempted to get unexistent session in wrong client state")
-    return &state.sessions[client_conn.socket]
-}
-
-@(private="file")
-_send_registry_data :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnection) {
-    assert(client_conn.state == .Configuration)
-    enqueue_packet(io_ctx, client_conn, DimensionTypeRegistry {
-        entries = {
-            0 = { id = Identifier("minecraft:overworld"), data = nil },
-        },
-    })
-    enqueue_packet(io_ctx, client_conn, CatVariantRegistry {
-        entries = {
-            { id = Identifier("minecraft:tabby"), data = nil },
-            { id = Identifier("minecraft:black"), data = nil },
-            { id = Identifier("minecraft:red"), data = nil },
-            { id = Identifier("minecraft:siamese"), data = nil },
-            { id = Identifier("minecraft:british_shorthair"), data = nil },
-            { id = Identifier("minecraft:calico"), data = nil },
-            { id = Identifier("minecraft:persian"), data = nil },
-            { id = Identifier("minecraft:ragdoll"), data = nil },
-            { id = Identifier("minecraft:white"), data = nil },
-            { id = Identifier("minecraft:jellie"), data = nil },
-        },
-    })
-    enqueue_packet(io_ctx, client_conn, ChickenVariantRegistry {
-        entries = {
-            { id = Identifier("minecraft:cold"), data = nil },
-            { id = Identifier("minecraft:temperate"), data = nil },
-            { id = Identifier("minecraft:warm"), data = nil },
-        },
-    })
-    enqueue_packet(io_ctx, client_conn, CowVariantRegistry {
-        entries = {
-            { id = Identifier("minecraft:cold"), data = nil },
-            { id = Identifier("minecraft:temperate"), data = nil },
-            { id = Identifier("minecraft:warm"), data = nil },
-        },
-    })
-    enqueue_packet(io_ctx, client_conn, FrogVariantRegistry {
-        entries = {
-            { id = Identifier("minecraft:cold"), data = nil },
-            { id = Identifier("minecraft:temperate"), data = nil },
-            { id = Identifier("minecraft:warm"), data = nil },
-        },
-    })
-    enqueue_packet(io_ctx, client_conn, PigVariantRegistry {
-        entries = {
-            { id = Identifier("minecraft:cold"), data = nil },
-            { id = Identifier("minecraft:temperate"), data = nil },
-            { id = Identifier("minecraft:warm"), data = nil },
-        },
-    })
-    enqueue_packet(io_ctx, client_conn, WolfVariantRegistry {
-        entries = {
-            { id = Identifier("minecraft:ashen"), data = nil },
-            { id = Identifier("minecraft:black"), data = nil },
-            { id = Identifier("minecraft:chestnut"), data = nil },
-            { id = Identifier("minecraft:pale"), data = nil },
-            { id = Identifier("minecraft:rusty"), data = nil },
-            { id = Identifier("minecraft:snowy"), data = nil },
-            { id = Identifier("minecraft:spotted"), data = nil },
-            { id = Identifier("minecraft:striped"), data = nil },
-            { id = Identifier("minecraft:woods"), data = nil },
-        },
-    })
-    enqueue_packet(io_ctx, client_conn, WolfSoundVariantRegistry {
-        entries = {
-            { id = Identifier("minecraft:angry"), data = nil },
-            { id = Identifier("minecraft:big"), data = nil },
-            { id = Identifier("minecraft:classic"), data = nil },
-            { id = Identifier("minecraft:cute"), data = nil },
-            { id = Identifier("minecraft:grumpy"), data = nil },
-            { id = Identifier("minecraft:puglin"), data = nil },
-            { id = Identifier("minecraft:sad"), data = nil },
-        },
-    })
-    enqueue_packet(io_ctx, client_conn, PaintingVariantRegistry {
-        entries = {
-            { id = Identifier("minecraft:alban"), data = nil },
-            { id = Identifier("minecraft:aztec"), data = nil },
-            { id = Identifier("minecraft:aztec2"), data = nil },
-            { id = Identifier("minecraft:backyard"), data = nil },
-            { id = Identifier("minecraft:baroque"), data = nil },
-            { id = Identifier("minecraft:bomb"), data = nil },
-            { id = Identifier("minecraft:bouquet"), data = nil },
-            { id = Identifier("minecraft:burning_skull"), data = nil },
-            { id = Identifier("minecraft:bust"), data = nil },
-            { id = Identifier("minecraft:cavebird"), data = nil },
-            { id = Identifier("minecraft:changing"), data = nil },
-            { id = Identifier("minecraft:cotan"), data = nil },
-            { id = Identifier("minecraft:courbet"), data = nil },
-            { id = Identifier("minecraft:creebet"), data = nil },
-            { id = Identifier("minecraft:dennis"), data = nil },
-            { id = Identifier("minecraft:donkey_kong"), data = nil },
-            { id = Identifier("minecraft:earth"), data = nil },
-            { id = Identifier("minecraft:fern"), data = nil },
-            { id = Identifier("minecraft:fighters"), data = nil },
-            { id = Identifier("minecraft:finding"), data = nil },
-            { id = Identifier("minecraft:fire"), data = nil },
-            { id = Identifier("minecraft:graham"), data = nil },
-            { id = Identifier("minecraft:humble"), data = nil },
-            { id = Identifier("minecraft:kebab"), data = nil },
-            { id = Identifier("minecraft:lowmist"), data = nil },
-            { id = Identifier("minecraft:match"), data = nil },
-            { id = Identifier("minecraft:meditative"), data = nil },
-            { id = Identifier("minecraft:orb"), data = nil },
-            { id = Identifier("minecraft:owlemons"), data = nil },
-            { id = Identifier("minecraft:passage"), data = nil },
-            { id = Identifier("minecraft:pigscene"), data = nil },
-            { id = Identifier("minecraft:plant"), data = nil },
-            { id = Identifier("minecraft:pointer"), data = nil },
-            { id = Identifier("minecraft:pond"), data = nil },
-            { id = Identifier("minecraft:pool"), data = nil },
-            { id = Identifier("minecraft:prairie_ride"), data = nil },
-            { id = Identifier("minecraft:sea"), data = nil },
-            { id = Identifier("minecraft:skeleton"), data = nil },
-            { id = Identifier("minecraft:skull_and_roses"), data = nil },
-            { id = Identifier("minecraft:stage"), data = nil },
-            { id = Identifier("minecraft:sunflowers"), data = nil },
-            { id = Identifier("minecraft:sunset"), data = nil },
-            { id = Identifier("minecraft:tides"), data = nil },
-            { id = Identifier("minecraft:unpacked"), data = nil },
-            { id = Identifier("minecraft:void"), data = nil },
-            { id = Identifier("minecraft:wanderer"), data = nil },
-            { id = Identifier("minecraft:wasteland"), data = nil },
-            { id = Identifier("minecraft:water"), data = nil },
-            { id = Identifier("minecraft:wind"), data = nil },
-            { id = Identifier("minecraft:wither"), data = nil },
-        },
-    })
-    enqueue_packet(io_ctx, client_conn, DamageTypeRegistry {
-        entries = {
-            { id = Identifier("minecraft:arrow"), data = nil },
-            { id = Identifier("minecraft:bad_respawn_point"), data = nil },
-            { id = Identifier("minecraft:cactus"), data = nil },
-            { id = Identifier("minecraft:campfire"), data = nil },
-            { id = Identifier("minecraft:cramming"), data = nil },
-            { id = Identifier("minecraft:dragon_breath"), data = nil },
-            { id = Identifier("minecraft:drown"), data = nil },
-            { id = Identifier("minecraft:dry_out"), data = nil },
-            { id = Identifier("minecraft:ender_pearl"), data = nil },
-            { id = Identifier("minecraft:explosion"), data = nil },
-            { id = Identifier("minecraft:fall"), data = nil },
-            { id = Identifier("minecraft:falling_anvil"), data = nil },
-            { id = Identifier("minecraft:falling_block"), data = nil },
-            { id = Identifier("minecraft:falling_stalactite"), data = nil },
-            { id = Identifier("minecraft:fireball"), data = nil },
-            { id = Identifier("minecraft:fireworks"), data = nil },
-            { id = Identifier("minecraft:fly_into_wall"), data = nil },
-            { id = Identifier("minecraft:freeze"), data = nil },
-            { id = Identifier("minecraft:generic"), data = nil },
-            { id = Identifier("minecraft:generic_kill"), data = nil },
-            { id = Identifier("minecraft:hot_floor"), data = nil },
-            { id = Identifier("minecraft:in_fire"), data = nil },
-            { id = Identifier("minecraft:in_wall"), data = nil },
-            { id = Identifier("minecraft:indirect_magic"), data = nil },
-            { id = Identifier("minecraft:lava"), data = nil },
-            { id = Identifier("minecraft:lightning_bolt"), data = nil },
-            { id = Identifier("minecraft:mace_smash"), data = nil },
-            { id = Identifier("minecraft:magic"), data = nil },
-            { id = Identifier("minecraft:mob_attack"), data = nil },
-            { id = Identifier("minecraft:mob_attack_no_aggro"), data = nil },
-            { id = Identifier("minecraft:mob_projectile"), data = nil },
-            { id = Identifier("minecraft:on_fire"), data = nil },
-            { id = Identifier("minecraft:out_of_world"), data = nil },
-            { id = Identifier("minecraft:outside_border"), data = nil },
-            { id = Identifier("minecraft:player_attack"), data = nil },
-            { id = Identifier("minecraft:player_explosion"), data = nil },
-            { id = Identifier("minecraft:sonic_boom"), data = nil },
-            { id = Identifier("minecraft:spit"), data = nil },
-            { id = Identifier("minecraft:stalagmite"), data = nil },
-            { id = Identifier("minecraft:starve"), data = nil },
-            { id = Identifier("minecraft:sting"), data = nil },
-            { id = Identifier("minecraft:sweet_berry_bush"), data = nil },
-            { id = Identifier("minecraft:thorns"), data = nil },
-            { id = Identifier("minecraft:thrown"), data = nil },
-            { id = Identifier("minecraft:trident"), data = nil },
-            { id = Identifier("minecraft:unattributed_fireball"), data = nil },
-            { id = Identifier("minecraft:wind_charge"), data = nil },
-            { id = Identifier("minecraft:wither"), data = nil },
-            { id = Identifier("minecraft:wither_skull"), data = nil },
-        },
-    })
-    // a minecraft:plains biome is required as default biome before a login packet will be accepted
-    enqueue_packet(io_ctx, client_conn, BiomeRegistry {
-        entries = {
-            { id = Identifier("minecraft:plains"), data = nil },
-        },
-    })
-}
-
-@(private="file")
-_load_favicon :: proc() -> string {
-    @(static) favicon_encoded: string
+_enqueue_packet :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnection, packet: ClientBoundPacket) {
+    tracy.Zone()
     
-    if favicon_encoded == "" {
-        prefix :: "data:image/png;base64,"
-        sb := strings.builder_make(os.heap_allocator())
-        fmt.sbprint(&sb, prefix, sep="")
-        base64.encode_into(strings.to_writer(&sb), #load("../favicon.png"))
-        favicon_encoded = strings.to_string(sb)
-    }
-    return favicon_encoded
+    if client_conn.terminating do return
+
+    descriptor := get_clientbound_packet_descriptor(packet)
+    log.log(LOG_LEVEL_OUTBOUND, "Sending packet", packet)
+    _serialize_clientbound(&client_conn.tx_buf, packet, descriptor)
+    
+    // freed by network worker after receiving write completion
+    outb := make([]u8, buf_length(client_conn.tx_buf), client_conn.packet_scratch_alloc) \
+        or_else panic("OOM: write submission")
+
+    read_err := buf_copy_into(&client_conn.tx_buf, outb)
+    assert(read_err == .None, "invariant, copied full length")
+
+    submission_ok := reactor.submit_write_copy(io_ctx, client_conn.socket, outb)
+    assert(submission_ok, "TODO: submission errors")
+    buf_advance_pos_unchecked(&client_conn.tx_buf, len(outb))
+    
+    client_conn.outstanding_writes += 1
+    client_conn.terminating |= descriptor.is_terminal
 }
 
 // Kicks a client with a message, begins client termination.
+// TODO: remove this once we have all packets implemented
 @(private="file")
 _kick_client :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection, reason: TextComponent) {
     // TODO: add DisconnectLoginPacket and implement TextComponent -> json
     #partial switch client_conn.state {
     case .Configuration: 
-        enqueue_packet(state.io_ctx, client_conn, DisconnectConfigurationPacket { reason = reason })
+        _enqueue_packet(state.io_ctx, client_conn, DisconnectConfigurationPacket { reason = reason })
     case .Play:
-        enqueue_packet(state.io_ctx, client_conn, DisconnectPlayPacket { reason = reason })
+        _enqueue_packet(state.io_ctx, client_conn, DisconnectPlayPacket { reason = reason })
     case:
         panic(#procedure + " in wrong client state")
     }
     client_conn.terminating = true
+}
+
+@(private="file")
+_create_client_connection :: proc(socket: net.TCP_Socket) -> ClientConnection {
+    packet_scratch := new(mem.Mutex_Allocator, os.heap_allocator())
+    mem.mutex_allocator_init(packet_scratch, os.heap_allocator())
+    // packet_scratch := new(mem.Scratch, os.heap_allocator())
+    // mem.scratch_init(packet_scratch, PACKET_SCRATCH_BUFFER_SIZE, backup_allocator=os.heap_allocator())
+    
+    // NOTE: disallow out of band allocations larger than allocator cap, as they would be leaked either way
+    // packet_scratch.backup_allocator = mem.panic_allocator()
+    // packet_scratch.leaked_allocations.allocator = mem.panic_allocator()
+    
+    return ClientConnection {
+        socket = socket,
+        state  = .Handshake,
+        
+        // packet_scratch_alloc = mem.scratch_allocator(packet_scratch),
+        packet_scratch_alloc = mem.mutex_allocator(packet_scratch),
+        rx_buf = create_network_buf(10240, allocator=os.heap_allocator()),
+        tx_buf = create_network_buf(10240, allocator=os.heap_allocator()),
+    }
 }
 
 // Shuts down and unregisters a connection from all subsystems, and deallocates it.
@@ -688,16 +354,16 @@ _finalize_client :: proc(state: ^NetworkWorkerState, client_conn: ClientConnecti
 
     // FIXME: probably want to handle error
     reactor.unregister_client(state.io_ctx, client_conn.socket)
-    _delete_client_connection(client_conn.socket)
-
+    spsc_enqueue(state.outbound_queue, TerminateClientRequest { client=client_conn.socket })
+    
     _, client_conn := delete_key(&state.connections, client_conn.socket)
-    delete_key(&state.sessions, client_conn.socket) // if present
     destroy_network_buf(client_conn.tx_buf)
     destroy_network_buf(client_conn.rx_buf)
     
+    scratch_alloc := cast(^mem.Mutex_Allocator) client_conn.packet_scratch_alloc.data
     // ensure right allocator is used to free buffer, instead of panic allocator
-    scratch_alloc := cast(^mem.Scratch) client_conn.packet_scratch_alloc.data
-    scratch_alloc.backup_allocator = os.heap_allocator()
-    mem.scratch_destroy(scratch_alloc)
+    // scratch_alloc := cast(^mem.Scratch) client_conn.packet_scratch_alloc.data
+    // scratch_alloc.backup_allocator = os.heap_allocator()
+    // mem.scratch_destroy(scratch_alloc)
     free(scratch_alloc, os.heap_allocator())
 }

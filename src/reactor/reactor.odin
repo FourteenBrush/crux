@@ -24,6 +24,8 @@ RECV_BUF_SIZE :: 2048
 // This log level will be used in conjunction with `context.logger`.
 ERROR_LOG_LEVEL :: log.Level(9)
 
+TIMEOUT_INFINITE :: _TIMEOUT_INFINITE
+
 // Completion emitted by polling the IOContext, indicating the outcome of an IO operation.
 Completion :: struct {
     // The affected socket, this is always the socket that emitted the completion, except
@@ -42,6 +44,8 @@ Completion :: struct {
     // the exact written bytes, so they do not get leaked.
     // In the case of a failed read operation, and in all other causes, this is `nil`.
     buf: []u8 `fmt:"-"`,
+    // Only used when `operation == .NewConnection`, stores the endpoint of the newly connected client.
+    endpoint: net.Endpoint,
     operation: Operation,
 }
 
@@ -102,8 +106,10 @@ unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 // Await IO completions for any of the registered clients (excluding the server socket).
 // This function returns when either `timeout_ms` has elapsed, or at least one completion has been awaited.
 // Inputs:
-// - `timeout_ms`: the waiting timeout in ms, 0 means return immediately if no completions can be awaited.
+// - `timeout_ms`: the waiting timeout in ms, pass `TIMEOUT_INFINITE` to block until a completion is delivered,
+// or a `wakeup()` was issued.
 await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, timeout_ms: int) -> (n: int, ok: bool) {
+    assert(timeout_ms != 0, "non blocking await_io_completions makes no sense here")
     return _await_io_completions(ctx, completions_out, timeout_ms)
 }
 
@@ -119,6 +125,14 @@ release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
 // ourselves instead of sending it back?
 submit_write_copy :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) -> bool {
     return _submit_write_copy(ctx, client, data)
+}
+
+// Causes a blocking `await_io_completions` call to wake up immediately.
+// Intended for cross-thread notifications, where we want this io context to be used to deliver notifications,
+// instead of relying on another form of synchronization.
+// Thread safe.
+wakeup :: proc(ctx: ^IOContext) {
+    _wakeup(ctx)
 }
 
 @(private)

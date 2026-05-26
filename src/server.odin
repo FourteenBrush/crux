@@ -1,14 +1,17 @@
 package crux
 
-import "core:c/libc"
 import "core:os"
+import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:net"
 import "core:sync"
 import "core:time"
 import "core:thread"
-import "core:sync/chan"
+import "core:c/libc"
+import "core:strings"
+import "core:container/queue"
+import "core:encoding/base64"
 
 import "src:reactor"
 
@@ -17,57 +20,62 @@ import "lib:tracy"
 PROTOCOL_VERSION :: ProtocolVersion.V1_21_10
 GAME_VERSION_STR :: "1.21.10"
 
-TARGET_TPS :: 20
+// TODO: consider proper packet handling rate while also using a normal minecraft tick model
+TARGET_TPS :: 20 * 10
 
 @(private="file")
-g_server: Server
+server: Server
 
 @(private="file")
 g_continue_running := true
 
+// because treesitter highlighting in IDEs breaks when you declare a nested generic type with nesting level > 2, lovely
 @(private="file")
+InboundMessage :: BridgeMessage(ServerBoundPacket)
+@(private="file")
+OutboundMessage :: BridgeMessage(ClientBoundPacket)
+
+@(private)
 Server :: struct {
-    _client_connections_guarded: map[net.TCP_Socket]ClientConnection,
-    _client_connections_mtx: sync.Ticket_Mutex,
-    packet_receiver: chan.Chan(Packet, .Recv),
+    inbound_queue: ^SPSC(InboundMessage),
+    outbound_queue: ^SPSC(OutboundMessage),
+    signal_io: bool,
+    
+    // World data essentially, TODO: move this out to some world abstraction once this is established
+    sessions: map[net.TCP_Socket]SessionData,
 }
 
-run :: proc() -> bool {
-    endpoint := net.Endpoint {
-        // address = net.IP4_Loopback,
-        address = net.IP4_Address { 0, 0, 0, 0 },
-        port = 25565,
-    }
-
-    server_sock := _setup_server_socket(endpoint) or_return
-    defer net.close(server_sock)
-
+run :: proc(endpoint: net.Endpoint, server_sock: net.TCP_Socket) -> bool {
     io_ctx := _setup_io_context(server_sock, os.heap_allocator()) or_return
     defer reactor.destroy_io_context(&io_ctx, os.heap_allocator())
 
-    g_server._client_connections_guarded = make(map[net.TCP_Socket]ClientConnection)
-    defer delete(g_server._client_connections_guarded)
-
-    packet_receiver, alloc_err := chan.create_buffered(chan.Chan(Packet, .Both), 512, context.allocator)
-    if alloc_err != .None {
-        return fatal("failed to create packet channel", alloc_err)
-    }
-    defer chan.destroy(packet_receiver)
-    g_server.packet_receiver = chan.as_recv(packet_receiver)
-    log.infof("Listening on %s", net.endpoint_to_string(endpoint))
+    inbound_queue: SPSC(BridgeMessage(ServerBoundPacket))
+    queue.init(&inbound_queue.data, 128)
+    defer queue.destroy(&inbound_queue.data)
+    server.inbound_queue = &inbound_queue
+    
+    outbound_queue: SPSC(BridgeMessage(ClientBoundPacket))
+    queue.init(&outbound_queue.data, 128)
+    defer queue.destroy(&outbound_queue.data)
+    server.outbound_queue = &outbound_queue
+    
+    server.sessions = make(map[net.TCP_Socket]SessionData, 16, os.heap_allocator())
+    defer delete(server.sessions)
 
     net_worker_state := NetworkWorkerSharedData {
        io_ctx = &io_ctx,
        server_sock = server_sock,
        execution_permit = &g_continue_running,
-       packet_bridge = chan.as_send(packet_receiver),
+       outbound_queue=server.inbound_queue,
+       inbound_queue=server.outbound_queue,
     }
 
     init_context := context
     init_context.allocator = mem.panic_allocator()
     net_worker_thread := thread.create_and_start_with_poly_data(&net_worker_state, _network_worker_thread_proc, init_context=init_context)
     if net_worker_thread == nil {
-        return fatal("failed to start worker thread")
+        log.fatal("failed to start worker thread")
+        return false
     }
 
     // ensure all allocators are explicitly used
@@ -75,89 +83,29 @@ run :: proc() -> bool {
 
     libc.signal(libc.SIGINT, sig_handler)
     libc.signal(libc.SIGTERM, sig_handler)
+    
+    log.info("Listening on", net.endpoint_to_string(endpoint))
 
     for sync.atomic_load_explicit(&g_continue_running, .Acquire) {
-        defer tracy.FrameMark()
-        start := time.tick_now()
-
-        for packet in chan.try_recv(g_server.packet_receiver) {
-            _ = packet
-            // log.warn("MAIN THREAD:", packet)
-        }
-        // work...
-        // free_all(context.temp_allocator)
-
-        tick_duration := time.tick_since(start)
-        target_tick_time :: 1000 / TARGET_TPS * time.Millisecond
-        if tick_duration < target_tick_time {
-            //log.debug("tick time", tick_duration, "sleeping", target_tick_time - tick_duration)
-            time.sleep(target_tick_time - tick_duration)
-        }
+        _main_thread_run_tick(&io_ctx)
     }
 
     log.info("shutting down server...")
+    // wakeup io thread from possible infinite sleep
+    reactor.wakeup(&io_ctx)
     thread.join(net_worker_thread)
     thread.destroy(net_worker_thread)
 
     return true
 }
 
-// Creates a new client with all default data.
-register_client_connection :: proc(client_sock: net.TCP_Socket) {
-    sync.ticket_mutex_guard(&g_server._client_connections_mtx)
-
-    g_server._client_connections_guarded[client_sock] = ClientConnection {
-        socket = client_sock,
-        state = .Handshake,
-    }
-}
-
-// Deletes a client connection from the server, it must be first unregistered from the various subsystems.
-// This call is threadsafe and is only supposed to be called by higher level components.
-@(private)
-_delete_client_connection :: proc(client_sock: net.TCP_Socket) -> ClientConnection {
-    sync.ticket_mutex_guard(&g_server._client_connections_mtx)
-    _, conn := delete_key(&g_server._client_connections_guarded, client_sock)
-    return conn
-}
-
 @(private="file")
-_setup_server_socket :: proc(endpoint: net.Endpoint) -> (net.TCP_Socket, bool) {
-    sock, net_err := net.listen_tcp(endpoint, backlog=75)
-    if net_err != nil {
-        log.errorf("failed to create server socket: %s", net_err)
-        return sock, false
-    }
-
-    net_err = net.set_blocking(sock, false)
-    if net_err != nil {
-        log.errorf("failed to set server socket to non blocking: %s", net_err)
-        net.close(sock)
-        return sock, false
-    }
-    return sock, true
-}
-
-@(private="file")
-_setup_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (reactor.IOContext, bool) {
-    io_ctx, ctx_ok := reactor.create_io_context(server_sock, allocator)
-    if !ctx_ok {
+_setup_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (ctx: reactor.IOContext, ok: bool) {
+    defer if !ok {
         log.error("failed to create io context")
-        return io_ctx, false
     }
-    return io_ctx, true
+    return reactor.create_io_context(server_sock, allocator)
 }
-
-// IMPORTANT NOTE: values must match respective values from HandshakeIntent to allow casting
-ClientState :: enum u8 {
-    Handshake,
-    Status        = auto_cast HandshakeIntent.Status,
-    Login         = auto_cast HandshakeIntent.Login,
-    Transfer      = auto_cast HandshakeIntent.Transfer,
-    Configuration,
-    Play,
-}
-#assert(int(ClientState.Login) <= int(max(HandshakeIntent)))
 
 @(private="file")
 sig_handler :: proc "c" (_sig: i32) {
@@ -166,10 +114,143 @@ sig_handler :: proc "c" (_sig: i32) {
     sync.atomic_store_explicit(&g_continue_running, false, .Release)
 }
 
-// Logs a fatal condition, which we cannot recover from.
-// This proc always returns false, for the sake of `return fatal("message")`
-@(require_results, private)
-fatal :: proc(args: ..any, loc := #caller_location) -> bool {
-    log.fatal(..args, location=loc)
-    return false
+@(private="file")
+_main_thread_run_tick :: proc(io_ctx: ^reactor.IOContext) {
+    defer tracy.FrameMark()
+    start := time.tick_now()
+
+    for message in spsc_dequeue(server.inbound_queue) {
+        // log.warn("MAIN THREAD:", message.packet)
+        _handle_bridge_message(&server, message)
+    }
+    if server.signal_io {
+        log.debug("waking up reactor due to spsc queue not empty")
+        reactor.wakeup(io_ctx)
+        server.signal_io = false
+    }
+    _handle_keepalives(&server)
+    
+    free_all(context.temp_allocator)
+
+    // TODO: we may not necessarily want to use a tick resolution of 50ms (minecraft tick), but instead
+    // use a higher resolution and just emulate minecraft ticks to be some part of that actual tick.
+    // This would prevent baseline packet response times to be 50ms already.
+    tick_duration := time.tick_since(start)
+    target_tick_time :: 1000 / TARGET_TPS * time.Millisecond
+    if tick_duration < target_tick_time {
+        //log.debug("tick time", tick_duration, "sleeping", target_tick_time - tick_duration)
+        time.sleep(target_tick_time - tick_duration)
+    }
+}
+
+@(private="file")
+_handle_bridge_message :: proc(server: ^Server, message: InboundMessage) {
+    switch message in message {
+    case TerminateClientRequest:
+        session := (&server.sessions[message.client]) or_break
+        // TODO: do we just remove the session or set a terminating flag and do this later on?
+        session.terminating = true
+    case PacketTransfer(ServerBoundPacket):
+        _handle_serverbound_packet(server, message.packet, message.socket)
+    }
+}
+
+@(private="file")
+_handle_keepalives :: proc(server: ^Server) {
+    // send keepalive packets, required every 1-15 secs, disconnect after 20 secs
+    KEEPALIVE_INTERVAL :: 13 * time.Second
+    KEEPALIVE_TIMEOUT :: 20 * time.Second
+    // FIXME: would ideally base this off world ticks instead of monotonic clock syscalls
+    now := time.tick_now()
+    
+    for _, &session in server.sessions {
+        if session.state != .Play || session.terminating do continue
+        
+        last_keepalive := &session.clientbound_keepalive
+        elapsed := time.tick_diff(last_keepalive.sent, now)
+        if last_keepalive.awaiting_serverbound {
+            if elapsed > KEEPALIVE_TIMEOUT {
+                // _kick_client(&state, &session, text_component("Timed out", .Red))
+                continue
+            }
+        } else if elapsed > KEEPALIVE_INTERVAL {
+            id := i64(elapsed)
+            enqueue_packet(&session, KeepAlivePlayPacket { id=Long(id) })
+            last_keepalive.sent = now
+            last_keepalive.id = id
+            last_keepalive.awaiting_serverbound = true
+        }
+    }
+}
+
+@(private)
+_create_session :: proc(
+    socket: net.TCP_Socket,
+    state: ClientState,
+    protocol_version: ProtocolVersion,
+) -> SessionData {
+    scratch_alloc := new(mem.Scratch, os.heap_allocator())
+    mem.scratch_init(scratch_alloc, 256 * 1024, os.heap_allocator())
+    
+    return SessionData {
+        socket=socket,
+        state=state,
+        protocol_version=protocol_version,
+        packet_scratch_alloc=mem.scratch_allocator(scratch_alloc),
+    }
+}
+
+@(private)
+_terminate_session :: proc(server: ^Server, session: SessionData) {
+    assert(session.terminating)
+    delete_key(&server.sessions, session.socket)
+    
+    spsc_enqueue(server.outbound_queue, TerminateClientRequest { client=session.socket })
+    
+    scratch_alloc := cast(^mem.Scratch) session.packet_scratch_alloc.data
+    mem.scratch_destroy(scratch_alloc)
+    free(scratch_alloc, os.heap_allocator())
+}
+
+// Kicks a client with a message, enters a termination state.
+@(private)
+_kick_client :: proc(server: ^Server, session: ^SessionData, reason: TextComponent) {
+    // TODO: add DisconnectLoginPacket and implement TextComponent -> json
+    
+    // TODO: textcomponents must also be cloned if they refer to stack allocated data
+    #partial switch session.state {
+    case .Configuration: 
+        enqueue_packet(session, DisconnectConfigurationPacket { reason = reason })
+    case .Play:
+        enqueue_packet(session, DisconnectPlayPacket { reason = reason })
+    case:
+        panic(#procedure + " in wrong client state")
+    }
+    session.terminating = true
+}
+
+@(private)
+enqueue_packet :: proc(session: ^SessionData, packet: ClientBoundPacket) {
+    descriptor := get_clientbound_packet_descriptor(packet)
+    assert(session != nil)
+    if session.terminating do return
+    
+    spsc_enqueue(server.outbound_queue, PacketTransfer(ClientBoundPacket) { socket=session.socket, packet=packet })
+    session.terminating |= descriptor.is_terminal
+    server.signal_io = true
+    // log.warn("MAIN THREAD: enqueued packet", packet)
+}
+
+@(private)
+_load_favicon :: proc() -> string {
+    @(static) favicon_encoded: string
+    
+    if favicon_encoded == "" {
+        prefix :: "data:image/png;base64,"
+        sb := strings.builder_make(os.heap_allocator())
+        fmt.sbprint(&sb, prefix, sep="")
+        base64.encode_into(strings.to_writer(&sb), #load("../favicon.png"))
+        favicon_encoded = strings.to_string(sb)
+    }
+    return favicon_encoded
 }

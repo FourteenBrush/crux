@@ -10,10 +10,15 @@ package reactor
 @(require) import "lib:tracy"
 
 when !USE_IO_URING {
+    
+// From epoll_wait
+@(private)
+_TIMEOUT_INFINITE :: -1
 
 @(private)
 _IOContext :: struct {
     epoll_fd: linux.Fd,
+    wakeup_eventfd: linux.Fd,
     server_sock: net.TCP_Socket,
     // Allocator used to allocate recv buffers, the pending writes map and slices of iovecs.
     allocator: mem.Allocator,
@@ -55,6 +60,11 @@ EPOLL_EVENTS_OUT_ARMED :: EPOLL_EVENTS_NO_OUT | { .OUT }
 _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (ctx: IOContext, ok: bool) {
     epoll_fd, errno := linux.epoll_create()
     if errno != .NONE do return
+    defer if !ok do linux.close(epoll_fd)
+    
+    ctx.wakeup_eventfd, errno = linux.eventfd(0, {.NONBLOCK})
+    if errno != .NONE do return
+    defer if !ok do linux.close(ctx.wakeup_eventfd)
     
     ctx.epoll_fd = epoll_fd
     ctx.server_sock = server_sock
@@ -64,6 +74,8 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
     
     // register server sock to detect inbound connections
     _register_client(&ctx, ctx.server_sock) or_return
+    // add wakeup eventfd
+    _register_client(&ctx, net.TCP_Socket(ctx.wakeup_eventfd)) or_return
     
     return ctx, true
 }
@@ -71,8 +83,11 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 @(private)
 _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
     assert(len(ctx.pending_writes) == 0, "clients must be unregistered")
+    
     linux.close(ctx.epoll_fd)
+    linux.close(ctx.wakeup_eventfd)
     delete(ctx.pending_writes)
+    queue.destroy(&ctx.completion_queue) // no-op if zero initialized
     _destroy_instrumented_alloc(ctx.allocator, meta_allocator=runtime.heap_allocator())
 }
 
@@ -154,6 +169,13 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
         }
         
         if .IN in event.events {
+            if linux.Fd(socket) == ctx.wakeup_eventfd {
+                // reset wakeup counter back to 0, wakes up epoll when > 0
+                buf: [8]u8
+                _, _ = linux.read(ctx.wakeup_eventfd, buf[:])
+                continue
+            }
+            
             comp := socket == ctx.server_sock \
                 ? _do_accept(ctx) or_continue \
                 : _do_read(ctx, socket) or_continue
@@ -162,6 +184,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
             emitted_hangup = comp.operation == .PeerHangup
         }
         if .OUT in event.events {
+            assert(linux.Fd(socket) != ctx.wakeup_eventfd)
             _do_write(ctx, socket, completions_out, &nproduced)
         }
         if !emitted_hangup && (.HUP in event.events || .RDHUP in event.events) {
@@ -174,7 +197,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 
 @(private="file", require_results)
 _do_accept :: proc(ctx: ^IOContext) -> (comp: Completion, emit: bool) {
-    client_sock, _, accept_err := net.accept_tcp(ctx.server_sock, /*client options*/{ no_delay=true })
+    client_sock, endpoint, accept_err := net.accept_tcp(ctx.server_sock, /*client options*/{ no_delay=true })
     if accept_err != .None {
         log.warn("failed to accept client:", accept_err)
         return comp, false
@@ -187,6 +210,7 @@ _do_accept :: proc(ctx: ^IOContext) -> (comp: Completion, emit: bool) {
     _register_client(ctx, client_sock) or_return
     comp.socket = client_sock
     comp.operation = .NewConnection
+    comp.endpoint = endpoint
     return comp, true
 }
 
@@ -364,11 +388,12 @@ _submit_write_copy :: proc(ctx: ^IOContext, conn: net.TCP_Socket, data: []u8) ->
     return true
 }
 
-@(private="file")
-_epoll_event :: proc(ctx: ^IOContext, socket: net.TCP_Socket, events: linux.EPoll_Event_Set) -> (ev: linux.EPoll_Event) {
-    ev.events = events
-    ev.data.fd = linux.Fd(socket)
-    return
+@(private)
+_wakeup :: proc(ctx: ^IOContext) {
+    // add one to counter, a value > 0 causes epoll to wake up with an EPOLLIN for this fd
+    one := u64(1) // needs an 8 bytes buffer or EINVAL is returned
+    _, errno := linux.write(ctx.wakeup_eventfd, mem.ptr_to_bytes(&one))
+    assert(errno == .NONE)
 }
 
 @(private="file", require_results)
@@ -379,6 +404,13 @@ _arm_epollout :: proc(ctx: ^IOContext, wq: ^WriteQueue, socket: net.TCP_Socket, 
     
     wq.epollout_armed = mode == .Arm
     return true
+}
+
+@(private="file")
+_epoll_event :: proc(ctx: ^IOContext, socket: net.TCP_Socket, events: linux.EPoll_Event_Set) -> (ev: linux.EPoll_Event) {
+    ev.events = events
+    ev.data.fd = linux.Fd(socket)
+    return
 }
 
 @(private="file")
