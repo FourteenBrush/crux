@@ -15,6 +15,12 @@ SessionData :: struct {
     protocol_version: ProtocolVersion,
     // filled in after LoginStartPacket
     game_profile: GameProfile,
+    position: [3]f64,
+    yaw: f64,
+    pitch: f64,
+    pending_teleport: Maybe(PendingTeleport),
+    // Whether the player has been added to the world yet
+    spawned: bool,
     
     clientbound_keepalive: struct {
         // Zero initialized if we haven't sent any.
@@ -38,6 +44,18 @@ ClientState :: enum u8 {
     Play,
 }
 #assert(int(ClientState.Login) <= int(max(HandshakeIntent)))
+
+@(private="file")
+PendingTeleport :: struct {
+    id: VarInt,
+    pos: [3]f64,
+}
+
+player_teleport :: proc(session: ^SessionData, x, y, z: f64) {
+    assert(session.pending_teleport == nil, "TODO: stack player teleports or something")
+    enqueue_packet(session, SynchronizePlayerPositionPacket { x=x, y=y, z=z })
+    session.pending_teleport = PendingTeleport { pos={ x, y, z } }
+}
 
 @(private)
 _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, socket: net.TCP_Socket) {
@@ -178,46 +196,65 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
         // if we do not send a position sync, the client keeps sending set player position packets
         // with an incrementally decreasing height field.
         // Will be confirmed with a ConfirmTeleportationPacket
-        enqueue_packet(session, SynchronizePlayerPositionPacket {
-            y = 65,
-        })
+        player_teleport(session, 0, 65, 0)
     case ClientTickEndPacket:
         // empty
     case SetPlayerRotationPacket:
         // empty
     case SetPlayerPositionPacket:
-        // empty
+        // ignore position changes while awaiting a teleport confirmation (vanilla behavior)
+        if session.pending_teleport != nil do return
+        
+        session.position = {packet.x, packet.feet_y, packet.z}
     case SetPlayerPositionRotationPacket:
         // empty
     case ConfirmTeleportationPacket:
-        // initial play state position sync got acknowledged, prepare for player spawning
-        // TODO: this only has to be sent to other players, vanilla client ignores it though
-        add_player_action := PlayerInfoUpdateActionAddPlayer {
-            username = session.game_profile.username,
-            properties = {},
+        pending_teleport, has_pending := session.pending_teleport.?
+        if !has_pending {
+            _kick_client(server, session, text_component("Unexpected teleport confirmation", .Red))
+            return
         }
-        gamemode_change := PlayerInfoUpdateActionUpdateGameMode {
-            new_mode = .Spectator,
+        if packet.teleport_id != pending_teleport.id {
+            _kick_client(server, session, text_component("Teleport confirmation id mismatch", .Red))
+            return
         }
-        add_to_tablist := PlayerInfoUpdateActionUpdateListed { listed=true }
-        enqueue_packet(session, PlayerInfoUpdatePacket {
-            players = slice.clone([]PlayerInfoUpdateEntry{
-                { 
-                    uuid = session.game_profile.uuid,
-                    actions = slice.clone([]PlayerInfoUpdateAction{
-                        add_player_action,
-                        gamemode_change,
-                        add_to_tablist,
-                    }, session.packet_scratch_alloc),
-                },
-            }, session.packet_scratch_alloc),
-        })
-        enqueue_packet(session, PlayerAbilitiesPacket {
-            flags = {.AllowFlying, .Flying},
-            flying_speed = 0.05,
-            fov_modifier = 0.1,
-        })
-        enqueue_packet(session, StartWaitingForChunks {})
+        
+        session.position = pending_teleport.pos
+        session.pending_teleport = nil
+        
+        if !session.spawned {
+            // initial play state position sync got acknowledged, prepare for player spawning
+            session.spawned = true
+            
+            // TODO: this only has to be sent to other players, vanilla client ignores it though
+            add_player_action := PlayerInfoUpdateActionAddPlayer {
+                username = session.game_profile.username,
+                properties = {},
+            }
+            gamemode_change := PlayerInfoUpdateActionUpdateGameMode {
+                new_mode = .Spectator,
+            }
+            add_to_tablist := PlayerInfoUpdateActionUpdateListed { listed=true }
+            enqueue_packet(session, PlayerInfoUpdatePacket {
+                players = slice.clone([]PlayerInfoUpdateEntry{
+                    { 
+                        uuid = session.game_profile.uuid,
+                        actions = slice.clone([]PlayerInfoUpdateAction{
+                            add_player_action,
+                            gamemode_change,
+                            add_to_tablist,
+                        }, session.packet_scratch_alloc),
+                    },
+                }, session.packet_scratch_alloc),
+            })
+            
+            enqueue_packet(session, PlayerAbilitiesPacket {
+                flags = {.AllowFlying, .Flying},
+                flying_speed = 0.05,
+                fov_modifier = 0.1,
+            })
+            enqueue_packet(session, StartWaitingForChunks {})
+        }
     case PlayerLoadedPacket:
         // empty
     case KeepAlivePlayPacket:
