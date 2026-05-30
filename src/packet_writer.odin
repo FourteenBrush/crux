@@ -22,7 +22,6 @@ _serialize_clientbound :: proc(outb: ^NetworkBuffer, packet: ClientBoundPacket, 
 
     switch packet in packet {
     case StatusResponsePacket:
-        // TODO: serialize SNBT
         // json serializer does not return allocator errors, so there should be no reason this fails
         bytes := json.marshal(packet, allocator=context.temp_allocator) or_else panic("error serializing status response")
         werr := buf_write_string(outb, string(bytes)) // copied
@@ -43,12 +42,15 @@ _serialize_clientbound :: proc(outb: ^NetworkBuffer, packet: ClientBoundPacket, 
         if signature, ok := packet.game_profile.signature.?; ok {
             _ = buf_write_string(outb, signature)
         }
+    case DisconnectLoginPacket:
+        json := serialize_text_component(packet.reason, context.temp_allocator)
+        werr := buf_write_string(outb, string(json))
+        assert(werr == nil, "error serializing disconnect packet")
     case PluginMessagePacket:
         buf_write_identifier(outb, packet.channel)
         buf_write_bytes(outb, packet.payload)
     case DisconnectConfigurationPacket:
-        werr := serialize_text_component(outb, packet.reason)
-        assert(werr == nil, "max string length exceeded") // TODO
+        serialize_text_component(outb, packet.reason) or_return
     case KnownPacksPacket:
         buf_write_var_int(outb, VarInt(len(packet.known_packs)))
         for pack in packet.known_packs {
@@ -253,6 +255,23 @@ _serialize_clientbound :: proc(outb: ^NetworkBuffer, packet: ClientBoundPacket, 
         buf_write_f32(outb, packet.fov_modifier)
     case KeepAlivePlayPacket:
         buf_write_long(outb, packet.id)
+    case SetCenterChunkPacket:
+        buf_write_var_int(outb, packet.chunk_x)
+        buf_write_var_int(outb, packet.chunk_z)
+    case ChunkDataPacket:
+        buf_write_i32(outb, packet.chunk_x)
+        buf_write_i32(outb, packet.chunk_z)
+        // heightmaps array:
+        buf_write_var_int(outb, VarInt(0))
+        
+        for section in packet.sections {
+            buf_write_i16(outb, section.block_count)
+            serialize_paletted_container(outb, section.block_states)
+            serialize_paletted_container(outb, section.biomes)
+        }
+        // block entities:
+        // buf_write_var_int(outb, VarInt(0))
+        // TODO: write heightmap, data, block entities and light data
     }
     return .None
 }

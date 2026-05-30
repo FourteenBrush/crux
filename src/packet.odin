@@ -83,6 +83,7 @@ ClientBoundPacket :: union #no_nil {
     PongResponsePacket,
     // sent in .Login state
     LoginSuccessPacket,
+    DisconnectLoginPacket,
     // sent in .Configuration satte
     PluginMessagePacket,
     DisconnectConfigurationPacket,
@@ -97,6 +98,8 @@ ClientBoundPacket :: union #no_nil {
     GameEventPacket,
     PlayerAbilitiesPacket,
     KeepAlivePlayPacket,
+    SetCenterChunkPacket,
+    ChunkDataPacket,
 }
 
 ClientBoundPacketId :: enum VarInt {
@@ -107,7 +110,8 @@ ClientBoundPacketId :: enum VarInt {
     
     // sent in Login state
     
-    LoginSuccess   = 0x02,
+    LoginSuccess           = 0x02,
+    DisconnectLogin        = 0x00,
     
     // sent in Configuration state
 
@@ -126,6 +130,8 @@ ClientBoundPacketId :: enum VarInt {
     GameEvent                 = 0x26,
     PlayerAbilities           = 0x3e,
     KeepAlivePlay             = 0x2b,
+    SetCenterChunk            = 0x5c,
+    ChunkData                 = 0x2c,
 }
 
 @(private)
@@ -146,6 +152,7 @@ clientbound_packet_descriptors := [intrinsics.type_union_variant_count(ClientBou
     VARIANT_IDX_OF(ClientBoundPacket, PongResponsePacket)              = { .PongResponse,              true  },
     // sent in Login state
     VARIANT_IDX_OF(ClientBoundPacket, LoginSuccessPacket)              = { .LoginSuccess,              false },
+    VARIANT_IDX_OF(ClientBoundPacket, DisconnectLoginPacket)           = { .DisconnectLogin,           true  },
     // sent in Configuration state
     VARIANT_IDX_OF(ClientBoundPacket, PluginMessagePacket)             = { .PluginMessage,             false },
     VARIANT_IDX_OF(ClientBoundPacket, DisconnectConfigurationPacket)   = { .DisconnectConfiguration,   true  },
@@ -160,6 +167,8 @@ clientbound_packet_descriptors := [intrinsics.type_union_variant_count(ClientBou
     VARIANT_IDX_OF(ClientBoundPacket, GameEventPacket)                 = { .GameEvent,                 false },
     VARIANT_IDX_OF(ClientBoundPacket, PlayerAbilitiesPacket)           = { .PlayerAbilities,           false },
     VARIANT_IDX_OF(ClientBoundPacket, KeepAlivePlayPacket)             = { .KeepAlivePlay,             false },
+    VARIANT_IDX_OF(ClientBoundPacket, SetCenterChunkPacket)            = { .SetCenterChunk,            false },
+    VARIANT_IDX_OF(ClientBoundPacket, ChunkDataPacket)                 = { .ChunkData,                 false },
 }
 
 @(private)
@@ -420,6 +429,10 @@ PongResponsePacket :: struct {
 
 LoginSuccessPacket :: struct {
     game_profile: GameProfile,
+}
+
+DisconnectLoginPacket :: struct {
+    reason: TextComponent,
 }
 
 // ---------------------------------------- 
@@ -822,6 +835,30 @@ PlayerAbilityFlag :: enum {
 
 KeepAlivePlayPacket :: struct {
     id: Long,
+}
+
+SetCenterChunkPacket :: struct {
+    chunk_x: VarInt,
+    chunk_z: VarInt,
+}
+
+ChunkDataPacket :: struct {
+    chunk_x: i32,
+    chunk_z: i32,
+    height_maps: []HeightMap,
+    sections: []ChunkSection,
+    // TODO: block entities
+}
+
+HeightMap :: struct {
+    type: HeightMapType,
+    data: []Long,
+}
+
+HeightMapType :: enum VarInt {
+    WorldSurface           = 1,
+    MotionBlocking         = 4,
+    MotionBlockingNoLeaves = 5,
 }
 
 

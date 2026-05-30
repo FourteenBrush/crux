@@ -39,7 +39,7 @@ OutboundMessage :: BridgeMessage(ClientBoundPacket)
 Server :: struct {
     inbound_queue: ^SPSC(InboundMessage),
     outbound_queue: ^SPSC(OutboundMessage),
-    signal_io: bool,
+    messages_emitted: bool,
     
     // World data essentially, TODO: move this out to some world abstraction once this is established
     sessions: map[net.TCP_Socket]SessionData,
@@ -72,6 +72,8 @@ run :: proc(endpoint: net.Endpoint, server_sock: net.TCP_Socket) -> bool {
 
     init_context := context
     init_context.allocator = mem.panic_allocator()
+    // TODO: logger is not threadsafe
+    init_context.logger = create_logger(LOG_LEVEL, {.Level, .Terminal_Color}, "io")
     net_worker_thread := thread.create_and_start_with_poly_data(&net_worker_state, _network_worker_thread_proc, init_context=init_context)
     if net_worker_thread == nil {
         log.fatal("failed to start worker thread")
@@ -120,13 +122,12 @@ _main_thread_run_tick :: proc(io_ctx: ^reactor.IOContext) {
     start := time.tick_now()
 
     for message in spsc_dequeue(server.inbound_queue) {
-        // log.warn("MAIN THREAD:", message.packet)
         _handle_bridge_message(&server, message)
     }
-    if server.signal_io {
+    if server.messages_emitted {
         log.debug("waking up reactor due to spsc queue not empty")
         reactor.wakeup(io_ctx)
-        server.signal_io = false
+        server.messages_emitted = false
     }
     _handle_keepalives(&server)
     
@@ -170,7 +171,7 @@ _handle_keepalives :: proc(server: ^Server) {
         elapsed := time.tick_diff(last_keepalive.sent, now)
         if last_keepalive.awaiting_serverbound {
             if elapsed > KEEPALIVE_TIMEOUT {
-                // _kick_client(&state, &session, text_component("Timed out", .Red))
+                _kick_client(server, &session, text_component("Timed out", .Red))
                 continue
             }
         } else if elapsed > KEEPALIVE_INTERVAL {
@@ -215,16 +216,17 @@ _terminate_session :: proc(server: ^Server, session: SessionData) {
 // Kicks a client with a message, enters a termination state.
 @(private)
 _kick_client :: proc(server: ^Server, session: ^SessionData, reason: TextComponent) {
-    // TODO: add DisconnectLoginPacket and implement TextComponent -> json
-    
     // TODO: textcomponents must also be cloned if they refer to stack allocated data
+
     #partial switch session.state {
+    case .Login:
+        enqueue_packet(session, DisconnectLoginPacket { reason = reason })
     case .Configuration: 
         enqueue_packet(session, DisconnectConfigurationPacket { reason = reason })
     case .Play:
         enqueue_packet(session, DisconnectPlayPacket { reason = reason })
     case:
-        panic(#procedure + " in wrong client state")
+        panic(#procedure + " called in client state which does not permit disconnect packets")
     }
     session.terminating = true
 }
@@ -237,7 +239,7 @@ enqueue_packet :: proc(session: ^SessionData, packet: ClientBoundPacket) {
     
     spsc_enqueue(server.outbound_queue, PacketTransfer(ClientBoundPacket) { socket=session.socket, packet=packet })
     session.terminating |= descriptor.is_terminal
-    server.signal_io = true
+    server.messages_emitted = true
     // log.warn("MAIN THREAD: enqueued packet", packet)
 }
 

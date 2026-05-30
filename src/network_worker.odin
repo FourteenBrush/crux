@@ -116,7 +116,6 @@ _should_finalize_disconnect :: proc(conn: ClientConnection) -> bool {
     return conn.terminating && conn.outstanding_writes == 0
 }
 
-// TODO: logger is not threadsafe
 @(private)
 _network_worker_thread_proc :: proc(shared: ^NetworkWorkerSharedData) {
     tracy.SetThreadName("crux-NetWorker")
@@ -141,7 +140,6 @@ _network_worker_thread_proc :: proc(shared: ^NetworkWorkerSharedData) {
             target_tick_time := WORKER_TARGET_MSPT * time.Millisecond
             if tick_duration < target_tick_time {
                 tracy.ZoneNC("Worker Sleep", color=0x9c4433)
-                // TODO: dynamically scale, if theres nothing to do, just sleep a bit longer
                 time.sleep(target_tick_time - tick_duration)
             }
             free_all(context.temp_allocator)
@@ -173,12 +171,10 @@ _network_worker_run_tick :: proc(state: ^NetworkWorkerState) {
     
     completions: [512]reactor.Completion
     // NOTE: do not indefinitely block or this thread can't be joined
-    // TODO: scale down timer resolution when no clients are connected
+    // TODO: thread sometimes stalls with reactor.TIMEOUT_INFINITE
     nready, await_ok := reactor.await_io_completions(state.io_ctx, completions[:], timeout_ms=reactor.TIMEOUT_INFINITE)
     assert(await_ok, "failed to await io events") // TODO: proper error handling
 
-    // TODO: await_completions(..., INFINITE), as a thread join will call reactor.wakeup() before doing so
-    // log.error("epoll_wait wakeup, nready=", nready)
     for comp in completions[:nready] {
         tracy.ZoneN("ProcessCompletion")
         
@@ -309,14 +305,15 @@ _enqueue_packet :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnecti
 // TODO: remove this once we have all packets implemented
 @(private="file")
 _kick_client :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection, reason: TextComponent) {
-    // TODO: add DisconnectLoginPacket and implement TextComponent -> json
     #partial switch client_conn.state {
+    case .Login:
+        _enqueue_packet(state.io_ctx, client_conn, DisconnectLoginPacket { reason = reason })
     case .Configuration: 
         _enqueue_packet(state.io_ctx, client_conn, DisconnectConfigurationPacket { reason = reason })
     case .Play:
         _enqueue_packet(state.io_ctx, client_conn, DisconnectPlayPacket { reason = reason })
     case:
-        panic(#procedure + " in wrong client state")
+        panic(#procedure + " called in client state which does not permit disconnect packets")
     }
     client_conn.terminating = true
 }
