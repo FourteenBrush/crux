@@ -1,5 +1,6 @@
 package reactor
 
+import "core:sys/posix"
 @(require) import "core:log"
 @(require) import "core:net"
 @(require) import "core:mem"
@@ -27,6 +28,9 @@ _IOContext :: struct {
     // previously submitted via `submit_write_copy`. Buffers remain owned by the caller until a corresponding
     // `.Write` or `.Error` completion is emitted for every one of them.
     pending_writes: map[net.TCP_Socket]WriteQueue,
+    // Maximum number of iovecs to be sent at once over the network. If bigger vectorized writes occur,
+    // they will be buffered.
+    sysconf_iov_max: int,
     // Internal completion queue used when the `completions_out` buffer passed to `await_io_completions`
     // is saturated and we cannot reconstruct completion state from epoll alone.
     // Also handles epoll event batching as one EPoll_Event may occasionaly produce more than one completion.
@@ -39,9 +43,9 @@ _IOContext :: struct {
 WriteQueue :: struct {
     iovecs: [dynamic]linux.IO_Vec,
     // which iovec we are on
-    head_idx: int,
+    iov_idx: int,
     // offset inside current iovec
-    head_off: int,
+    iov_off: int,
     // Whether we have enabled EPOLLOUT notifications for this client (not enabled for new clients).
     // This is set to false and an epoll_ctl(.., MOD, events - {EPOLLOUT}) is executed whenever the write queue
     // is fully drained, this to avoid unnecessary thread wakeups for data that isn't there.
@@ -71,6 +75,9 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
     // TODO: convert to pool based thing, together with reactor_windows
     ctx.allocator = _make_instrumented_alloc(runtime.heap_allocator(), meta_allocator=runtime.heap_allocator())
     ctx.pending_writes = make(map[net.TCP_Socket]WriteQueue, ctx.allocator)
+
+    ctx.sysconf_iov_max = int(posix.sysconf(._IOV_MAX))
+    assert(ctx.sysconf_iov_max > 0, "error retrieving _IOV_MAX")
     
     // register server sock to detect inbound connections
     _register_client(&ctx, ctx.server_sock) or_return
@@ -109,7 +116,7 @@ _unregister_client :: proc(ctx: ^IOContext, conn: net.TCP_Socket) -> bool {
     
     _, pending_writes := delete_key(&ctx.pending_writes, conn)
     // emit completions for all aborted/partial writes
-    for stale_write in pending_writes.iovecs[pending_writes.head_idx:] {
+    for stale_write in pending_writes.iovecs[pending_writes.iov_idx:] {
         comp := Completion {
             socket = conn,
             operation = .Error,
@@ -172,7 +179,8 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
             if linux.Fd(socket) == ctx.wakeup_eventfd {
                 // reset wakeup counter back to 0, wakes up epoll when > 0
                 buf: [8]u8
-                _, _ = linux.read(ctx.wakeup_eventfd, buf[:])
+                _, errno = linux.read(ctx.wakeup_eventfd, buf[:])
+                assert(errno == .NONE, "read() from eventfd should not fail")
                 continue
             }
             
@@ -227,6 +235,7 @@ _do_read :: proc(ctx: ^IOContext, socket: net.TCP_Socket) -> (comp: Completion, 
     comp.operation = .Read
     switch {
     case recv_err != .NONE:
+        _log_error(recv_err, "recv() failed")
         comp.operation = .Error
         delete(recv_buf, ctx.allocator)
     case nread == 0:
@@ -249,31 +258,33 @@ _do_write :: proc(
 ) {
     wq := &ctx.pending_writes[socket]
     if wq == nil || len(wq.iovecs) == 0 do return
+    assert(wq.iov_idx < len(wq.iovecs), "full drain did not reset write queue")
     
     // apply iovec head_off by mutating first one in iovec slice, then restore it after syscall
     orig_vec: Maybe(linux.IO_Vec) = nil
-    if wq.head_off > 0 {
-        vec := &wq.iovecs[wq.head_idx]
+    if wq.iov_off > 0 {
+        vec := &wq.iovecs[wq.iov_idx]
         orig_vec = vec^
-        vec.base = vec.base[wq.head_off:]
-        vec.len -= uint(wq.head_off)
+        vec.base = vec.base[wq.iov_off:]
+        vec.len -= uint(wq.iov_off)
     }
     
-    msg := linux.Msg_Hdr { iov = wq.iovecs[wq.head_idx:] }
-    // FIXME: cap every sendmsg to sysconf(._IOV_MAX) (usually ~1024)
+    transmission_cap := min(len(wq.iovecs) - wq.iov_idx, ctx.sysconf_iov_max)
+    msg := linux.Msg_Hdr { iov = wq.iovecs[wq.iov_idx:][:transmission_cap] }
     nwritten, send_err := linux.sendmsg(linux.Fd(socket), &msg, {.NOSIGNAL})
     
     if orig_vec, ok := orig_vec.?; ok {
         // restore mutated iovec so caller receives correct completion bufs
-        wq.iovecs[wq.head_idx] = orig_vec
+        wq.iovecs[wq.iov_idx] = orig_vec
     }
 
     if send_err == .EAGAIN || send_err == .EWOULDBLOCK {
         return
     }
     if send_err != .NONE {
+        _log_error(send_err, "sendmsg() failed")
         // pass allocated buffers back to caller
-        for vec in wq.iovecs[wq.head_idx:] {
+        for vec in wq.iovecs[wq.iov_idx:] {
             comp := Completion {
                 socket = socket,
                 operation = .Error,
@@ -310,14 +321,14 @@ _advance_write_queue :: proc(
     // every iovec corresponds to a write operation so send completions for all fully written ones
 
     remaining := nwritten // nr of bytes we should consider to either emit a completion for or handle a partial write
-    for remaining > 0 && wq.head_idx < len(wq.iovecs) {
-        #no_bounds_check vec := &wq.iovecs[wq.head_idx]
+    for remaining > 0 && wq.iov_idx < len(wq.iovecs) {
+        #no_bounds_check vec := &wq.iovecs[wq.iov_idx]
         // how many bytes left in this iovec
-        available := int(vec.len) - wq.head_off
+        available := int(vec.len) - wq.iov_off
         
         if remaining < available {
             // iovec, which happened to be partially written
-            wq.head_off += remaining
+            wq.iov_off += remaining
             remaining = 0
             break
         }
@@ -330,12 +341,12 @@ _advance_write_queue :: proc(
             buf = vec.base[:vec.len],
         }
         _emit_completion(ctx, completions_out, idx_ptr, comp)
-        wq.head_idx += 1
-        wq.head_off = 0
+        wq.iov_idx += 1
+        wq.iov_off = 0
     }
     
     // queue fully drained
-    if wq.head_idx >= len(wq.iovecs) {
+    if wq.iov_idx >= len(wq.iovecs) {
         _reset_write_queue(wq)
         return true
     }
@@ -345,8 +356,8 @@ _advance_write_queue :: proc(
 @(private="file")
 _reset_write_queue :: proc(wq: ^WriteQueue) {
     resize(&wq.iovecs, 0)
-    wq.head_idx = 0
-    wq.head_off = 0
+    wq.iov_idx = 0
+    wq.iov_off = 0
 }
 
 // Either stores a completion directly to an output buffer if not saturated,
