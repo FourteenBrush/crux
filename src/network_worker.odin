@@ -191,10 +191,11 @@ _network_worker_run_tick :: proc(state: ^NetworkWorkerState) {
 
         switch comp.operation {
         case .Error:
+            // FIXME: currently gets spammed for every submitted buffer
             log.debug("client socket error")
+            client_conn.terminating = true
             // if caused by a write operation, free our allocated submission which was returned back to us
             if comp.buf != nil {
-                assert(client_conn != nil)
                 delete(comp.buf, client_conn.packet_scratch_alloc)
             }
             if _should_finalize_disconnect(client_conn^) {
