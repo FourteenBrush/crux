@@ -10,35 +10,6 @@ LOG2 :: intrinsics.constant_log2
 // FIXME: cant we avoid having a tagged union inside another one?
 Packet :: union { ClientBoundPacket, ServerBoundPacket }
 
-ServerBoundPacket :: union #no_nil {
-    // sent in .Handshake state
-    LegacyServerListPingPacket,
-    HandshakePacket,
-    // sent in .Status state
-    StatusRequestPacket,
-    PingRequestPacket,
-    // sent in .Login state
-    LoginStartPacket,
-    LoginAcknowledgedPacket,
-    // sent in .Configuration state
-    PluginMessagePacket,
-    ClientInformationPacket,
-    KnownPacksPacket,
-    AcknowledgeFinishConfigurationPacket,
-    // sent in .Play state
-    ClientTickEndPacket,
-    SetPlayerRotationPacket,
-    SetPlayerPositionPacket,
-    SetPlayerPositionRotationPacket,
-    ConfirmTeleportationPacket,
-    PlayerLoadedPacket,
-    KeepAlivePlayPacket,
-    SwingArmPacket,
-    PlayerInputPacket,
-    PlayerFlightChangePacket,
-    StoreCookiePlayPacket,
-}
-
 ServerBoundPacketId :: enum VarInt {
     // sent in .Handshake state
     Handshake           = 0x00,
@@ -64,9 +35,10 @@ ServerBoundPacketId :: enum VarInt {
     // sent in .Play state
     
     ClientTickEnd             = 0x0c,
-    SetPlayerRotation         = 0x1f,
     SetPlayerPosition         = 0x1d,
+    SetPlayerRotation         = 0x1f,
     SetPlayerPositionRotation = 0x1e,
+    SetPlayerMovement         = 0x20,
     ConfirmTeleportation      = 0x00,
     PlayerLoaded              = 0x2b,
     KeepAlivePlay             = 0x1b,
@@ -75,31 +47,42 @@ ServerBoundPacketId :: enum VarInt {
     // player abilities
     FlightChange              = 0x27,
     StoreCookiePlay           = 0x76,
+    SetHeldItem               = 0x34,
+    CloseContainer            = 0x12,
+    PlayerCommand             = 0x29,
 }
 
-ClientBoundPacket :: union #no_nil {
+ServerBoundPacket :: union #no_nil {
+    // sent in .Handshake state
+    LegacyServerListPingPacket,
+    HandshakePacket,
     // sent in .Status state
-    StatusResponsePacket,
-    PongResponsePacket,
+    StatusRequestPacket,
+    PingRequestPacket,
     // sent in .Login state
-    LoginSuccessPacket,
-    DisconnectLoginPacket,
-    // sent in .Configuration satte
+    LoginStartPacket,
+    LoginAcknowledgedPacket,
+    // sent in .Configuration state
     PluginMessagePacket,
-    DisconnectConfigurationPacket,
+    ClientInformationPacket,
     KnownPacksPacket,
-    RegistryDataPacket,
-    FinishConfigurationPacket,
+    AcknowledgeFinishConfigurationPacket,
     // sent in .Play state
-    LoginPacket,
-    DisconnectPlayPacket,
-    SynchronizePlayerPositionPacket,
-    PlayerInfoUpdatePacket,
-    GameEventPacket,
-    PlayerAbilitiesPacket,
+    ClientTickEndPacket,
+    SetPlayerPositionPacket,
+    SetPlayerRotationPacket,
+    SetPlayerPositionRotationPacket,
+    SetPlayerMovementPacket,
+    ConfirmTeleportationPacket,
+    PlayerLoadedPacket,
     KeepAlivePlayPacket,
-    SetCenterChunkPacket,
-    ChunkDataPacket,
+    SwingArmPacket,
+    PlayerInputPacket,
+    PlayerFlightChangePacket,
+    StoreCookiePlayPacket,
+    SetHeldItemPacket,
+    CloseContainerPacket,
+    PlayerCommandPacket,
 }
 
 ClientBoundPacketId :: enum VarInt {
@@ -132,6 +115,31 @@ ClientBoundPacketId :: enum VarInt {
     KeepAlivePlay             = 0x2b,
     SetCenterChunk            = 0x5c,
     ChunkData                 = 0x2c,
+}
+
+ClientBoundPacket :: union #no_nil {
+    // sent in .Status state
+    StatusResponsePacket,
+    PongResponsePacket,
+    // sent in .Login state
+    LoginSuccessPacket,
+    DisconnectLoginPacket,
+    // sent in .Configuration satte
+    PluginMessagePacket,
+    DisconnectConfigurationPacket,
+    KnownPacksPacket,
+    RegistryDataPacket,
+    FinishConfigurationPacket,
+    // sent in .Play state
+    LoginPacket,
+    DisconnectPlayPacket,
+    SynchronizePlayerPositionPacket,
+    PlayerInfoUpdatePacket,
+    GameEventPacket,
+    PlayerAbilitiesPacket,
+    KeepAlivePlayPacket,
+    SetCenterChunkPacket,
+    ChunkDataPacket,
 }
 
 @(private)
@@ -196,6 +204,7 @@ serverbound_packet_descriptors := [intrinsics.type_union_variant_count(ServerBou
     VARIANT_IDX_OF(ServerBoundPacket, SetPlayerRotationPacket)              = { .Play },
     VARIANT_IDX_OF(ServerBoundPacket, SetPlayerPositionPacket)              = { .Play },
     VARIANT_IDX_OF(ServerBoundPacket, SetPlayerPositionRotationPacket)      = { .Play },
+    VARIANT_IDX_OF(ServerBoundPacket, SetPlayerMovementPacket)              = { .Play },
     VARIANT_IDX_OF(ServerBoundPacket, ConfirmTeleportationPacket)           = { .Play },
     VARIANT_IDX_OF(ServerBoundPacket, PlayerLoadedPacket)                   = { .Play },
     VARIANT_IDX_OF(ServerBoundPacket, KeepAlivePlayPacket)                  = { .Play },
@@ -203,6 +212,9 @@ serverbound_packet_descriptors := [intrinsics.type_union_variant_count(ServerBou
     VARIANT_IDX_OF(ServerBoundPacket, PlayerInputPacket)                    = { .Play },
     VARIANT_IDX_OF(ServerBoundPacket, PlayerFlightChangePacket)             = { .Play },
     VARIANT_IDX_OF(ServerBoundPacket, StoreCookiePlayPacket)                = { .Play },
+    VARIANT_IDX_OF(ServerBoundPacket, SetHeldItemPacket)                    = { .Play },
+    VARIANT_IDX_OF(ServerBoundPacket, CloseContainerPacket)                 = { .Play },
+    VARIANT_IDX_OF(ServerBoundPacket, PlayerCommandPacket)                  = { .Play },
 }
 
 @(private)
@@ -338,6 +350,13 @@ AcknowledgeFinishConfigurationPacket :: struct {}
 
 ClientTickEndPacket :: struct {}
 
+SetPlayerPositionPacket :: struct {
+    // Y component stores the feet level.
+    using pos: Pos,
+    // TODO: change to bitfield and fix decoding invalid values
+    flags: u8,
+}
+
 SetPlayerRotationPacket :: struct {
     yaw: f32,
     pitch: f32,
@@ -345,21 +364,17 @@ SetPlayerRotationPacket :: struct {
     flags: u8,
 }
 
-SetPlayerPositionPacket :: struct {
-    x: f64,
-    feet_y: f64,
-    z: f64,
+SetPlayerPositionRotationPacket :: struct {
+    // Y component stores the feet level.
+    using pos: Pos,
+    yaw: f32,
+    pitch: f32,
     // TODO: change to bitfield and fix decoding invalid values
     flags: u8,
 }
 
-SetPlayerPositionRotationPacket :: struct {
-    x: f64,
-    feet_y: f64,
-    z: f64,
-    yaw: f32,
-    pitch: f32,
-    // TODO: change to bitfield and fix decoding invalid values
+SetPlayerMovementPacket :: struct {
+    // TODO: change to bitfield
     flags: u8,
 }
 
@@ -398,6 +413,14 @@ StoreCookiePlayPacket :: struct {
     payload: []u8,
 }
 
+SetHeldItemPacket :: struct {
+    slot: i16,
+}
+
+CloseContainerPacket :: struct {
+    window_id: VarInt,
+}
+
 // ================================================================================
 // CLIENTBOUND PACKETS
 // ================================================================================
@@ -414,7 +437,7 @@ StatusResponsePacket :: struct {
         protocol: ProtocolVersion `json:"protocol"`,
     },
     players: struct { max: uint, online: uint },
-    // description: TextComponent,
+    description: TextComponent,
     favicon: string `fmt:"-"`,
     enforces_secure_chat: bool `json:"enforcesSecureChat"`,
 }
@@ -517,6 +540,8 @@ cardinal_light_to_string :: proc(c: CardinalLight) -> string {
     }
 }
 
+OVERWORLD_HEIGHT :: 384
+
 @(rodata)
 overworld_dimension_descriptor := DimensionType {
     has_skylight = true,
@@ -526,7 +551,7 @@ overworld_dimension_descriptor := DimensionType {
     has_fixed_time = false,
     ambient_light = 0.0,
     min_y = -64,
-    height = 384,
+    height = OVERWORLD_HEIGHT,
     logical_height = 384,
     monster_spawn_light_level = 7,
     monster_spawn_block_light_limit = 7,
@@ -838,8 +863,7 @@ KeepAlivePlayPacket :: struct {
 }
 
 SetCenterChunkPacket :: struct {
-    chunk_x: VarInt,
-    chunk_z: VarInt,
+    chunk_pos: ChunkPos,
 }
 
 ChunkDataPacket :: struct {
@@ -848,17 +872,24 @@ ChunkDataPacket :: struct {
     height_maps: []HeightMap,
     sections: []ChunkSection,
     // TODO: block entities
+    light: LightData,
 }
 
-HeightMap :: struct {
-    type: HeightMapType,
-    data: []Long,
+PlayerCommandPacket :: struct {
+    entity_id: VarInt,
+    action: PlayerCommandAction,
+    // Only used when action is StartHorseJump.
+    jump_boost: VarInt,
 }
 
-HeightMapType :: enum VarInt {
-    WorldSurface           = 1,
-    MotionBlocking         = 4,
-    MotionBlockingNoLeaves = 5,
+PlayerCommandAction :: enum VarInt {
+    LeaveBed             = 0,
+    StartSprinting       = 1,
+    StopSprinting        = 2,
+    StartHorseJump       = 3,
+    StopHorseJump        = 4,
+    OpenVehicleInventory = 5,
+    StartElytraFlight    = 6,
 }
 
 

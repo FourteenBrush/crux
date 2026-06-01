@@ -1,8 +1,10 @@
 package crux
 
+import "core:fmt"
 import "core:mem"
 import "core:net"
 import "core:log"
+import "core:math"
 import "core:time"
 import "core:slice"
 
@@ -15,7 +17,7 @@ SessionData :: struct {
     protocol_version: ProtocolVersion,
     // filled in after LoginStartPacket
     game_profile: GameProfile,
-    position: [3]f64,
+    pos: Pos,
     yaw: f64,
     pitch: f64,
     pending_teleport: Maybe(PendingTeleport),
@@ -48,13 +50,31 @@ ClientState :: enum u8 {
 @(private="file")
 PendingTeleport :: struct {
     id: VarInt,
-    pos: [3]f64,
+    pos: Pos,
 }
+
+Pos :: [3]f64
+
+ChunkPos :: [2]i32
 
 player_teleport :: proc(session: ^SessionData, x, y, z: f64) {
     assert(session.pending_teleport == nil, "TODO: stack player teleports or something")
     enqueue_packet(session, SynchronizePlayerPositionPacket { x=x, y=y, z=z })
     session.pending_teleport = PendingTeleport { pos={ x, y, z } }
+}
+
+pos_to_chunk :: proc "contextless" (pos: Pos) -> ChunkPos {
+    return {
+        cast(i32)math.floor(pos.x / 16),
+        cast(i32)math.floor(pos.z / 16),
+    }
+}
+
+@(private="file")
+_player_crosses_chunk_borders :: proc(session: ^SessionData, new_pos: Pos) -> bool {
+    chunk_pos := pos_to_chunk(session.pos)
+    new_chunk_pos := pos_to_chunk(new_pos)
+    return chunk_pos != new_chunk_pos
 }
 
 @(private)
@@ -113,7 +133,7 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
                 max = 100,
                 online = uint(online_players),
             },
-            // description = text_component("Some Server", .DarkAqua),
+            description = text_component("Some Server", .DarkAqua),
             favicon = _load_favicon(),
             enforces_secure_chat = false,
         }
@@ -123,7 +143,13 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
         session.terminating = true
     case LoginStartPacket:
         if session.protocol_version != PROTOCOL_VERSION {
-            _kick_client(server, session, text_component("Unsupported protocol version", .Red))
+            error_msg := fmt.aprintf(
+                "Incompatible protocol version (Client: %d Server: %d)",
+                session.protocol_version, PROTOCOL_VERSION,
+                // TODO: bad read on io thread for some reason when using scratch alloc, not when using mutex alloc
+                allocator=session.packet_scratch_alloc,
+            )
+            _kick_client(server, session, text_component(error_msg, .Red))
             return
         }
         // FIXME: negotiate compression here
@@ -196,17 +222,25 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
         // if we do not send a position sync, the client keeps sending set player position packets
         // with an incrementally decreasing height field.
         // Will be confirmed with a ConfirmTeleportationPacket
-        player_teleport(session, 0, 65, 0)
+        player_teleport(session, 1, 65, 1)
     case ClientTickEndPacket:
-        // empty
-    case SetPlayerRotationPacket:
         // empty
     case SetPlayerPositionPacket:
         // ignore position changes while awaiting a teleport confirmation (vanilla behavior)
         if session.pending_teleport != nil do return
         
-        session.position = {packet.x, packet.feet_y, packet.z}
+        if _player_crosses_chunk_borders(session, packet.pos) {
+            log.warn("crossing chunk boundaries")
+            enqueue_packet(session, SetCenterChunkPacket {
+                chunk_pos = pos_to_chunk(packet.pos),
+            })
+        }
+        session.pos = packet.pos
+    case SetPlayerRotationPacket:
+        // empty
     case SetPlayerPositionRotationPacket:
+        // empty
+    case SetPlayerMovementPacket:
         // empty
     case ConfirmTeleportationPacket:
         pending_teleport, has_pending := session.pending_teleport.?
@@ -219,7 +253,7 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
             return
         }
         
-        session.position = pending_teleport.pos
+        session.pos = pending_teleport.pos
         session.pending_teleport = nil
         
         if !session.spawned {
@@ -232,7 +266,7 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
                 properties = {},
             }
             gamemode_change := PlayerInfoUpdateActionUpdateGameMode {
-                new_mode = .Spectator,
+                new_mode = .Survival,
             }
             add_to_tablist := PlayerInfoUpdateActionUpdateListed { listed=true }
             enqueue_packet(session, PlayerInfoUpdatePacket {
@@ -254,6 +288,18 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
                 fov_modifier = 0.1,
             })
             enqueue_packet(session, StartWaitingForChunks {})
+            enqueue_packet(session, SetCenterChunkPacket { chunk_pos={0, 0} })
+            
+            // send all chunks for the clients chunk loading area (2 * server view distance + 7 square)
+            center_offset := 2 * 8 + 3
+            for x in -center_offset..=center_offset {
+                for z in -center_offset..=center_offset {
+                    enqueue_packet(session, ChunkDataPacket {
+                        chunk_x = i32(x),
+                        chunk_z = i32(z),
+                    })
+                }
+            }
         }
     case PlayerLoadedPacket:
         // empty
@@ -275,6 +321,12 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
     case PlayerFlightChangePacket:
         // empty
     case StoreCookiePlayPacket:
+        // empty
+    case SetHeldItemPacket:
+        // empty
+    case CloseContainerPacket:
+        // empty
+    case PlayerCommandPacket:
         // empty
     }
 }
@@ -464,7 +516,7 @@ _send_registry_data :: proc(session: ^SessionData) {
     // a minecraft:plains biome is required as default biome before a login packet will be accepted
     enqueue_packet(session, BiomeRegistry {
         entries = slice.clone([]RegistryEntry(Biome){
-            { id = Identifier("minecraft:plains"), data = nil },
+            BiomeId.Plains = { id = Identifier("minecraft:plains"), data = nil },
         }, session.packet_scratch_alloc),
     })
 }

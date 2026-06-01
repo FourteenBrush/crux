@@ -102,7 +102,7 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
         feet_y := buf_read_f64(b) or_return
         z := buf_read_f64(b) or_return
         flags := buf_read_byte(b) or_return
-        return SetPlayerPositionPacket { x=x, feet_y=feet_y, z=z, flags=flags }, .None
+        return SetPlayerPositionPacket { x=x, y=feet_y, z=z, flags=flags }, .None
     case .SetPlayerPositionRotation:
         x := buf_read_f64(b) or_return
         feet_y := buf_read_f64(b) or_return
@@ -110,7 +110,10 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
         yaw := buf_read_f32(b) or_return
         pitch := buf_read_f32(b) or_return
         flags := buf_read_byte(b) or_return
-        return SetPlayerPositionRotationPacket { x=x, feet_y=feet_y, z=z, yaw=yaw, pitch=pitch, flags=flags }, .None
+        return SetPlayerPositionRotationPacket { x=x, y=feet_y, z=z, yaw=yaw, pitch=pitch, flags=flags }, .None
+    case .SetPlayerMovement:
+        flags := buf_read_byte(b) or_return
+        return SetPlayerMovementPacket { flags=flags }, .None
     case .PlayerLoaded:
         return PlayerLoadedPacket {}, .None
     case .KeepAlivePlay:
@@ -133,6 +136,20 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
         payload := mem.alloc_bytes_non_zeroed(int(payload_len), align_of(u8), allocator) or_else panic("OOM")
         buf_read_bytes(b, payload) or_return
         return StoreCookiePlayPacket { key=key, payload=payload }, .None
+    case .SetHeldItem:
+        slot := buf_read_i16(b) or_return
+        return SetHeldItemPacket { slot=slot }, .None
+    case .CloseContainer:
+        window_id := buf_read_var_int(b) or_return
+        return CloseContainerPacket { window_id=window_id }, .None
+    case .PlayerCommand:
+        entity_id := buf_read_var_int(b) or_return
+        action := buf_read_var_int_enum(b, PlayerCommandAction) or_return
+        jump_boost := buf_read_var_int(b) or_return
+        if jump_boost < 0 || jump_boost > 100 {
+            return p, .InvalidData
+        }
+        return PlayerCommandPacket { entity_id=entity_id, action=action, jump_boost=jump_boost }, .None
     case:
         log.warnf("unhandled packet id: 0x%x, kicking with .InvalidData", id)
         return p, .InvalidData

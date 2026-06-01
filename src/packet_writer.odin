@@ -22,6 +22,7 @@ _serialize_clientbound :: proc(outb: ^NetworkBuffer, packet: ClientBoundPacket, 
 
     switch packet in packet {
     case StatusResponsePacket:
+        // TODO: response description to textcomponent json dto
         // json serializer does not return allocator errors, so there should be no reason this fails
         bytes := json.marshal(packet, allocator=context.temp_allocator) or_else panic("error serializing status response")
         werr := buf_write_string(outb, string(bytes)) // copied
@@ -256,22 +257,60 @@ _serialize_clientbound :: proc(outb: ^NetworkBuffer, packet: ClientBoundPacket, 
     case KeepAlivePlayPacket:
         buf_write_long(outb, packet.id)
     case SetCenterChunkPacket:
-        buf_write_var_int(outb, packet.chunk_x)
-        buf_write_var_int(outb, packet.chunk_z)
+        chunk_x, chunk_z := expand_values(packet.chunk_pos)
+        buf_write_var_int(outb, VarInt(chunk_x))
+        buf_write_var_int(outb, VarInt(chunk_z))
     case ChunkDataPacket:
         buf_write_i32(outb, packet.chunk_x)
         buf_write_i32(outb, packet.chunk_z)
         // heightmaps array:
         buf_write_var_int(outb, VarInt(0))
         
-        for section in packet.sections {
-            buf_write_i16(outb, section.block_count)
-            serialize_paletted_container(outb, section.block_states)
-            serialize_paletted_container(outb, section.biomes)
+        // sections array:
+        nsections := OVERWORLD_HEIGHT / CHUNK_SECTION_HEIGHT
+        nblocks := BLOCKS_PER_CHUNK_SECTION
+        buf_write_var_int(outb, VarInt(6 * nsections))
+        for i in 0..<nsections {
+            block := (i < 8 || i > 22) ? BlockId.Dirt : .Air
+            buf_write_i16(outb, i16(nblocks))
+            buf_write_bytes(outb, {
+                /*bpe*/0, u8(block),
+                /*bpe*/0, u8(BiomeId.Plains),
+            })
         }
+        
         // block entities:
-        // buf_write_var_int(outb, VarInt(0))
-        // TODO: write heightmap, data, block entities and light data
+        buf_write_var_int(outb, VarInt(0))
+        // light data:
+        nbits := uint(nsections) + 2
+        // sky light mask (BitSet <=> (n:VarInt, [n]Long))
+        buf_write_var_int(outb, VarInt(1))
+        buf_write_long(outb, Long(0))
+
+        // block light mask
+        buf_write_var_int(outb, VarInt(1))
+        buf_write_long(outb, Long(1) << nbits - 1)
+
+        // empty sky light mask
+        buf_write_var_int(outb, VarInt(1))
+        buf_write_long(outb, Long(1) << nbits - 1)
+    
+        // empty block light mask
+        buf_write_var_int(outb, VarInt(1))
+        // buf_write_long(outb, Long(1) << nbits - 1)
+        buf_write_long(outb, Long(0))
+    
+        // sky light arrays
+        buf_write_var_int(outb, VarInt(0))
+
+        // block light arrays
+        buf_write_var_int(outb, VarInt(nbits))
+        section_light: [2048]u8 = 0xff
+        for _ in 0..<nbits {
+            // send section light data ([]2048 all set to 0xff)
+            buf_write_var_int(outb, VarInt(len(section_light)))
+            buf_write_bytes(outb, section_light[:])
+        }
     }
     return .None
 }
