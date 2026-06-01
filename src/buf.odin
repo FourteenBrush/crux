@@ -189,8 +189,6 @@ buf_write_var_int_at :: proc(buf: ^NetworkBuffer, mark: BufWriteMark, val: VarIn
         return .InvalidMark
     }
     
-    // if wrapped && (uint())
-
     vbuf, vlen := _buf_prepare_var_int(val)
     space := cap(buf.data) - len(buf.data)
     if space < vlen {
@@ -206,6 +204,8 @@ buf_write_var_int_at :: proc(buf: ^NetworkBuffer, mark: BufWriteMark, val: VarIn
         log.fatal("yet to be implemented, length=", buf_length(buf^), "cap=", cap(buf.data),
             "roff=", buf.r_offset, "mark=", mark)
         panic("yet to be implemented")
+        
+        // TODO: implement, over time the buffers read offset shifts that much that we do need to handle it
     } else {
         // W >= M for all cases
         move_len := w_offset - mark_idx // >= 0, 0 if writing to empty buffer at idx 0
@@ -579,6 +579,20 @@ buf_write_i32 :: proc(buf: ^NetworkBuffer, i: i32) {
     i := i32be(i)
     bytes := ([^]u8)(&i)[:4]
     buf_write_bytes(buf, bytes)
+}
+
+@(require_results)
+buf_read_i16 :: proc(buf: ^NetworkBuffer) -> (i: i16, err: ReadError) {
+    buf_ensure_readable(buf^, 2) or_return
+    msb := buf_unchecked_read_byte(buf)
+    lsb := buf_unchecked_read_byte(buf)
+    return i16(msb) << 8 | i16(lsb), .None
+}
+
+buf_write_i16 :: proc(buf: ^NetworkBuffer, i: i16) {
+    i := u16(i)
+    buf_write_byte(buf, u8(i >> 8) & 0xff)
+    buf_write_byte(buf, u8(i & 0xff))
 }
 
 @(require_results)
