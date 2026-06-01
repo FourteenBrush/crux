@@ -18,6 +18,8 @@ import "lib:tracy"
 
 _ :: mem
 
+@(private) LOG_LEVEL :: log.Level.Debug when ODIN_DEBUG else .Info
+
 // log levels for logging packet transfer, these values are bigger than .Debug (1)
 @(private) LOG_LEVEL_INBOUND :: log.Level(7)
 @(private) LOG_LEVEL_OUTBOUND :: log.Level(8)
@@ -66,17 +68,18 @@ main :: proc() {
     log_opts := log.Options {.Level, .Terminal_Color}
 
     // define log levels in order of importance
+    // FIXME: is there a way to assign log levels lower than .Debug (is has value 0 and log.Level is backed by uint)
     log.Level_Headers = {
         0..<6  = "debug",
         LOG_LEVEL_INBOUND  = "inbound",
         LOG_LEVEL_OUTBOUND = "outbound",
-        LOG_LEVEL_REACTOR_ERROR = "io",
+        LOG_LEVEL_REACTOR_ERROR = "reactor",
     	10..<20 = "info",
     	20..<30 = "warn",
     	30..<40 = "error",
     	40..<50 = "fatal",
     }
-    context.logger = create_logger(.Debug when ODIN_DEBUG else .Info, log_opts, "core")
+    context.logger = create_logger(LOG_LEVEL, log_opts, "core")
     
     tracy.SetThreadName("main")
     
@@ -159,8 +162,8 @@ _logger_proc :: proc(data: rawptr, level: log.Level, text: string, options: log.
         CYAN     = ansi.CSI + ansi.FG_COLOR_24_BIT + ";100;163;194" + ansi.SGR
         YELLOW   = ansi.CSI + ansi.FG_COLOR_24_BIT + ";195;217;146" + ansi.SGR
         GREEN    = ansi.CSI + ansi.FG_COLOR_24_BIT + ";152;205;147" + ansi.SGR
-        ORANGE   = ansi.CSI + ansi.FG_COLOR_24_BIT + ";200;172;144" + ansi.SGR
-        RED      = ansi.CSI + ansi.FG_COLOR_24_BIT + ";145;85;87"   + ansi.SGR
+        ORANGE   = ansi.CSI + ansi.FG_COLOR_24_BIT + ";214;152;38"  + ansi.SGR
+        RED      = ansi.CSI + ansi.FG_COLOR_24_BIT + ";183;76;46"   + ansi.SGR
     } else {
         MAGENTA = ansi.CSI + ansi.FG_MAGENTA  + ansi.SGR    
         CYAN    = ansi.CSI + ansi.FG_CYAN     + ansi.SGR
