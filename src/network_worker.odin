@@ -336,8 +336,8 @@ _create_client_connection :: proc(socket: net.TCP_Socket) -> ClientConnection {
         
         // packet_scratch_alloc = mem.scratch_allocator(packet_scratch),
         packet_scratch_alloc = mem.mutex_allocator(packet_scratch),
-        rx_buf = create_network_buf(10240, allocator=os.heap_allocator()),
-        tx_buf = create_network_buf(10240, allocator=os.heap_allocator()),
+        rx_buf = create_network_buf(160*mem.Megabyte, allocator=os.heap_allocator()),
+        tx_buf = create_network_buf(160*mem.Megabyte, allocator=os.heap_allocator()),
     }
 }
 
