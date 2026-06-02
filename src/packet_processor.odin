@@ -1,67 +1,12 @@
 package crux
 
 import "core:fmt"
-import "core:mem"
 import "core:net"
 import "core:log"
 import "core:math"
-import "core:time"
 import "core:slice"
 
-@(private)
-SessionData :: struct {
-    socket: net.TCP_Socket,
-    state: ClientState,
-    terminating: bool,
-    
-    protocol_version: ProtocolVersion,
-    // filled in after LoginStartPacket
-    game_profile: GameProfile,
-    pos: Pos,
-    yaw: f64,
-    pitch: f64,
-    pending_teleport: Maybe(PendingTeleport),
-    // Whether the player has been added to the world yet
-    spawned: bool,
-    
-    clientbound_keepalive: struct {
-        // Zero initialized if we haven't sent any.
-        sent: time.Tick,
-        id: i64,
-        awaiting_serverbound: bool,
-    },
-    
-    // TODO: move to global arena list based on epoch, backed by vmem allocator
-    packet_scratch_alloc: mem.Allocator,
-}
-
-// IMPORTANT NOTE: values must match respective values from HandshakeIntent to allow casting.
-// ORDER IS IMPORTANT!!
-ClientState :: enum u8 {
-    Handshake,
-    Status        = auto_cast HandshakeIntent.Status,
-    Login         = auto_cast HandshakeIntent.Login,
-    Transfer      = auto_cast HandshakeIntent.Transfer,
-    Configuration,
-    Play,
-}
-#assert(int(ClientState.Login) <= int(max(HandshakeIntent)))
-
-@(private="file")
-PendingTeleport :: struct {
-    id: VarInt,
-    pos: Pos,
-}
-
 Pos :: [3]f64
-
-ChunkPos :: [2]i32
-
-player_teleport :: proc(session: ^SessionData, x, y, z: f64) {
-    assert(session.pending_teleport == nil, "TODO: stack player teleports or something")
-    enqueue_packet(session, SynchronizePlayerPositionPacket { x=x, y=y, z=z })
-    session.pending_teleport = PendingTeleport { pos={ x, y, z } }
-}
 
 pos_to_chunk :: proc "contextless" (pos: Pos) -> ChunkPos {
     return {
