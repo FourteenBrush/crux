@@ -170,6 +170,7 @@ buf_write_var_int :: proc(buf: ^NetworkBuffer, val: VarInt) {
     unreachable()
 }
 
+@(require_results)
 buf_write_var_int_at :: proc(buf: ^NetworkBuffer, mark: BufWriteMark, val: VarInt) -> WriteError #no_bounds_check {
     mark_idx := int(mark) // index into raw data
     // wrapped meaning, both sides of the data array are being used to store data, with an
@@ -328,6 +329,7 @@ buf_write_identifier :: proc(buf: ^NetworkBuffer, id: Identifier) {
     assert(err == .None, "valid Identifier was expected") // only triggered when exceeding max length
 }
 
+// Reads a bit mask of size `T`, backed by enum constants of type `F`.
 @(require_results)
 buf_read_flags :: proc(buf: ^NetworkBuffer, $T: typeid/bit_set[$F]) -> (flags: T, err: ReadError) {
     outb: [size_of(T)]u8
@@ -355,6 +357,15 @@ buf_write_uuid :: proc(buf: ^NetworkBuffer, id: uuid.Identifier) {
     buf_write_bytes(buf, id[:])
 }
 
+@(require_results)
+buf_read_position :: proc(buf: ^NetworkBuffer) -> (pos: Position, err: ReadError) {
+    l := buf_read_long(buf) or_return
+    pos.x = i32(l >> 38)
+    pos.y = i16(l << 52 >> 52)
+    pos.z = i32(l << 26 >> 38)
+    return pos, .None
+}
+
 // FIXME: handle address decoding
 @(require_results)
 buf_read_string :: proc(buf: ^NetworkBuffer, #any_int max_len: int, allocator: mem.Allocator) -> (s: string, err: ReadError) {
@@ -373,6 +384,7 @@ buf_read_long :: proc(buf: ^NetworkBuffer) -> (l: Long, err: ReadError) {
     return transmute(Long)out, .None
 }
 
+// Reads an enum value backed by a varint, and validates it contains an actual enum variant.
 @(require_results)
 buf_read_var_int_enum :: proc(buf: ^NetworkBuffer, $E: typeid) -> (e: E, err: ReadError)
 where
@@ -392,6 +404,7 @@ where
     }
 }
 
+// See `buf_read_var_int_enum`.
 @(require_results)
 buf_unchecked_read_var_int_enum :: proc(buf: ^NetworkBuffer, $E: typeid) -> (e: E, err: ReadError)
 where
@@ -569,6 +582,13 @@ buf_write_u64 :: proc(buf: ^NetworkBuffer, u: u64) {
     buf_write_bytes(buf, bytes)
 }
 
+@(require_results)
+buf_read_u64 :: proc(buf: ^NetworkBuffer) -> (u: u64, err: ReadError) {
+    outb: [8]u8
+    buf_read_bytes(buf, outb[:]) or_return
+    return u64(transmute(u64) outb), .None
+}
+
 buf_write_u32 :: proc(buf: ^NetworkBuffer, u: u32) {
     u := u32be(u)
     bytes := ([^]u8)(&u)[:4]
@@ -654,6 +674,27 @@ buf_read_bool :: proc(buf: ^NetworkBuffer) -> (bool, ReadError) #no_bounds_check
         return false, .InvalidData
     }
     return bool(b), .None
+}
+
+// Reads an enum value backed by a byte, and validates it contains an actual enum variant.
+@(require_results)
+buf_read_byte_enum :: proc(buf: ^NetworkBuffer, $E: typeid) -> (e: E, err: ReadError)
+where
+    intrinsics.type_is_enum(E),
+    size_of(E) == 1
+{
+    e = cast(E) buf_read_byte(buf) or_return
+    when intrinsics.type_enum_is_contiguous(E) {
+        if e < min(E) || e > max(E) {
+            return e, .InvalidData
+        }
+        return e, .None
+    } else {
+        for constant in E do if constant == b {
+            return e, .None
+        }
+        return e, .InvalidData
+    }
 }
 
 @(require_results)
