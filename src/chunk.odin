@@ -18,14 +18,22 @@ HeightMapType :: enum VarInt {
 
 ChunkSection :: struct {
     block_count: i16,
-    block_states: PalettedContainer,
-    biomes: PalettedContainer,
+    block_states: PalettedContainer(BlockId) `fmt:"-"`,
+    biomes: PalettedContainer(BiomeId) `fmt:"-"`,
 }
 
-PalettedContainer :: struct {
+PalettedContainer :: struct($Id: typeid) where Id == BlockId || Id == BiomeId {
     // Possible values: 0 (single valued, data array empty), 4-8 (indirect), 15 (direct).
+    // TODO: those values should be dynamically calculated based on the size of the global block state
+    // and biome palettes (injected through data packs).
     bits_per_entry: u8,
-    palette: VarInt,
+    // Nil when bits_per_entry is 15 (direct).
+    palette: union #no_nil {
+        Id,
+        // Palette entries, the paletted container data are indices into this array.
+        []i32,
+    },
+    // Nil when bits_per_entry is 0.
     data: []Long,
 }
 
@@ -47,34 +55,64 @@ LightData :: struct {
     block_light: [][2048]u8,
 }
 
-BlockId :: enum {
-    Air  = 0,
-    Dirt = 9,
+BlockId :: enum i16 {
+    Air   = 0,
+    Stone = 1,
+    Grass = 9,
+    Dirt  = 10,
+    GoldBlock = 2137,
 }
 
 BiomeId :: enum {
-   Plains, 
+   Plains = 0, 
 }
 
-create_mock_chunk_section :: proc() -> (section: ChunkSection) {
-    section.block_count = BLOCKS_PER_CHUNK_SECTION
+create_chunk_section :: proc(block: BlockId) -> (section: ChunkSection) {
+    section.block_count = block == .Air ? 0 : BLOCKS_PER_CHUNK_SECTION
     section.block_states.bits_per_entry = 0
-    section.block_states.palette = VarInt(BlockId.Dirt)
+    section.block_states.palette = block
     
     section.biomes.bits_per_entry = 0
-    section.biomes.palette = VarInt(BiomeId.Plains)
+    section.biomes.palette = .Plains
     return
 }
 
-serialize_paletted_container :: proc(outb: ^NetworkBuffer, container: PalettedContainer) {
+serialize_paletted_container :: proc(outb: ^NetworkBuffer, container: PalettedContainer($Id)) {
     buf_write_byte(outb, container.bits_per_entry)
-    switch container.bits_per_entry {
-    case 0:
-        buf_write_var_int(outb, container.palette)
-    case 4..=8:
-    case 15:
-    case:
-        unimplemented("handle paletted container bits per entry")
+    
+    when Id == BlockId {
+        switch container.bits_per_entry {
+        case 0:
+            assert(container.data == nil, "palette should be nil for single valued format")
+            palette := container.palette.(BlockId)
+            buf_write_var_int(outb, VarInt(palette))
+        case 4..=8:
+            assert(container.data != nil, "missing data for indirect palette")
+            palette := container.palette.([]i32)
+            buf_write_var_int(outb, VarInt(len(palette)))
+            for elem in palette {
+                buf_write_var_int(outb, VarInt(elem))
+            }
+            for elem in container.data {
+                buf_write_long(outb, elem)
+            }
+        case 15:
+            assert(
+                len(container.data) == (BLOCKS_PER_CHUNK_SECTION * int(container.bits_per_entry) + 63) / _BITS_PER_LONG,
+                "more section long entries than expected",
+            )
+            for elem in container.data {
+                buf_write_long(outb, elem)
+            }
+        case:
+            panic("unsupported palette bits per entry")
+        }
+    } else when Id == BiomeId {
+        assert(container.bits_per_entry == 0, "TODO: handle biome specific bits per entry")
+        palette := container.palette.(BiomeId)
+        buf_write_var_int(outb, VarInt(palette))
+    } else {
+        #panic("unsupported paletted container id")
     }
 }
 

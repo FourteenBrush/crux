@@ -18,7 +18,7 @@ import "lib:tracy"
 
 _ :: mem
 
-@(private) LOG_LEVEL :: log.Level.Debug when ODIN_DEBUG else .Info
+@(private) LOG_LEVEL :: log.Level.Debug when ODIN_DEBUG else log.Level.Info
 
 // log levels for logging packet transfer, these values are bigger than .Debug (1)
 @(private) LOG_LEVEL_INBOUND :: log.Level(7)

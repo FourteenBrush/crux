@@ -16,6 +16,7 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
     }
 
     // early return on short read, no bytes consumed
+    // TODO: make _all_ read calls below bypass bounds checking
     length, length_nbytes := buf_peek_var_int(b) or_return
     buf_ensure_readable(b^, length) or_return
 
@@ -24,7 +25,7 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
     id := buf_read_var_int(b) or_return
     
     defer if err == .InvalidData {
-        log.warn("invalid data for packet id", ServerBoundPacketId(id))
+        log.debug("invalid data for packet id", ServerBoundPacketId(id))
     }
 
     switch ServerBoundPacketId(id) {
@@ -62,7 +63,7 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
             teleport_id := buf_read_var_int(b) or_return
             return ConfirmTeleportationPacket { teleport_id=teleport_id }, .None
         case .Transfer:
-            return {}, .InvalidData
+            return p, .InvalidData
         case: unreachable()
         }
 
@@ -73,7 +74,7 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
         #partial switch client_state {
         case .Login: return LoginAcknowledgedPacket {}, .None
         case .Configuration: return AcknowledgeFinishConfigurationPacket {}, .None
-        case: return {}, .InvalidData
+        case: return p, .InvalidData
         }
         return LoginAcknowledgedPacket {}, .None
     case .PluginMessage:
@@ -95,13 +96,13 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
     case .SetPlayerRotation:
         yaw := buf_read_f32(b) or_return
         pitch := buf_read_f32(b) or_return
-        flags := buf_read_byte(b) or_return
+        flags := buf_read_flags(b, PlayerMovementFlags) or_return
         return SetPlayerRotationPacket { yaw=yaw, pitch=pitch, flags=flags }, .None
     case .SetPlayerPosition:
         x := buf_read_f64(b) or_return
         feet_y := buf_read_f64(b) or_return
         z := buf_read_f64(b) or_return
-        flags := buf_read_byte(b) or_return
+        flags := buf_read_flags(b, PlayerMovementFlags) or_return
         return SetPlayerPositionPacket { x=x, y=feet_y, z=z, flags=flags }, .None
     case .SetPlayerPositionRotation:
         x := buf_read_f64(b) or_return
@@ -109,10 +110,10 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
         z := buf_read_f64(b) or_return
         yaw := buf_read_f32(b) or_return
         pitch := buf_read_f32(b) or_return
-        flags := buf_read_byte(b) or_return
+        flags := buf_read_flags(b, PlayerMovementFlags) or_return
         return SetPlayerPositionRotationPacket { x=x, y=feet_y, z=z, yaw=yaw, pitch=pitch, flags=flags }, .None
     case .SetPlayerMovement:
-        flags := buf_read_byte(b) or_return
+        flags := buf_read_flags(b, PlayerMovementFlags) or_return
         return SetPlayerMovementPacket { flags=flags }, .None
     case .PlayerLoaded:
         return PlayerLoadedPacket {}, .None
@@ -123,13 +124,11 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
         hand := buf_read_var_int_enum(b, Hand) or_return
         return SwingArmPacket { hand=hand }, .None
     case .PlayerInput:
-        // TODO: buf_read_byte_enum/flags
-        flags := buf_read_byte(b) or_return
-        return PlayerInputPacket { flags=transmute(PlayerInputs)flags }, .None
+        flags := buf_read_flags(b, PlayerInputFlags) or_return
+        return PlayerInputPacket { flags=flags }, .None
     case .FlightChange:
-        // TODO: buf_read_byte_enum/flags
-        flags := buf_read_byte(b) or_return
-        return PlayerFlightChangePacket { flags=transmute(PlayerFlightChangeFlags)flags }, .None
+        flags := buf_read_flags(b, PlayerFlightChangeFlags) or_return
+        return PlayerFlightChangePacket { flags=flags }, .None
     case .StoreCookiePlay:
         key := buf_read_identifier(b, allocator) or_return
         payload_len := buf_read_var_int(b) or_return
@@ -150,8 +149,17 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
             return p, .InvalidData
         }
         return PlayerCommandPacket { entity_id=entity_id, action=action, jump_boost=jump_boost }, .None
+    case .PlayerAction:
+        status := buf_read_var_int_enum(b, PlayerActionStatus) or_return
+        location := buf_read_position(b) or_return
+        face := buf_read_byte_enum(b, BlockFace) or_return
+        sequence := buf_read_var_int(b) or_return
+        return PlayerActionPacket { status=status, location=location, face=face, sequence=sequence }, .None
+    case .ChatCommand:
+        command := buf_read_string(b, 32767, allocator) or_return
+        return ChatCommandPacket { command=command }, .None
     case:
-        log.warnf("unhandled packet id: 0x%x, kicking with .InvalidData", id)
+        log.warnf("unhandled packet id: 0x%x", id)
         return p, .InvalidData
     }
 }

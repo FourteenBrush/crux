@@ -89,7 +89,7 @@ ClientConnection :: struct {
     // Non blocking socket
     socket: net.TCP_Socket,
     state: ClientState,
-    // Whether a packet has been sent with an `is_terminal` flag set to true or an explicit termination
+    // Whether a packet with an `is_terminal = true` flag has been sent or an explicit termination
     // request was issued, this indicates that this connection will be closed shortly
     // and any consecutive `enqueue_packet` calls will silently ignore that packet.
     terminating: bool,

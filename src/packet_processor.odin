@@ -15,21 +15,23 @@ pos_to_chunk :: proc "contextless" (pos: Pos) -> ChunkPos {
     }
 }
 
-@(private="file")
-_player_crosses_chunk_borders :: proc(session: ^SessionData, new_pos: Pos) -> bool {
-    chunk_pos := pos_to_chunk(session.pos)
-    new_chunk_pos := pos_to_chunk(new_pos)
-    return chunk_pos != new_chunk_pos
-}
-
 @(private)
 _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, socket: net.TCP_Socket) {
-    // get rid of some of the packet spam
-    if _, is_client_tick := packet.(ClientTickEndPacket); !is_client_tick {
+    #partial switch packet in packet {
+    case ClientTickEndPacket:
+    case KeepAlivePlayPacket:
+    case SetPlayerRotationPacket:
+    case SetPlayerPositionPacket:
+    case SetPlayerPositionRotationPacket:
+    case SetPlayerMovementPacket:
+    case PlayerInputPacket:
+    case PlayerCommandPacket:
+        // do not log, spams console
+    case:
         log.log(LOG_LEVEL_INBOUND, "Received Packet", packet)
     }
     
-    session: ^SessionData
+    session: ^SessionData = nil
     client_state := get_serverbound_packet_descriptor(packet).expected_client_state
     if client_state > .Handshake {
         // TODO: this logic is not correct in case of stale serverbound packets after we issued some sort of disconnect
@@ -46,9 +48,8 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
     
     switch packet in packet {
     case LegacyServerListPingPacket:
-        // session.terminating = true
-        // _finalize_client(state, session^)
-        // TODO: send TerminateClient message
+        session.terminating = true
+        _terminate_session(server, session^)
         return
     case HandshakePacket:
         assert(packet.intent != .Transfer, "TODO: we do not initiate transfers")
@@ -146,7 +147,7 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
             is_hardcore = false,
             dimension_names = slice.clone([]Identifier{Identifier("minecraft:overworld")}, session.packet_scratch_alloc),
             max_players = 100,
-            view_distance = 8,
+            view_distance = VIEW_DISTANCE,
             simulation_distance = 6,
             reduced_debug_info = false,
             enable_respawn_screen = true,
@@ -167,18 +168,41 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
         // if we do not send a position sync, the client keeps sending set player position packets
         // with an incrementally decreasing height field.
         // Will be confirmed with a ConfirmTeleportationPacket
-        player_teleport(session, 1, 65, 1)
+        player_teleport(session, {1, 65, 1})
     case ClientTickEndPacket:
         // empty
     case SetPlayerPositionPacket:
         // ignore position changes while awaiting a teleport confirmation (vanilla behavior)
         if session.pending_teleport != nil do return
         
-        if _player_crosses_chunk_borders(session, packet.pos) {
-            log.warn("crossing chunk boundaries")
+        if player_crosses_chunk_borders(session, packet.pos) {
+            current_chunk_pos := pos_to_chunk(session.pos)
+            new_chunk_pos := pos_to_chunk(packet.pos)
             enqueue_packet(session, SetCenterChunkPacket {
-                chunk_pos = pos_to_chunk(packet.pos),
+                chunk_pos = new_chunk_pos,
             })
+
+            if new_chunk_pos.y != current_chunk_pos.y {
+                // check if position ahead of the entered chunk has to be sent
+                if abs(new_chunk_pos.y) + 1 >= CENTER_OFFSET {
+                    log.warn("sending chunk ahead of z axis")
+                    _player_send_chunk(session, {new_chunk_pos.x, new_chunk_pos.y + 1}, .Stone)
+                    
+                    _player_send_chunk(session, {new_chunk_pos.x - 1, new_chunk_pos.y + 1}, .Air)
+                    _player_send_chunk(session, {new_chunk_pos.x - 1, new_chunk_pos.y + 2}, .Air)
+                    _player_send_chunk(session, {new_chunk_pos.x,     new_chunk_pos.y + 2}, .Air)
+                    _player_send_chunk(session, {new_chunk_pos.x + 1, new_chunk_pos.y + 2}, .Air)
+                    _player_send_chunk(session, {new_chunk_pos.x + 1, new_chunk_pos.y + 1}, .Air)
+                }
+            }
+
+            // if chunk outside of loading area, send as air chunk
+            // loading_offset := i32(2 * VIEW_DISTANCE + 7) / 2
+            // loading_offset := i32(4)
+            // if abs(new_chunk_pos.x) > loading_offset || abs(new_chunk_pos.y) > loading_offset {
+            //     log.warn("sending chunk")
+            //     _player_send_chunk(session, new_chunk_pos, .Stone)
+            // }
         }
         session.pos = packet.pos
     case SetPlayerRotationPacket:
@@ -234,17 +258,8 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
             })
             enqueue_packet(session, StartWaitingForChunks {})
             enqueue_packet(session, SetCenterChunkPacket { chunk_pos={0, 0} })
-            
-            // send all chunks for the clients chunk loading area (2 * server view distance + 7 square)
-            center_offset := 2 * 8 + 3
-            for x in -center_offset..=center_offset {
-                for z in -center_offset..=center_offset {
-                    enqueue_packet(session, ChunkDataPacket {
-                        chunk_x = i32(x),
-                        chunk_z = i32(z),
-                    })
-                }
-            }
+
+            _player_send_initial_chunks(session, view_distance=VIEW_DISTANCE)
         }
     case PlayerLoadedPacket:
         // empty
@@ -273,7 +288,76 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
         // empty
     case PlayerCommandPacket:
         // empty
+    case PlayerActionPacket:
+        // empty
+    case ChatCommandPacket:
+        if packet.command == "reset" {
+            // reset level chunks to initial layout
+            _player_send_initial_chunks(session, VIEW_DISTANCE)
+        }
     }
+}
+
+CENTER_OFFSET :: 4
+
+// Send all chunks for the clients chunk loading area (2 * server view distance + 7 square).
+// Seems like the vanilla client displays the outside chunks of the loading area as transparant.
+@(private="file")
+_player_send_initial_chunks :: proc(session: ^SessionData, view_distance: int) {
+    // center_offset := 2 * view_distance + 3
+    center_offset := CENTER_OFFSET
+
+    sections := make([]ChunkSection, OVERWORLD_HEIGHT / CHUNK_SECTION_HEIGHT, session.packet_scratch_alloc)
+    for &section, i in sections {
+        block_id := i < 8 ? BlockId.Dirt : .Air
+        section = create_chunk_section(block_id)
+    }
+    
+    gold_sections := make([]ChunkSection, OVERWORLD_HEIGHT / CHUNK_SECTION_HEIGHT, session.packet_scratch_alloc)
+    for &section, i in gold_sections {
+        block_id := i < 8 ? BlockId.GoldBlock : .Air
+        section = create_chunk_section(block_id)
+    }
+
+    // zero initialized represents air
+    air_sections := make([]ChunkSection, OVERWORLD_HEIGHT / CHUNK_SECTION_HEIGHT, session.packet_scratch_alloc)
+    
+    count := 0
+    for x in -center_offset..=center_offset {
+        for z in -center_offset..=center_offset {
+            chunk_pos := ChunkPos { i32(x), i32(z) }
+            sections := sections
+            if abs(x) > 2 || abs(z) > 2 {
+                sections = air_sections
+            } else if x == 0 && z == 0 {
+                sections = gold_sections
+            }
+            enqueue_packet(session, ChunkDataPacket {
+                chunk_pos = chunk_pos,
+                height_maps = nil,
+                sections = sections,
+                light = {},
+            })
+
+            count += 1
+        }
+    }
+    log.warnf("Sent %d initial chunks", count)
+}
+
+@(private="file")
+_player_send_chunk :: proc(session: ^SessionData, pos: ChunkPos, block: BlockId) {
+    sections := make([]ChunkSection, OVERWORLD_HEIGHT / CHUNK_SECTION_HEIGHT, session.packet_scratch_alloc)
+    for &section, i in sections {
+        section = create_chunk_section(i < 8 ? block : .Air)
+    }
+    
+    enqueue_packet(session, ChunkDataPacket {
+        chunk_pos = pos,
+        height_maps = nil,
+        sections = sections,
+        light = {},
+    })
 }
 
 @(private="file")

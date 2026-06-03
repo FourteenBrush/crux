@@ -7,9 +7,6 @@ import "core:encoding/uuid"
 @(private="file")
 LOG2 :: intrinsics.constant_log2
 
-// FIXME: cant we avoid having a tagged union inside another one?
-Packet :: union { ClientBoundPacket, ServerBoundPacket }
-
 ServerBoundPacketId :: enum VarInt {
     // sent in .Handshake state
     Handshake           = 0x00,
@@ -50,6 +47,8 @@ ServerBoundPacketId :: enum VarInt {
     SetHeldItem               = 0x34,
     CloseContainer            = 0x12,
     PlayerCommand             = 0x29,
+    PlayerAction              = 0x28,
+    ChatCommand               = 0x06,
 }
 
 ServerBoundPacket :: union #no_nil {
@@ -83,6 +82,8 @@ ServerBoundPacket :: union #no_nil {
     SetHeldItemPacket,
     CloseContainerPacket,
     PlayerCommandPacket,
+    PlayerActionPacket,
+    ChatCommandPacket,
 }
 
 ClientBoundPacketId :: enum VarInt {
@@ -215,6 +216,8 @@ serverbound_packet_descriptors := [intrinsics.type_union_variant_count(ServerBou
     VARIANT_IDX_OF(ServerBoundPacket, SetHeldItemPacket)                    = { .Play },
     VARIANT_IDX_OF(ServerBoundPacket, CloseContainerPacket)                 = { .Play },
     VARIANT_IDX_OF(ServerBoundPacket, PlayerCommandPacket)                  = { .Play },
+    VARIANT_IDX_OF(ServerBoundPacket, PlayerActionPacket)                   = { .Play },
+    VARIANT_IDX_OF(ServerBoundPacket, ChatCommandPacket)                    = { .Play },
 }
 
 @(private)
@@ -353,15 +356,13 @@ ClientTickEndPacket :: struct {}
 SetPlayerPositionPacket :: struct {
     // Y component stores the feet level.
     using pos: Pos,
-    // TODO: change to bitfield and fix decoding invalid values
-    flags: u8,
+    flags: PlayerMovementFlags,
 }
 
 SetPlayerRotationPacket :: struct {
     yaw: f32,
     pitch: f32,
-    // TODO: change to bitfield and fix decoding invalid values
-    flags: u8,
+    flags: PlayerMovementFlags,
 }
 
 SetPlayerPositionRotationPacket :: struct {
@@ -369,13 +370,16 @@ SetPlayerPositionRotationPacket :: struct {
     using pos: Pos,
     yaw: f32,
     pitch: f32,
-    // TODO: change to bitfield and fix decoding invalid values
-    flags: u8,
+    flags: PlayerMovementFlags,
 }
 
 SetPlayerMovementPacket :: struct {
-    // TODO: change to bitfield
-    flags: u8,
+    flags: PlayerMovementFlags,
+}
+PlayerMovementFlags :: bit_set[PlayerMovementFlag; u8]
+PlayerMovementFlag :: enum u8 {
+    OnGround           = LOG2(0x1),
+    PushingAgainstWall = LOG2(0x2),
 }
 
 ConfirmTeleportationPacket :: struct {
@@ -390,10 +394,10 @@ SwingArmPacket :: struct {
 Hand :: enum { MainHand = 0, OffHand = 1 }
 
 PlayerInputPacket :: struct {
-    flags: PlayerInputs,
+    flags: PlayerInputFlags,
 }
-PlayerInputs :: bit_set[PlayerInput; u8]
-PlayerInput :: enum {
+PlayerInputFlags :: bit_set[PlayerInputFlag; u8]
+PlayerInputFlag :: enum {
     Forward  = LOG2(0x01),
     Backward = LOG2(0x02),
     Left     = LOG2(0x04),
@@ -481,6 +485,15 @@ RegistryDataPacket :: union #no_nil {
     BiomeRegistry,
 }
 
+Registry :: struct($E: typeid) {
+    entries: []RegistryEntry(E) `fmt:"-"`,
+}
+
+RegistryEntry :: struct($E: typeid) {
+    id: Identifier,
+    data: Maybe(E),
+}
+
 PaintingVariantRegistry :: Registry(PaintingVariant)
 PaintingVariant :: struct {
     asset_id: Identifier,
@@ -488,15 +501,6 @@ PaintingVariant :: struct {
     height: u8,
     title: TextComponent,
     author: TextComponent,
-}
-
-Registry :: struct($E: typeid) {
-    entries: []RegistryEntry(E),
-}
-
-RegistryEntry :: struct($E: typeid) {
-    id: Identifier,
-    data: Maybe(E),
 }
 
 DimensionTypeRegistry :: Registry(DimensionType)
@@ -723,9 +727,7 @@ DisconnectPlayPacket :: struct {
 
 SynchronizePlayerPositionPacket :: struct {
     teleport_id: VarInt,
-    x: f64,
-    y: f64,
-    z: f64,
+    pos: Pos,
     velocity_x: f64,
     velocity_y: f64,
     velocity_z: f64,
@@ -867,10 +869,9 @@ SetCenterChunkPacket :: struct {
 }
 
 ChunkDataPacket :: struct {
-    chunk_x: i32,
-    chunk_z: i32,
+    chunk_pos: ChunkPos,
     height_maps: []HeightMap,
-    sections: []ChunkSection,
+    sections: []ChunkSection `fmt:"-"`,
     // TODO: block entities
     light: LightData,
 }
@@ -892,6 +893,39 @@ PlayerCommandAction :: enum VarInt {
     StartElytraFlight    = 6,
 }
 
+PlayerActionPacket :: struct {
+    status: PlayerActionStatus,
+    location: Position,
+    face: BlockFace,
+    sequence: VarInt,
+}
+
+PlayerActionStatus :: enum VarInt {
+    StartDigging         = 0,
+    CancelledDigging     = 1,
+    FinishedDigging      = 2,
+    DropItemStack        = 3,
+    DropItem             = 4,
+    HeldItemFinishUpdate = 5,
+    SwapItemInHand       = 6,
+}
+
+BlockFace :: enum u8 {
+    Bottom = 0,
+    Top    = 1,
+    North  = 2,
+    South  = 3,
+    West   = 4,
+    East   = 5,
+}
+
+ChatCommandPacket :: struct {
+    // The command typed, excluding the leading slash.
+    command: string /*(32767)*/,
+}
+
+
+ChunkPos :: [2]i32
 
 GameProfile :: struct {
     // contains multiple properties in theory, but we (and the vanilla client) only ever sends one
@@ -907,10 +941,10 @@ Property :: struct {
     signature: Maybe(string) /*(1024)*/,
 }
 
-Position :: bit_field i64be {
-    x: i32be | 26,
-    z: i32be | 26,
-    y: i16be | 12,
+Position :: bit_field i64 {
+    x: i32 | 26,
+    z: i32 | 26,
+    y: i16 | 12,
 }
 
 // Namespaced location thing, in the form of `minecraft:thing`, when no namespace is provided, it defaults to `minecraft`.

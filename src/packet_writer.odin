@@ -120,9 +120,9 @@ _serialize_clientbound :: proc(outb: ^NetworkBuffer, packet: ClientBoundPacket, 
         serialize_text_component(outb, packet.reason) or_return
     case SynchronizePlayerPositionPacket:
         buf_write_var_int(outb, packet.teleport_id)
-        buf_write_f64(outb, packet.x)
-        buf_write_f64(outb, packet.y)
-        buf_write_f64(outb, packet.z)
+        buf_write_f64(outb, packet.pos.x)
+        buf_write_f64(outb, packet.pos.y)
+        buf_write_f64(outb, packet.pos.z)
         buf_write_f64(outb, packet.velocity_x)
         buf_write_f64(outb, packet.velocity_y)
         buf_write_f64(outb, packet.velocity_z)
@@ -261,27 +261,30 @@ _serialize_clientbound :: proc(outb: ^NetworkBuffer, packet: ClientBoundPacket, 
         buf_write_var_int(outb, VarInt(chunk_x))
         buf_write_var_int(outb, VarInt(chunk_z))
     case ChunkDataPacket:
-        buf_write_i32(outb, packet.chunk_x)
-        buf_write_i32(outb, packet.chunk_z)
-        // heightmaps array:
-        buf_write_var_int(outb, VarInt(0))
+        assert(len(packet.sections) == OVERWORLD_HEIGHT / CHUNK_SECTION_HEIGHT, "chunk section count exceeds world height")
         
-        // sections array:
-        nsections := OVERWORLD_HEIGHT / CHUNK_SECTION_HEIGHT
-        nblocks := BLOCKS_PER_CHUNK_SECTION
-        buf_write_var_int(outb, VarInt(6 * nsections))
-        for i in 0..<nsections {
-            block := (i < 8 || i > 22) ? BlockId.Dirt : .Air
-            buf_write_i16(outb, i16(nblocks))
-            buf_write_bytes(outb, {
-                /*bpe*/0, u8(block),
-                /*bpe*/0, u8(BiomeId.Plains),
-            })
+        chunk_x, chunk_z := expand_values(packet.chunk_pos)
+        buf_write_i32(outb, chunk_x)
+        buf_write_i32(outb, chunk_z)
+        // TODO: heightmaps
+        buf_write_var_int(outb, VarInt(0))
+
+        // sections
+        initial_len := buf_length(outb^)
+        wmark := buf_emit_write_mark(outb^)
+        for section in packet.sections {
+            buf_write_i16(outb, section.block_count)
+            serialize_paletted_container(outb, section.block_states)
+            serialize_paletted_container(outb, section.biomes)
         }
+        sections_data_length := buf_length(outb^) - initial_len
+        werr := buf_write_var_int_at(outb, wmark, VarInt(sections_data_length))
+        assert(werr == .None, "invariant, no reads happened in between")
         
         // block entities:
         buf_write_var_int(outb, VarInt(0))
         // light data:
+        nsections := OVERWORLD_HEIGHT / CHUNK_SECTION_HEIGHT
         nbits := uint(nsections) + 2
         // sky light mask (BitSet <=> (n:VarInt, [n]Long))
         buf_write_var_int(outb, VarInt(1))
