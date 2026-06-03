@@ -23,6 +23,8 @@ GAME_VERSION_STR :: "1.21.10"
 // TODO: consider proper packet handling rate while also using a normal minecraft tick model
 TARGET_TPS :: 20 * 10
 
+VIEW_DISTANCE :: 8
+
 @(private="file")
 server: Server
 
@@ -125,7 +127,6 @@ _main_thread_run_tick :: proc(io_ctx: ^reactor.IOContext) {
         _handle_bridge_message(&server, message)
     }
     if server.messages_emitted {
-        log.debug("waking up reactor due to spsc queue not empty")
         reactor.wakeup(io_ctx)
         server.messages_emitted = false
     }
@@ -134,7 +135,7 @@ _main_thread_run_tick :: proc(io_ctx: ^reactor.IOContext) {
     free_all(context.temp_allocator)
 
     // TODO: we may not necessarily want to use a tick resolution of 50ms (minecraft tick), but instead
-    // use a higher resolution and just emulate minecraft ticks to be some part of that actual tick.
+    // use a higher resolution and just emulate minecraft ticks to be multiple of those ticks.
     // This would prevent baseline packet response times to be 50ms already.
     tick_duration := time.tick_since(start)
     target_tick_time :: 1000 / TARGET_TPS * time.Millisecond
@@ -150,7 +151,18 @@ _handle_bridge_message :: proc(server: ^Server, message: InboundMessage) {
     case TerminateClientRequest:
         session := (&server.sessions[message.client]) or_break
         // TODO: do we just remove the session or set a terminating flag and do this later on?
+
+        // TODO: actually remove connection from map, we still sent data allocated by this thread to the io thread
+        // but this can be fixed by using a global epoch based allocator, whereas the session now doesnt
+        // store any interesting state that must be retained
         session.terminating = true
+        scratch_alloc := cast(^mem.Scratch) session.packet_scratch_alloc.data
+        if len(scratch_alloc.leaked_allocations) > 0 {
+            log.warn("Leaked the following allocations into heap allocator:")
+            for entry in scratch_alloc.leaked_allocations {
+                log.warnf("- %M", len(entry))
+            }
+        }
     case PacketTransfer(ServerBoundPacket):
         _handle_serverbound_packet(server, message.packet, message.socket)
     }
@@ -190,6 +202,8 @@ _create_session :: proc(
     state: ClientState,
     protocol_version: ProtocolVersion,
 ) -> SessionData {
+    // scratch_alloc := new(mem.Mutex_Allocator, os.heap_allocator())
+    // mem.mutex_allocator_init(scratch_alloc, os.heap_allocator())
     scratch_alloc := new(mem.Scratch, os.heap_allocator())
     mem.scratch_init(scratch_alloc, 256 * 1024, os.heap_allocator())
     
@@ -197,10 +211,12 @@ _create_session :: proc(
         socket=socket,
         state=state,
         protocol_version=protocol_version,
+        // packet_scratch_alloc=mem.mutex_allocator(scratch_alloc),
         packet_scratch_alloc=mem.scratch_allocator(scratch_alloc),
     }
 }
 
+// TODO: never called
 @(private)
 _terminate_session :: proc(server: ^Server, session: SessionData) {
     assert(session.terminating)
@@ -216,8 +232,6 @@ _terminate_session :: proc(server: ^Server, session: SessionData) {
 // Kicks a client with a message, enters a termination state.
 @(private)
 _kick_client :: proc(server: ^Server, session: ^SessionData, reason: TextComponent) {
-    // TODO: textcomponents must also be cloned if they refer to stack allocated data
-
     #partial switch session.state {
     case .Login:
         enqueue_packet(session, DisconnectLoginPacket { reason = reason })
