@@ -302,6 +302,7 @@ _enqueue_packet :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnecti
 
     submission_ok := reactor.submit_write_copy(io_ctx, client_conn.socket, outb)
     if !submission_ok {
+        delete(outb, client_conn.packet_scratch_alloc)
         log.debug("io submission not ok")
         return false
     }
