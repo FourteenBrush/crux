@@ -165,12 +165,14 @@ _network_worker_run_tick :: proc(state: ^NetworkWorkerState) {
         case PacketTransfer(ClientBoundPacket):
             client_conn := &state.connections[message.socket]
             if client_conn.terminating do break s
-            _enqueue_packet(state.io_ctx, client_conn, message.packet)
+            enqueue_ok := _enqueue_packet(state.io_ctx, client_conn, message.packet)
+            if !enqueue_ok {
+                client_conn.terminating = true
+            }
         }
     }
     
     completions: [512]reactor.Completion
-    // NOTE: do not indefinitely block or this thread can't be joined
     // TODO: thread sometimes stalls with reactor.TIMEOUT_INFINITE
     nready, await_ok := reactor.await_io_completions(state.io_ctx, completions[:], timeout_ms=reactor.TIMEOUT_INFINITE)
     assert(await_ok, "failed to await io events") // TODO: proper error handling
@@ -276,43 +278,52 @@ _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^Cli
     }
 }
 
-// TODO: propagate errors and close connection
-@(private="file")
-_enqueue_packet :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnection, packet: ClientBoundPacket) {
+// Returns false on failure
+@(private="file", require_results)
+_enqueue_packet :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnection, packet: ClientBoundPacket) -> bool {
     tracy.Zone()
     
-    if client_conn.terminating do return
+    // if already terminating, ignore
+    if client_conn.terminating do return true
 
     descriptor := get_clientbound_packet_descriptor(packet)
     log.log(LOG_LEVEL_OUTBOUND, "Sending packet", packet)
     _serialize_clientbound(&client_conn.tx_buf, packet, descriptor)
     
-    // freed by network worker after receiving write completion
-    outb := make([]u8, buf_length(client_conn.tx_buf), client_conn.packet_scratch_alloc) \
-        or_else panic("OOM: write submission")
+    // freed after receiving write completion
+    outb, alloc_err := mem.alloc_bytes_non_zeroed(buf_length(client_conn.tx_buf), align_of(u8), client_conn.packet_scratch_alloc)
+    if alloc_err != nil {
+        log.debug("failed to allocate write submission buffer:", alloc_err)
+        return false
+    }
 
     read_err := buf_copy_into(&client_conn.tx_buf, outb)
     assert(read_err == .None, "invariant, copied full length")
 
     submission_ok := reactor.submit_write_copy(io_ctx, client_conn.socket, outb)
-    assert(submission_ok, "TODO: submission errors")
+    if !submission_ok {
+        log.debug("io submission not ok")
+        return false
+    }
     buf_advance_pos_unchecked(&client_conn.tx_buf, len(outb))
     
     client_conn.outstanding_writes += 1
     client_conn.terminating |= descriptor.is_terminal
+    return true
 }
 
 // Kicks a client with a message, begins client termination.
 // TODO: remove this once we have all packets implemented
 @(private="file")
 _kick_client :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection, reason: TextComponent) {
+    // NOTE: ignore enqueing failures, we set the connection to terminating either way
     #partial switch client_conn.state {
     case .Login:
-        _enqueue_packet(state.io_ctx, client_conn, DisconnectLoginPacket { reason = reason })
+        _ = _enqueue_packet(state.io_ctx, client_conn, DisconnectLoginPacket { reason = reason })
     case .Configuration: 
-        _enqueue_packet(state.io_ctx, client_conn, DisconnectConfigurationPacket { reason = reason })
+        _ = _enqueue_packet(state.io_ctx, client_conn, DisconnectConfigurationPacket { reason = reason })
     case .Play:
-        _enqueue_packet(state.io_ctx, client_conn, DisconnectPlayPacket { reason = reason })
+        _ = _enqueue_packet(state.io_ctx, client_conn, DisconnectPlayPacket { reason = reason })
     case:
         panic(#procedure + " called in client state which does not permit disconnect packets")
     }
