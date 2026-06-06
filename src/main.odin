@@ -94,7 +94,7 @@ main :: proc() {
         log.error("failed to create server socket:", net_err)
         return
     }
-    defer if !exit_success do net.close(server_sock)
+    defer net.close(server_sock)
 
     net_err = net.set_blocking(server_sock, false)
     if net_err != nil {
