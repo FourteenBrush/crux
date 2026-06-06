@@ -120,6 +120,30 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 	return ctx, true
 }
 
+@(private)
+_close_accept_loop :: proc(ctx: ^IOContext) {
+    unimplemented()
+}
+
+@(private)
+_destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
+    // cancel AcceptEx call
+    _ = win32.CancelIoEx(win32.HANDLE(ctx.server_sock), nil)
+    
+    _reap_pending_completions(ctx)
+    win32.timeEndPeriod(ctx.timer_resolution)
+
+	win32.CloseHandle(ctx.completion_port)
+	ctx.completion_port = win32.INVALID_HANDLE_VALUE
+	// as all overlapped IO operations on the server socket are cancelled, there should
+	// be no issues in still having it bound to this iocp
+	
+	tlsf_allocator := _destroy_instrumented_alloc(instrumented=ctx.allocator, meta_allocator=allocator)
+	tlsf_alloc := cast(^tlsf.Allocator) tlsf_allocator.data
+	tlsf.destroy(tlsf_alloc)
+	free(tlsf_alloc, allocator)
+}
+
 // Installs an `AcceptEx` handler to the context, which will emit IOCP packets for inbound connections.
 @(private="file")
 _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
@@ -158,25 +182,6 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 	
 	ctx.outstanding_net_ops += 1
 	return true
-}
-
-@(private)
-_destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
-    // cancel AcceptEx call
-    _ = win32.CancelIoEx(win32.HANDLE(ctx.server_sock), nil)
-    
-    _reap_pending_completions(ctx)
-    win32.timeEndPeriod(ctx.timer_resolution)
-
-	win32.CloseHandle(ctx.completion_port)
-	ctx.completion_port = win32.INVALID_HANDLE_VALUE
-	// as all overlapped IO operations on the server socket are cancelled, there should
-	// be no issues in still having it bound to this iocp
-	
-	tlsf_allocator := _destroy_instrumented_alloc(instrumented=ctx.allocator, meta_allocator=allocator)
-	tlsf_alloc := cast(^tlsf.Allocator) tlsf_allocator.data
-	tlsf.destroy(tlsf_alloc)
-	free(tlsf_alloc, allocator)
 }
 
 @(private="file")
@@ -261,6 +266,7 @@ _initiate_recv :: proc(ctx: ^IOContext, conn: win32.SOCKET) -> bool {
 
     // alloc a new recv buffer per recv operation, we could in theory use two buffers per client
     // and rotate them, but a pool/slab allocator works good enough for this
+    // TODO: place in one allocation
     recv_buf: []u8
     {
         tracy.ZoneN("ALLOC_RECV")

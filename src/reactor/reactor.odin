@@ -76,11 +76,25 @@ IOContext :: _IOContext
 // - `server_sock`: the non-blocking server socket that is already listening.
 // Will use `context.logger` to log error messages at log level `ERROR_LOG_LEVEL`.
 //
-// Any connections accepted from the server socket will be implicitly registered, upon registration
-// `Operation.Read` completions may immediately be emitted whenever the client sends data. Write completions
-// only occur after calling `submit_write_*` procedures.
+// Any connections accepted from the server socket will be implicitly registered, after which a new `.NewConnection`
+// completion is returned. Upon registration `Operation.Read` completions may immediately be emitted
+// whenever the client sends data. Write completions only occur after calling `submit_write_*` procedures.
 create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (IOContext, bool) {
     return _create_io_context(server_sock, allocator)
+}
+
+// Prevents the io context from accepting any new incoming client connections. After this call, no new
+// `.NewConnection` completions will be emitted.
+// Exiting client registrations are uneffected and may continue emitting completions. In particular, `.Read`
+// completions may still be produced for registered clients unless `disable_read_interest` is called on them.
+//
+// This procedure is typically called during shutdown before draining outstanding completions, ensuring no new
+// work is being accepted while existing connections are being cleaned up.
+// 
+// Thread safe, does not require a preceding `wakeup()` call, this operation cannot be reverted.
+close_accept_loop :: proc(ctx: ^IOContext) {
+    wakeup(ctx)
+    _close_accept_loop(ctx)
 }
 
 // Destroys the given `IOContext`, the passed allocator must be the same as the one used in `create_io_context`.
@@ -108,6 +122,7 @@ unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 // Inputs:
 // - `timeout_ms`: the waiting timeout in ms, pass `TIMEOUT_INFINITE` to block until a completion is delivered,
 // or a `wakeup()` was issued.
+@(require_results)
 await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, timeout_ms: int) -> (n: int, ok: bool) {
     assert(timeout_ms != 0, "non blocking await_io_completions makes no sense here")
     return _await_io_completions(ctx, completions_out, timeout_ms)
@@ -123,6 +138,7 @@ release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
 // Submits a write operation, the passed buffer must be valid till a write completion (or error) has been received.
 // TODO: why dont we save the allocator the passed buffer was allocated with, so we can free it
 // ourselves instead of sending it back?
+@(require_results)
 submit_write_copy :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) -> bool {
     return _submit_write_copy(ctx, client, data)
 }

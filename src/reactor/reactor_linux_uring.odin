@@ -124,6 +124,11 @@ when USE_IO_URING {
     }
 
     @(private)
+    _close_accept_loop :: proc(ctx: ^IOContext) {
+        unimplemented()
+    }
+
+    @(private)
     _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
         linux.munmap(raw_data(ctx.sq.mmap_region), len(ctx.sq.mmap_region))
         if raw_data(ctx.cq.mmap_region) != raw_data(ctx.sq.mmap_region) {

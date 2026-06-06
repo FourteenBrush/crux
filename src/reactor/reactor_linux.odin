@@ -88,6 +88,12 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 }
 
 @(private)
+_close_accept_loop :: proc(ctx: ^IOContext) {
+    errno := linux.epoll_ctl(ctx.epoll_fd, .DEL, linux.Fd(ctx.server_sock), nil)
+    assert(errno == .NONE, "failed to unregister server sock")
+}
+
+@(private)
 _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
     assert(len(ctx.pending_writes) == 0, "clients must be unregistered")
     
