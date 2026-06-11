@@ -105,6 +105,11 @@ destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
     _destroy_io_context(ctx, allocator)
 }
 
+// Ensures no new read completions will be emitted for the given client.
+disable_read_interest :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
+    return _disable_read_interest(ctx, client)
+}
+
 // FIXME: probably want to get rid of the returned bool on unregister_client
 
 // Unregisters a client from the IO context, after this call, the client will no longer produce new completions.

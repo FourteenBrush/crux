@@ -25,6 +25,8 @@ TARGET_TPS :: 20 * 10
 
 VIEW_DISTANCE :: 8
 
+COLOR_RED :: TextColor(0xd92625)
+
 @(private="file")
 server: Server
 

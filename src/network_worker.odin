@@ -25,10 +25,11 @@ PACKET_SCRATCH_BUFFER_SIZE :: 256 * 1024
 
 NetworkWorkerSharedData :: struct {
     io_ctx: ^reactor.IOContext,
+    // A shutdown will keep lingering till this number reaches zero, to ensure a proper packet flush.
+    // Decremented on write completions.
+    outstanding_writes: int,
     // Non-blocking server socket.
     server_sock: net.TCP_Socket,
-    // An allocator to be used by this thread, must be owned by this thread or be thread safe.
-    threadsafe_alloc: mem.Allocator,
     // Ptr to atomic bool, indicating whether to continue running, modified upstream.
     execution_permit: ^bool,
     // Packet channel to main thread.
@@ -36,7 +37,7 @@ NetworkWorkerSharedData :: struct {
     inbound_queue: ^SPSC(BridgeMessage(ClientBoundPacket)),
 }
 
-// All members are explicitly owned by this thread, unless specified otherwise.
+//
 @(private="file")
 NetworkWorkerState :: struct {
     using shared: NetworkWorkerSharedData,
@@ -53,7 +54,7 @@ BridgeMessage :: union($P: typeid) #no_nil {
 TerminateClientRequest :: struct {
     client: net.TCP_Socket,
 }
-    
+
 @(private)
 PacketTransfer :: struct($P: typeid) {
     socket: net.TCP_Socket,
@@ -83,11 +84,12 @@ spsc_dequeue :: proc(q: ^SPSC($E)) -> (E, bool) {
     unreachable()
 }
 
-// IO client context.
+// client IO context.
 @(private="file")
 ClientConnection :: struct {
-    // Non blocking socket
+    // Non blocking socket.
     socket: net.TCP_Socket,
+    // Protocol state of this client, used for determining whether a packet is sent in the right state.
     state: ClientState,
     // Whether a packet with an `is_terminal = true` flag has been sent or an explicit termination
     // request was issued, this indicates that this connection will be closed shortly
@@ -108,12 +110,6 @@ ClientConnection :: struct {
     rx_buf: NetworkBuffer,
     // FIXME: may in fact be a linear buffer as it is always sent at once
     tx_buf: NetworkBuffer,
-}
-
-// Whether a ClientConnection may be finalized after receiving a completion.
-@(private="file")
-_should_finalize_disconnect :: proc(conn: ClientConnection) -> bool {
-    return conn.terminating && conn.outstanding_writes == 0
 }
 
 @(private)
@@ -152,9 +148,6 @@ _network_worker_thread_proc :: proc(shared: ^NetworkWorkerSharedData) {
 
 @(private="file")
 _network_worker_run_tick :: proc(state: ^NetworkWorkerState) {
-    REACTOR_TIMEOUT_MS :: 1
-    #assert(REACTOR_TIMEOUT_MS < WORKER_TARGET_MSPT)
-    
     // process clientbound packets coming from the main thread
     for message in spsc_dequeue(state.inbound_queue) {
         s: switch message in message {
@@ -165,17 +158,30 @@ _network_worker_run_tick :: proc(state: ^NetworkWorkerState) {
         case PacketTransfer(ClientBoundPacket):
             client_conn := &state.connections[message.socket]
             if client_conn.terminating do break s
-            enqueue_ok := _enqueue_packet(state.io_ctx, client_conn, message.packet)
+            enqueue_ok := _enqueue_packet(state, client_conn, message.packet)
             if !enqueue_ok {
                 client_conn.terminating = true
             }
         }
     }
     
+    // TODO: get rid of this WORKER_TARGET_MSPT, we are permanently blocking unless woken up
+    REACTOR_TIMEOUT_MS :: 1
+    #assert(REACTOR_TIMEOUT_MS < WORKER_TARGET_MSPT)
+    
+    _network_worker_await_completions(state, reactor.TIMEOUT_INFINITE)
+}
+
+// Awaits completions and processes them.
+// Inputs:
+// - `process_reads`: whether an attempt at parsing serverbound packets will be made, will be `false` when this
+// worker is shutting down and is therefore suppressing any operations that could lead to more work.
+@(private="file")
+_network_worker_await_completions :: proc(state: ^NetworkWorkerState, timeout_ms: int, process_reads := true) {
     completions: [512]reactor.Completion
     // TODO: thread sometimes stalls with reactor.TIMEOUT_INFINITE
-    nready, await_ok := reactor.await_io_completions(state.io_ctx, completions[:], timeout_ms=reactor.TIMEOUT_INFINITE)
-    assert(await_ok, "failed to await io events") // TODO: proper error handling
+    nready, await_ok := reactor.await_io_completions(state.io_ctx, completions[:], timeout_ms)
+    assert(await_ok, "failed to await io events") // FIXME: proper error handling
 
     for comp in completions[:nready] {
         tracy.ZoneN("ProcessCompletion")
@@ -195,36 +201,35 @@ _network_worker_run_tick :: proc(state: ^NetworkWorkerState) {
         case .Error:
             // FIXME: currently gets spammed for every submitted buffer
             log.debug("client socket error")
-            client_conn.terminating = true
             // if caused by a write operation, free our allocated submission which was returned back to us
             if comp.buf != nil {
                 delete(comp.buf, client_conn.packet_scratch_alloc)
             }
-            if _should_finalize_disconnect(client_conn^) {
-                _finalize_client(state, client_conn^)
-            }
+            client_conn.terminating = true
+            _try_finalize_client(state, client_conn)
         case .PeerHangup:
             log.debug("client socket hangup")
             // client_conn is nil when we disconnected from the peer first, thus only serving as a confirmation
             if client_conn != nil {
                 client_conn.terminating = true
-                if _should_finalize_disconnect(client_conn^) {
-                    _finalize_client(state, client_conn^)
-                }
+                _try_finalize_client(state, client_conn)
             }
         case .Read:
             defer reactor.release_recv_buf(state.io_ctx, comp)
             if client_conn == nil || client_conn.terminating {
                 continue
             }
-            buf_write_bytes(&client_conn.rx_buf, comp.buf) // copies
-            _drain_serverbound_packets(state, client_conn)
+            if process_reads {
+                buf_write_bytes(&client_conn.rx_buf, comp.buf) // copies
+                _drain_serverbound_packets(state, client_conn)
+            }
         case .Write:
+            assert(state.outstanding_writes > 0, "write refcount was not incremented")
+            state.outstanding_writes -= 1
             // must be freed using the same allocator the reactor write call was made with
             delete(comp.buf, client_conn.packet_scratch_alloc)
-            if _should_finalize_disconnect(client_conn^) {
+            if _try_finalize_client(state, client_conn) {
                 log.debug("disconnecting client as requested")
-                _finalize_client(state, client_conn^)
             }
         case .NewConnection:
             state.connections[comp.socket] = _create_client_connection(comp.socket)
@@ -235,11 +240,38 @@ _network_worker_run_tick :: proc(state: ^NetworkWorkerState) {
 
 @(private="file")
 _network_worker_atexit :: proc(state: ^NetworkWorkerState) {
-    // TODO: linger to ensure all client bufs are flushed, maybe even send "Server Closed" disconnect packet
-    for _, client_conn in state.connections {
-        _finalize_client(state, client_conn)
+    // TODO: is this a responsability for the main thread?
+    shutdown_msg := text_component("Server is closing..", COLOR_RED)
+    for _, &client_conn in state.connections {
+        _kick_client(state, &client_conn, shutdown_msg)
+    }
+    
+    _drain_pending_writes(state)
+    for _, &client_conn in state.connections {
+        _finalize_client(state, &client_conn, force=true)
     }
     delete(state.connections)
+}
+
+@(private="file")
+_drain_pending_writes :: proc(state: ^NetworkWorkerState) {
+    // ensure no new work is being accepted
+    reactor.close_accept_loop(state.io_ctx)
+    for socket, _ in state.connections {
+        reactor.disable_read_interest(state.io_ctx, socket)
+    }
+
+    LINGER_TIME :: 15 * time.Second
+    start := time.tick_now()
+    for {
+        // NOTE: safe to call as we just supressed accepting new connections and reads
+        _network_worker_await_completions(state, timeout_ms=20, process_reads=false)
+
+        // TODO: should we wait for read completions?
+        if state.outstanding_writes == 0 do break
+        hit_deadline := time.tick_since(start) > LINGER_TIME
+        if hit_deadline do break
+    }
 }
 
 @(private="file")
@@ -253,18 +285,17 @@ _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^Cli
         case .InvalidData:
             log.debug("client sent malformed packet, kicking; buf=")
             buf_dump(client_conn.rx_buf)
-            _kick_client(state, client_conn, text_component_single("Sent an unimplemented packet", TextColor(0xD92625)))
+            _kick_client(state, client_conn, text_component_single("Sent an unimplemented packet", COLOR_RED))
             break loop
         case .None:
             packet_desc := get_serverbound_packet_descriptor(packet)
             if packet_desc.expected_client_state != client_conn.state {
                 log.debugf("client sent packet in wrong client state (%v != %v): %v", client_conn.state, packet_desc.expected_client_state, packet)
-                _finalize_client(state, client_conn^)
+                _finalize_client(state, client_conn)
                 break loop
             }
 
             // tap into inbound packets to keep our client state in sync with the main thread
-            // TODO: do this in a cleaner way
             #partial switch packet in packet {
             case HandshakePacket: client_conn.state = ClientState(packet.intent) // safe to cast
             case LoginAcknowledgedPacket: client_conn.state = .Configuration
@@ -280,7 +311,7 @@ _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^Cli
 
 // Returns false on failure
 @(private="file", require_results)
-_enqueue_packet :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnection, packet: ClientBoundPacket) -> bool {
+_enqueue_packet :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection, packet: ClientBoundPacket) -> bool {
     tracy.Zone()
     
     // if already terminating, ignore
@@ -300,13 +331,14 @@ _enqueue_packet :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnecti
     read_err := buf_copy_into(&client_conn.tx_buf, outb)
     assert(read_err == .None, "invariant, copied full length")
 
-    submission_ok := reactor.submit_write_copy(io_ctx, client_conn.socket, outb)
+    submission_ok := reactor.submit_write_copy(state.io_ctx, client_conn.socket, outb)
     if !submission_ok {
         delete(outb, client_conn.packet_scratch_alloc)
         log.debug("io submission not ok")
         return false
     }
     buf_advance_pos_unchecked(&client_conn.tx_buf, len(outb))
+    state.outstanding_writes += 1
     
     client_conn.outstanding_writes += 1
     client_conn.terminating |= descriptor.is_terminal
@@ -314,20 +346,18 @@ _enqueue_packet :: proc(io_ctx: ^reactor.IOContext, client_conn: ^ClientConnecti
 }
 
 // Kicks a client with a message, begins client termination.
-// TODO: remove this once we have all packets implemented
 @(private="file")
 _kick_client :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection, reason: TextComponent) {
-    // NOTE: ignore enqueing failures, we set the connection to terminating either way
+    disconnect_packet: ClientBoundPacket
     #partial switch client_conn.state {
-    case .Login:
-        _ = _enqueue_packet(state.io_ctx, client_conn, DisconnectLoginPacket { reason = reason })
-    case .Configuration: 
-        _ = _enqueue_packet(state.io_ctx, client_conn, DisconnectConfigurationPacket { reason = reason })
-    case .Play:
-        _ = _enqueue_packet(state.io_ctx, client_conn, DisconnectPlayPacket { reason = reason })
-    case:
-        panic(#procedure + " called in client state which does not permit disconnect packets")
+    case .Login: disconnect_packet = DisconnectLoginPacket { reason = reason }
+    case .Configuration: disconnect_packet = DisconnectConfigurationPacket { reason = reason }
+    case .Play: disconnect_packet = DisconnectPlayPacket { reason = reason }
+    case: panic(#procedure + " called in client state which does not permit disconnect packets")
     }
+
+    // NOTE: ignore enqueing failures, we set the connection to terminating either way
+    _ = _enqueue_packet(state, client_conn, disconnect_packet)
     client_conn.terminating = true
 }
 
@@ -353,13 +383,33 @@ _create_client_connection :: proc(socket: net.TCP_Socket) -> ClientConnection {
     }
 }
 
-// Shuts down and unregisters a connection from all subsystems, and deallocates it.
+// Whether a ClientConnection may be finalized.
 @(private="file")
-_finalize_client :: proc(state: ^NetworkWorkerState, client_conn: ClientConnection) {
+_should_finalize :: proc(conn: ClientConnection) -> bool {
+    return conn.terminating && conn.outstanding_writes == 0
+}
+
+@(private="file")
+_try_finalize_client :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection) -> bool {
+    if _should_finalize(client_conn^) {
+        _finalize_client(state, client_conn)
+        return true
+    }
+    return false
+}
+
+// Fully shuts down and unregisters a client connection.
+// Inputs:
+// - `force`: if set to `true`, does not check if a client has pending outstanding work.
+@(private="file")
+_finalize_client :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection, force := false) {
     tracy.Zone()
-    // ensure termination has been initiated and pending work is flushed, otherwise we would leak memory
-    // and risk terminal packets not being sent.
-    assert(_should_finalize_disconnect(client_conn))
+    
+    if !force {
+        // ensure termination has been initiated and pending work is flushed, otherwise we would leak memory
+        // and risk terminal packets not being sent.
+        assert(_should_finalize(client_conn^))
+    }
 
     // FIXME: probably want to handle error
     reactor.unregister_client(state.io_ctx, client_conn.socket)
@@ -375,4 +425,6 @@ _finalize_client :: proc(state: ^NetworkWorkerState, client_conn: ClientConnecti
     // scratch_alloc.backup_allocator = os.heap_allocator()
     // mem.scratch_destroy(scratch_alloc)
     free(scratch_alloc, os.heap_allocator())
+
+    client_conn.socket = net.TCP_Socket(0xdeadbeef)
 }

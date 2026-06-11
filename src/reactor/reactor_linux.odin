@@ -95,6 +95,7 @@ _close_accept_loop :: proc(ctx: ^IOContext) {
 
 @(private)
 _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
+    // NOTE: only holds the clients that have already performed writes, so not 100% correct
     assert(len(ctx.pending_writes) == 0, "clients must be unregistered")
     
     linux.close(ctx.epoll_fd)
@@ -112,6 +113,19 @@ _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
     event := _epoll_event(ctx, client, EPOLL_EVENTS_NO_OUT)
     errno := linux.epoll_ctl(ctx.epoll_fd, .ADD, linux.Fd(client), &event)
     return errno == .NONE
+}
+
+@(private)
+_disable_read_interest :: proc(ctx: ^IOContext, conn: net.TCP_Socket) -> bool {
+    // preserve existing EPOLLOUT bit to not block writes
+    events := EPOLL_EVENTS_NO_OUT
+    if wq := &ctx.pending_writes[conn]; wq != nil && wq.epollout_armed {
+        events = EPOLL_EVENTS_OUT_ARMED
+    }
+
+    ev := _epoll_event(ctx, conn, events & ~{.IN})
+    // returns ENOENT on unregistered fds
+    return linux.epoll_ctl(ctx.epoll_fd, .MOD, linux.Fd(conn), &ev) != .NONE
 }
 
 @(private)
