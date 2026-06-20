@@ -159,7 +159,7 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
         command := buf_read_string(b, 32767, allocator) or_return
         return ChatCommandPacket { command=command }, .None
     case:
-        log.warnf("unhandled packet id: 0x%x", id)
+        log.warnf("unhandled packet id: 0x%x for client state", id, client_state)
         return p, .InvalidData
     }
 }

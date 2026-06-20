@@ -9,7 +9,6 @@ import win32 "core:sys/windows"
 
 import "lib:tracy"
 
-// TODO: add support for _wakeup through PostQueuedCompletionStatus
 @(private)
 _TIMEOUT_INFINITE :: int(win32.INFINITE)
 
@@ -433,7 +432,9 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 		switch op_data.op {
 		case .AcceptedConnection:
 			// re-arm accept handler, NOTE: fatal if this fails, no new connections can be accepted
-			defer _install_accept_handler(ctx) or_break
+			defer {
+				assert(_install_accept_handler(ctx), "failed to re-arm accept handler")
+			}
 			
 		    client_sock := op_data.accepted_conn.socket
 			comp = _process_accept(ctx, client_sock) or_continue
@@ -470,6 +471,8 @@ _process_accept :: proc(ctx: ^IOContext, client_sock: win32.SOCKET) -> (comp: Co
 
 @(private="file", require_results)
 _process_read :: proc(ctx: ^IOContext, client_sock: win32.SOCKET, entry: win32.OVERLAPPED_ENTRY, passed_buf: []u8) -> (comp: Completion) {
+	comp.socket = net.TCP_Socket(client_sock)
+	
 	if entry.dwNumberOfBytesTransferred == 0 {
 	    comp.operation = .PeerHangup
 		_release_recv_buf(ctx, passed_buf)
@@ -504,6 +507,7 @@ _process_write :: proc(ctx: ^IOContext, client_sock: win32.SOCKET, entry: win32.
 	}
 	
 	assert(int(entry.dwNumberOfBytesTransferred) == len(op_data.write.buf), "partial writes should be handled above")
+	comp.socket = net.TCP_Socket(client_sock)
 	comp.operation = .Write
 	comp.buf = transport_buf // pass back to upstream to deallocate
 	return comp, true
