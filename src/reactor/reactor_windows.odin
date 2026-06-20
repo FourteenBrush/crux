@@ -11,22 +11,30 @@ import "lib:tracy"
 
 // TODO: add support for _wakeup through PostQueuedCompletionStatus
 @(private)
-_TIMEOUT_INFINITE :: win32.INFINITE
+_TIMEOUT_INFINITE :: int(win32.INFINITE)
 
 // Required size to store ipv4 socket addr for AcceptEx calls (see docs)
 @(private="file")
 ADDR_BUF_SIZE :: size_of(win32.sockaddr_in) + 16
 #assert(size_of(win32.SOCKADDR_STORAGE_LH) >= ADDR_BUF_SIZE)
 
-// How many bytes of actual data to receive into the AcceptEx buffer
+// How many bytes of actual data to receive into the AcceptEx/AcceptExSockAddrs buffer
 @(private="file")
 ACCEPTEX_RECEIVE_DATA_LENGTH :: 0
+
+@(private="file")
+ACCEPTEX_OUTPUT_BUFFER_LENGTH :: ACCEPTEX_RECEIVE_DATA_LENGTH + 2 * ADDR_BUF_SIZE
+
+// Completion key used for sending an iocp packet which sole purpose is waking up the block GetQueuedCompletionStatus call.
+// Normally we store sockets in the lpCompletionKey, so this value is fairly safe.
+@(private="file")
+WAKEUP_COMPLETION_KEY :: win32.ULONG_PTR(win32.INVALID_SOCKET)
 
 // both dynamically loaded by an WsaIoctl call
 @(private="file")
 _accept_ex := win32.LPFN_ACCEPTEX(nil)
 @(private="file")
-_accept_ex_sock_addrs := win32.LPFN_GETACCEPTEXSOCKADDRS(nil)
+_get_accept_ex_sock_addrs := win32.LPFN_GETACCEPTEXSOCKADDRS(nil)
 
 @(private)
 _IOContext :: struct {
@@ -40,9 +48,10 @@ _IOContext :: struct {
 	// one for completion entries, freelist block based
 	allocator: mem.Allocator,
 
-	// Buf where local and remote addr are placed on an AcceptEx call.
+	// Buf where local and remote addr are placed on an AcceptEx call, heap allocated to prevent some
+	// nonsense where we cannot move this struct.
 	// TODO: can we somehow put this in the IOOperationData, maybe as flexible array member?
-	accept_buf: [ADDR_BUF_SIZE * 2]u8,
+	accept_buf: ^[ACCEPTEX_OUTPUT_BUFFER_LENGTH]u8,
 }
 
 @(private)
@@ -77,9 +86,9 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 
 	ctx.server_sock = win32.SOCKET(server_sock)
 	_accept_ex = _load_wsa_fn_ptr(&ctx, win32.WSAID_ACCEPTEX, win32.LPFN_ACCEPTEX)
-	_accept_ex_sock_addrs = _load_wsa_fn_ptr(&ctx, win32.WSAID_GETACCEPTEXSOCKADDRS, win32.LPFN_GETACCEPTEXSOCKADDRS)
+	_get_accept_ex_sock_addrs = _load_wsa_fn_ptr(&ctx, win32.WSAID_GETACCEPTEXSOCKADDRS, win32.LPFN_GETACCEPTEXSOCKADDRS)
 
-	if _accept_ex == nil || _accept_ex_sock_addrs == nil {
+	if _accept_ex == nil || _get_accept_ex_sock_addrs == nil {
 	    _log_error(win32.WSAGetLastError(), "failed to load WSA function pointers")
     	return ctx, false
 	}
@@ -115,6 +124,7 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 	    return
 	}
 	
+	ctx.accept_buf = new([ACCEPTEX_OUTPUT_BUFFER_LENGTH]u8, allocator)
 	_install_accept_handler(&ctx) or_return
 
 	return ctx, true
@@ -135,6 +145,7 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 
 	win32.CloseHandle(ctx.completion_port)
 	ctx.completion_port = win32.INVALID_HANDLE_VALUE
+	free(ctx.accept_buf)
 	// as all overlapped IO operations on the server socket are cancelled, there should
 	// be no issues in still having it bound to this iocp
 	
@@ -160,9 +171,6 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 	op_data := _alloc_operation_data(ctx^, .AcceptedConnection, ctx.server_sock, nil)
 	op_data.accepted_conn.socket = client_sock
 
-	// FIXME: we "know" clients will always send initial data after connecting (handshake packets and such),
-	// can we specify a recv buffer length > 0, while also defending against denial of service attacks
-	// by clients connecting and not sending data? (probably something with SO_CONNECT_TIME)
 	accept_ok := _accept_ex(
 		ctx.server_sock,
 		client_sock,
@@ -259,6 +267,11 @@ _register_client :: proc(ctx: ^IOContext, conn: win32.SOCKET) -> bool {
     return _initiate_recv(ctx, conn)
 }
 
+@(private)
+_disable_read_interest :: proc(ctx: ^IOContext, conn: net.TCP_Socket) -> bool {
+	unimplemented()
+}
+
 // Initiate async recv call to emit an iocp packet with the read data.
 @(private="file")
 _initiate_recv :: proc(ctx: ^IOContext, conn: win32.SOCKET) -> bool {
@@ -295,7 +308,7 @@ _initiate_recv :: proc(ctx: ^IOContext, conn: win32.SOCKET) -> bool {
 	return true
 }
 
-// Cache line aligned IO operation data. The emitting socket is stored in lpCompletionKey of the OVERLAPPED_ENTRY.
+// Per operation IO control block. The emitting socket is stored in lpCompletionKey of the OVERLAPPED_ENTRY (see registration).
 @(private="file")
 IOOperationData :: struct {
     overlapped: win32.OVERLAPPED,
@@ -389,121 +402,111 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 	completion_entries := make([]win32.OVERLAPPED_ENTRY, len(completions_out), context.temp_allocator)
 	nready := _poll_iocp(ctx, completion_entries, timeout_ms) or_return
 
-	i := 0
+	ncompletions := 0
 	for entry in completion_entries[:nready] {
 	    tracy.ZoneN("CompletionEntry")
 
+		if entry.lpCompletionKey == WAKEUP_COMPLETION_KEY do continue
+
 		emitter := win32.SOCKET(entry.lpCompletionKey)
-		#no_bounds_check comp := &completions_out[i]
-  		comp.socket = net.TCP_Socket(emitter)
-
-        // NOTE: care must be taken with or_continue to ensure this does not accidentally emit a zeroed out completion
-        discard_entry := false
-  		defer if discard_entry {
-  		    nready -= 1
-  		} else {
-  		    i += 1
-  		}
-	    ctx.outstanding_net_ops -= 1
-
-        io_status := cast(win32.System_Error) win32.RtlNtStatusToDosError(win32.NTSTATUS(entry.Internal))
         op_data: ^IOOperationData = container_of(entry.lpOverlapped, IOOperationData, "overlapped")
 		defer free(op_data, ctx.allocator)
 		
-        if io_status == .OPERATION_ABORTED {
-            tracy.ZoneN("Stale Completion")
-            // TODO: what happens with last write operation, this contains an user allocated buffer, how do we pass it back?
-            // TODO: pass writes back
-            
-            if op_data.op == .Read {
-	           	_release_recv_buf(ctx, op_data.read.buf)
-            }
+		ctx.outstanding_net_ops -= 1
 
-            discard_entry = true
-            continue
-        }
+		io_status := cast(win32.System_Error) win32.RtlNtStatusToDosError(win32.NTSTATUS(entry.Internal))
 
-        if io_status != .SUCCESS {
-            comp.operation = .Error
-            if op_data.op == .Write {
-            	// pass user allocated buf back upstream
-                comp.buf = op_data.write.buf
-            }
- 			continue
-        }
-
+		comp := Completion { socket=net.TCP_Socket(emitter) }
+		
+		if io_status == .OPERATION_ABORTED || io_status != .SUCCESS {
+			comp.operation = .Error
+			#partial switch op_data.op {
+			case .Read:
+				_release_recv_buf(ctx, op_data.read.buf)
+				continue
+			case .Write:
+				comp.buf = op_data.write.buf
+			}
+		}
+		discard := false
+		
 		switch op_data.op {
 		case .AcceptedConnection:
+			// re-arm accept handler, NOTE: fatal if this fails, no new connections can be accepted
+			defer _install_accept_handler(ctx) or_break
+			
 		    client_sock := op_data.accepted_conn.socket
-            accept_success := false
-            defer if !accept_success {
-                win32.closesocket(client_sock)
-                discard_entry = true
-            }
-
-            remote_addr := _configure_accepted_client(ctx, client_sock) or_continue
-            _register_client(ctx, client_sock) or_continue
-            
-            comp.operation = .NewConnection
-            comp.socket = net.TCP_Socket(client_sock)
-            comp.endpoint = _sockaddr_to_endpoint(remote_addr)
-            accept_success = true
-
-            // re-arm accept handler, NOTE: fatal if this fails, no new connections can be accepted
-            _install_accept_handler(ctx) or_break
+			comp = _process_accept(ctx, client_sock) or_continue
 		case .Read:
-			if entry.dwNumberOfBytesTransferred == 0 {
-			    comp.operation = .PeerHangup
-				_release_recv_buf(ctx, op_data.read.buf)
-			} else {
-    			comp.operation = .Read
-                comp.buf = op_data.read.buf[:entry.dwNumberOfBytesTransferred]
-
-    			// re-arm recv handler
-                if !_initiate_recv(ctx, emitter) {
-                	comp.operation = .Error
-                 	comp.buf = nil
-                }
-			}
+			comp = _process_read(ctx, emitter, entry, op_data.read.buf)
 		case .Write:
-		    total_transfer := entry.dwNumberOfBytesTransferred + op_data.write.already_transferred
-		    partial_write := int(total_transfer) != len(op_data.write.buf)
-			transport_buf := op_data.write.buf
-			if partial_write {
-			    // ignore this entry, queue another send with the remaining part of the buffer
-				discard_entry = true
+			comp = _process_write(ctx, emitter, entry, op_data^) or_continue
+		}
 
-				_initiate_send(ctx, emitter, transport_buf, partial_write_off=total_transfer) or_continue
-				continue
-			}
-
-			assert(int(entry.dwNumberOfBytesTransferred) == len(op_data.write.buf), "partial writes should be handled above")
-		    comp.operation = .Write
-			comp.buf = transport_buf // pass back to upstream to deallocate
+		if !discard {
+			completions_out[ncompletions] = comp
+			ncompletions += 1
 		}
 	}
 
-	return int(nready), true
+	return ncompletions, true
 }
 
-@(private="file")
-_sockaddr_to_endpoint :: proc(addr: ^win32.sockaddr) -> net.Endpoint {
-    switch addr.sa_family {
-    case u16(win32.AF_INET):
-        addr := cast(^win32.sockaddr_in)addr
-        return net.Endpoint {
-            address = net.IP4_Address(transmute([4]u8)addr.sin_addr),
-            port = int(addr.sin_port),
+@(private="file", require_results)
+_process_accept :: proc(ctx: ^IOContext, client_sock: win32.SOCKET) -> (comp: Completion, emit: bool) {
+	defer if !emit {
+		win32.closesocket(client_sock)
+	}
+	
+	// silently drop if failed
+	remote_addr := _configure_accepted_client(ctx, client_sock) or_return
+    _register_client(ctx, client_sock) or_return
+    
+    comp.operation = .NewConnection
+    comp.socket = net.TCP_Socket(client_sock)
+    comp.endpoint = _sockaddr_to_endpoint(remote_addr)
+    return comp, true
+}
+
+@(private="file", require_results)
+_process_read :: proc(ctx: ^IOContext, client_sock: win32.SOCKET, entry: win32.OVERLAPPED_ENTRY, passed_buf: []u8) -> (comp: Completion) {
+	if entry.dwNumberOfBytesTransferred == 0 {
+	    comp.operation = .PeerHangup
+		_release_recv_buf(ctx, passed_buf)
+	} else {
+		comp.operation = .Read
+	    comp.buf = passed_buf[:entry.dwNumberOfBytesTransferred]
+		
+		// re-arm recv handler
+	    if !_initiate_recv(ctx, client_sock) {
+	       	comp.operation = .Error
+	       	comp.buf = nil
         }
-    case u16(win32.AF_INET6):
-        addr := cast(^win32.sockaddr_in6)addr
-        port := int(addr.sin6_port)
-        return net.Endpoint {
-            address = net.IP6_Address(transmute([8]u16be)addr.sin6_addr),
-            port = int(addr.sin6_port),
-        }
-    case: panic("neither ipv4 nor ipv6 address")
-    }
+	}
+	return comp
+}
+
+@(private="file", require_results)
+_process_write :: proc(ctx: ^IOContext, client_sock: win32.SOCKET, entry: win32.OVERLAPPED_ENTRY, op_data: IOOperationData) -> (comp: Completion, emit: bool) {
+	total_transfer := entry.dwNumberOfBytesTransferred + op_data.write.already_transferred
+	partial_write := int(total_transfer) != len(op_data.write.buf)
+	transport_buf := op_data.write.buf
+	if partial_write {
+	  	// ignore this entry, queue another send with the remaining part of the buffer
+
+		send_ok := _initiate_send(ctx, client_sock, transport_buf, partial_write_off=total_transfer)
+		if !send_ok {
+			comp.operation = .Error
+			comp.buf = transport_buf
+			return comp, true
+		}
+		return comp, false
+	}
+	
+	assert(int(entry.dwNumberOfBytesTransferred) == len(op_data.write.buf), "partial writes should be handled above")
+	comp.operation = .Write
+	comp.buf = transport_buf // pass back to upstream to deallocate
+	return comp, true
 }
 
 @(private)
@@ -522,7 +525,10 @@ _submit_write_copy :: proc(ctx: ^IOContext, conn: net.TCP_Socket, data: []u8) ->
 
 @(private)
 _wakeup :: proc(ctx: ^IOContext) {
-    unimplemented()
+	// submit emulated iocp packet
+	if !win32.PostQueuedCompletionStatus(ctx.completion_port, 0, WAKEUP_COMPLETION_KEY, nil) {
+		_log_error(win32.GetLastError(), "failed to wakeup iocp")
+	}
 }
 
 @(private="file")
@@ -555,16 +561,15 @@ _initiate_send :: proc(ctx: ^IOContext, socket: win32.SOCKET, data: []u8, partia
 }
 
 @(private="file")
-_configure_accepted_client :: proc(ctx: ^IOContext, client_sock: win32.SOCKET) -> (remote: ^win32.sockaddr, ok: bool) {
+_configure_accepted_client :: proc(ctx: ^IOContext, client_sock: win32.SOCKET) -> (remote_addr: ^win32.sockaddr, ok: bool) {
     tracy.Zone()
 
-    // parse AcceptEx buffer to find addresses (unused) and unblock socket
+    // parse AcceptEx buffer to find addresses and unblock socket
 	local_addr: ^win32.sockaddr
 	local_addr_len: i32
-	remote_addr: ^win32.sockaddr
 	remote_addr_len: i32
-	_accept_ex_sock_addrs(
-	    &ctx.accept_buf[0],
+	_get_accept_ex_sock_addrs(
+	    ctx.accept_buf,
 		ACCEPTEX_RECEIVE_DATA_LENGTH,
 		ADDR_BUF_SIZE,
 		ADDR_BUF_SIZE,
@@ -634,6 +639,25 @@ _load_wsa_fn_ptr :: proc(ctx: ^IOContext, guid: win32.GUID, $Sig: typeid) -> (fn
     }
     assert(nbytes == size_of(fn_ptr))
     return
+}
+
+@(private="file")
+_sockaddr_to_endpoint :: proc(addr: ^win32.sockaddr) -> net.Endpoint {
+    switch addr.sa_family {
+    case u16(win32.AF_INET):
+        addr := cast(^win32.sockaddr_in)addr
+        return net.Endpoint {
+            address = net.IP4_Address(transmute([4]u8)addr.sin_addr),
+            port = int(addr.sin_port),
+        }
+    case u16(win32.AF_INET6):
+        addr := cast(^win32.sockaddr_in6)addr
+        return net.Endpoint {
+            address = net.IP6_Address(transmute([8]u16be)addr.sin6_addr),
+            port = int(addr.sin6_port),
+        }
+    case: panic("neither ipv4 nor ipv6 address")
+    }
 }
 
 @(private="file")
