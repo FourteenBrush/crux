@@ -58,8 +58,10 @@ TerminateClientRequest :: struct {
 @(private)
 PacketTransfer :: struct($P: typeid) {
     socket: net.TCP_Socket,
-    // FIXME: store packet ptr instead, and epoch for recycling
+    // FIXME: store epoch for recycling
     packet: P,
+    // The state that the client that sent this packet, is currently in.
+    client_state: ClientState,
 }
 
 // TODO: make this a wait-free ringbuffer instead of whatever nonsense this is
@@ -285,13 +287,13 @@ _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^Cli
         case .InvalidData:
             log.debug("client sent malformed packet, kicking; buf=")
             buf_dump(client_conn.rx_buf)
-            _kick_client(state, client_conn, text_component_single("Sent an unimplemented packet", COLOR_RED))
+            _kick_client(state, client_conn, text_component("Sent an unimplemented packet", COLOR_RED))
             break loop
         case .None:
             packet_desc := get_serverbound_packet_descriptor(packet)
-            if packet_desc.expected_client_state != client_conn.state {
-                log.debugf("client sent packet in wrong client state (%v != %v): %v", client_conn.state, packet_desc.expected_client_state, packet)
-                _finalize_client(state, client_conn)
+            if client_conn.state not_in packet_desc.expected_client_states {
+                log.debugf("client sent packet in wrong client state (%v != %v): %v", client_conn.state, packet_desc.expected_client_states, packet)
+                client_conn.terminating = true
                 break loop
             }
 
@@ -302,8 +304,11 @@ _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^Cli
             case AcknowledgeFinishConfigurationPacket: client_conn.state = .Play
             }
             
-            message := PacketTransfer(ServerBoundPacket) { socket=client_conn.socket, packet=packet }
-            spsc_enqueue(state.outbound_queue, message)
+            spsc_enqueue(state.outbound_queue, PacketTransfer(ServerBoundPacket) {
+                socket=client_conn.socket,
+                packet=packet,
+                client_state=client_conn.state,
+            })
             if client_conn.terminating do break loop
         }
     }

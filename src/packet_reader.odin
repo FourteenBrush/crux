@@ -12,7 +12,7 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
         // NOTE: vanilla client attempts to send a legacy server list ping packet when
         // normal ping times out (30s), additionally older clients send this, which we are supposed to handle
         // TODO: directly kick after FE 01 FA
-        return read_legacy_server_list_ping(b, allocator=allocator)
+        return _read_legacy_server_list_ping(b, allocator=allocator)
     }
 
     // early return on short read, no bytes consumed
@@ -47,18 +47,7 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
                 uuid = buf_read_uuid(b) or_return,
             }, .None
         case .Configuration:
-            return ClientInformationPacket {
-                // TODO: unchecked reads
-                locale = buf_read_string(b, 16, allocator) or_return,
-                view_distance = buf_unchecked_read_byte(b),
-                chat_mode = buf_unchecked_read_var_int_enum(b, ChatMode) or_return,
-                chat_colors = buf_unchecked_read_bool(b) or_return,
-                skin_parts = buf_read_flags(b, SkinParts) or_return,
-                main_hand = buf_unchecked_read_var_int_enum(b, MainHand) or_return,
-                enable_text_filtering = buf_unchecked_read_bool(b) or_return,
-                allow_server_listings = buf_unchecked_read_bool(b) or_return,
-                particle_status = buf_unchecked_read_var_int_enum(b, ParticleStatus) or_return,
-            }, .None
+            return _read_client_information(b, allocator)
         case .Play:
             teleport_id := buf_read_var_int(b) or_return
             return ConfirmTeleportationPacket { teleport_id=teleport_id }, .None
@@ -158,14 +147,33 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
     case .ChatCommand:
         command := buf_read_string(b, 32767, allocator) or_return
         return ChatCommandPacket { command=command }, .None
+    case .ClientInformationPlay:
+        return _read_client_information(b, allocator)
     case:
         log.warnf("unhandled packet id: 0x%x", id)
         return p, .InvalidData
     }
 }
 
+@(private="file")
+_read_client_information :: proc(buf: ^NetworkBuffer, allocator: mem.Allocator) -> (p: ClientInformationPacket, err: ReadError) {
+    return ClientInformationPacket {
+        // TODO: unchecked reads
+        locale = buf_read_string(buf, 16, allocator) or_return,
+        view_distance = buf_unchecked_read_byte(buf),
+        chat_mode = buf_unchecked_read_var_int_enum(buf, ChatMode) or_return,
+        chat_colors = buf_unchecked_read_bool(buf) or_return,
+        skin_parts = buf_read_flags(buf, SkinParts) or_return,
+        main_hand = buf_unchecked_read_var_int_enum(buf, MainHand) or_return,
+        enable_text_filtering = buf_unchecked_read_bool(buf) or_return,
+        allow_server_listings = buf_unchecked_read_bool(buf) or_return,
+        particle_status = buf_unchecked_read_var_int_enum(buf, ParticleStatus) or_return,
+    }, .None
+}
+
 // Reads a legacy server list ping packet, the initial byte 0xfe has already been read.
-read_legacy_server_list_ping :: proc(buf: ^NetworkBuffer, allocator: mem.Allocator) -> (p: LegacyServerListPingPacket, err: ReadError) {
+@(private="file")
+_read_legacy_server_list_ping :: proc(buf: ^NetworkBuffer, allocator: mem.Allocator) -> (p: LegacyServerListPingPacket, err: ReadError) {
     // on 1.4 - 1.5 the client sends an additional 0x01
     // on 1.6, more additional data is sent
 

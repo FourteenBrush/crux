@@ -13,21 +13,21 @@ ServerBoundPacketId :: enum VarInt {
     
     // sent in .Status state
     
-    StatusRequest       = 0x00,
+    StatusRequest                    = 0x00,
     // To calculate the server's latency
-    PingRequest         = 0x01,
+    PingRequest                      = 0x01,
     
     // sent in .Login state
     
-    LoginStart          = 0x00,
-    LoginAcknowledged   = 0x03,
+    LoginStart                       = 0x00,
+    LoginAcknowledged                = 0x03,
     
     // sent in .Configuration state
     
-    PluginMessage       = 0x02,
-    ClientInformation   = 0x00,
-    KnownPacks          = 0x07,
-    AcknowledgeFinishConfiguration = 0x03,
+    PluginMessage                    = 0x02,
+    ClientInformationConfiguration   = 0x00,
+    KnownPacks                       = 0x07,
+    AcknowledgeFinishConfiguration   = 0x03,
     
     // sent in .Play state
     
@@ -49,6 +49,7 @@ ServerBoundPacketId :: enum VarInt {
     PlayerCommand             = 0x29,
     PlayerAction              = 0x28,
     ChatCommand               = 0x06,
+    ClientInformationPlay     = 0xd,
 }
 
 ServerBoundPacket :: union #no_nil {
@@ -191,33 +192,33 @@ get_serverbound_packet_descriptor :: proc(packet: ServerBoundPacket) -> ServerBo
 serverbound_packet_descriptors := [intrinsics.type_union_variant_count(ServerBoundPacket)]ServerBoundPacketDescriptor {
     // TODO: is this packet allowed in multiple states?
     // TODO: make expected_client_state Maybe(ClientState) (this can be a constant since around 19/09 as Maybe has only one variant); wait for release dev-10
-    VARIANT_IDX_OF(ServerBoundPacket, LegacyServerListPingPacket)           = { .Handshake },
-    VARIANT_IDX_OF(ServerBoundPacket, HandshakePacket)                      = { .Handshake },
-    VARIANT_IDX_OF(ServerBoundPacket, StatusRequestPacket)                  = { .Status },
-    VARIANT_IDX_OF(ServerBoundPacket, PingRequestPacket)                    = { .Status },
-    VARIANT_IDX_OF(ServerBoundPacket, LoginStartPacket)                     = { .Login },
-    VARIANT_IDX_OF(ServerBoundPacket, LoginAcknowledgedPacket)              = { .Login },
-    VARIANT_IDX_OF(ServerBoundPacket, PluginMessagePacket)                  = { .Configuration },
-    VARIANT_IDX_OF(ServerBoundPacket, ClientInformationPacket)              = { .Configuration },
-    VARIANT_IDX_OF(ServerBoundPacket, KnownPacksPacket)                     = { .Configuration },
-    VARIANT_IDX_OF(ServerBoundPacket, AcknowledgeFinishConfigurationPacket) = { .Configuration },
-    VARIANT_IDX_OF(ServerBoundPacket, ClientTickEndPacket)                  = { .Play },
-    VARIANT_IDX_OF(ServerBoundPacket, SetPlayerRotationPacket)              = { .Play },
-    VARIANT_IDX_OF(ServerBoundPacket, SetPlayerPositionPacket)              = { .Play },
-    VARIANT_IDX_OF(ServerBoundPacket, SetPlayerPositionRotationPacket)      = { .Play },
-    VARIANT_IDX_OF(ServerBoundPacket, SetPlayerMovementPacket)              = { .Play },
-    VARIANT_IDX_OF(ServerBoundPacket, ConfirmTeleportationPacket)           = { .Play },
-    VARIANT_IDX_OF(ServerBoundPacket, PlayerLoadedPacket)                   = { .Play },
-    VARIANT_IDX_OF(ServerBoundPacket, KeepAlivePlayPacket)                  = { .Play },
-    VARIANT_IDX_OF(ServerBoundPacket, SwingArmPacket)                       = { .Play },
-    VARIANT_IDX_OF(ServerBoundPacket, PlayerInputPacket)                    = { .Play },
-    VARIANT_IDX_OF(ServerBoundPacket, PlayerFlightChangePacket)             = { .Play },
-    VARIANT_IDX_OF(ServerBoundPacket, StoreCookiePlayPacket)                = { .Play },
-    VARIANT_IDX_OF(ServerBoundPacket, SetHeldItemPacket)                    = { .Play },
-    VARIANT_IDX_OF(ServerBoundPacket, CloseContainerPacket)                 = { .Play },
-    VARIANT_IDX_OF(ServerBoundPacket, PlayerCommandPacket)                  = { .Play },
-    VARIANT_IDX_OF(ServerBoundPacket, PlayerActionPacket)                   = { .Play },
-    VARIANT_IDX_OF(ServerBoundPacket, ChatCommandPacket)                    = { .Play },
+    VARIANT_IDX_OF(ServerBoundPacket, LegacyServerListPingPacket)           = { { .Handshake } },
+    VARIANT_IDX_OF(ServerBoundPacket, HandshakePacket)                      = { { .Handshake } },
+    VARIANT_IDX_OF(ServerBoundPacket, StatusRequestPacket)                  = { { .Status } },
+    VARIANT_IDX_OF(ServerBoundPacket, PingRequestPacket)                    = { { .Status } },
+    VARIANT_IDX_OF(ServerBoundPacket, LoginStartPacket)                     = { { .Login } },
+    VARIANT_IDX_OF(ServerBoundPacket, LoginAcknowledgedPacket)              = { { .Login } },
+    VARIANT_IDX_OF(ServerBoundPacket, PluginMessagePacket)                  = { { .Configuration } },
+    VARIANT_IDX_OF(ServerBoundPacket, ClientInformationPacket)              = { { .Configuration, .Play } },
+    VARIANT_IDX_OF(ServerBoundPacket, KnownPacksPacket)                     = { { .Configuration } },
+    VARIANT_IDX_OF(ServerBoundPacket, AcknowledgeFinishConfigurationPacket) = { { .Configuration } },
+    VARIANT_IDX_OF(ServerBoundPacket, ClientTickEndPacket)                  = { { .Play } },
+    VARIANT_IDX_OF(ServerBoundPacket, SetPlayerRotationPacket)              = { { .Play } },
+    VARIANT_IDX_OF(ServerBoundPacket, SetPlayerPositionPacket)              = { { .Play } },
+    VARIANT_IDX_OF(ServerBoundPacket, SetPlayerPositionRotationPacket)      = { { .Play } },
+    VARIANT_IDX_OF(ServerBoundPacket, SetPlayerMovementPacket)              = { { .Play } },
+    VARIANT_IDX_OF(ServerBoundPacket, ConfirmTeleportationPacket)           = { { .Play } },
+    VARIANT_IDX_OF(ServerBoundPacket, PlayerLoadedPacket)                   = { { .Play } },
+    VARIANT_IDX_OF(ServerBoundPacket, KeepAlivePlayPacket)                  = { { .Play } },
+    VARIANT_IDX_OF(ServerBoundPacket, SwingArmPacket)                       = { { .Play } },
+    VARIANT_IDX_OF(ServerBoundPacket, PlayerInputPacket)                    = { { .Play } },
+    VARIANT_IDX_OF(ServerBoundPacket, PlayerFlightChangePacket)             = { { .Play } },
+    VARIANT_IDX_OF(ServerBoundPacket, StoreCookiePlayPacket)                = { { .Play } },
+    VARIANT_IDX_OF(ServerBoundPacket, SetHeldItemPacket)                    = { { .Play } },
+    VARIANT_IDX_OF(ServerBoundPacket, CloseContainerPacket)                 = { { .Play } },
+    VARIANT_IDX_OF(ServerBoundPacket, PlayerCommandPacket)                  = { { .Play } },
+    VARIANT_IDX_OF(ServerBoundPacket, PlayerActionPacket)                   = { { .Play } },
+    VARIANT_IDX_OF(ServerBoundPacket, ChatCommandPacket)                    = { { .Play } },
 }
 
 @(private)
@@ -230,7 +231,7 @@ ClientBoundPacketDescriptor :: struct {
 @(private)
 ServerBoundPacketDescriptor :: struct {
     // Client state in which this packet should arrive.
-    expected_client_state: ClientState,
+    expected_client_states: bit_set[ClientState],
 }
 
 // ---------------------------------------- 

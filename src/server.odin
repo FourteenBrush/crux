@@ -166,7 +166,7 @@ _handle_bridge_message :: proc(server: ^Server, message: InboundMessage) {
             }
         }
     case PacketTransfer(ServerBoundPacket):
-        _handle_serverbound_packet(server, message.packet, message.socket)
+        _handle_serverbound_packet(server, message.packet, message.socket, message.client_state)
     }
 }
 
@@ -218,7 +218,6 @@ _create_session :: proc(
     }
 }
 
-// TODO: never called
 @(private)
 _terminate_session :: proc(server: ^Server, session: SessionData) {
     assert(session.terminating)
@@ -234,6 +233,8 @@ _terminate_session :: proc(server: ^Server, session: SessionData) {
 // Kicks a client with a message, enters a termination state.
 @(private)
 _kick_client :: proc(server: ^Server, session: ^SessionData, reason: TextComponent) {
+    if session.terminating do return
+    
     #partial switch session.state {
     case .Login:
         enqueue_packet(session, DisconnectLoginPacket { reason = reason })
@@ -253,7 +254,11 @@ enqueue_packet :: proc(session: ^SessionData, packet: ClientBoundPacket) {
     assert(session != nil)
     if session.terminating do return
     
-    spsc_enqueue(server.outbound_queue, PacketTransfer(ClientBoundPacket) { socket=session.socket, packet=packet })
+    spsc_enqueue(server.outbound_queue, PacketTransfer(ClientBoundPacket) {
+        socket=session.socket,
+        packet=packet,
+        client_state=session.state,
+    })
     session.terminating |= descriptor.is_terminal
     server.messages_emitted = true
     // log.warn("MAIN THREAD: enqueued packet", packet)
