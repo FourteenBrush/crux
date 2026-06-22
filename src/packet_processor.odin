@@ -16,23 +16,22 @@ pos_to_chunk :: proc "contextless" (pos: Pos) -> ChunkPos {
 }
 
 @(private)
-_handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, socket: net.TCP_Socket) {
+_handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, socket: net.TCP_Socket, client_state: ClientState) {
     #partial switch packet in packet {
-    case ClientTickEndPacket:
-    case KeepAlivePlayPacket:
-    case SetPlayerRotationPacket:
-    case SetPlayerPositionPacket:
-    case SetPlayerPositionRotationPacket:
-    case SetPlayerMovementPacket:
-    case PlayerInputPacket:
-    case PlayerCommandPacket:
+    case ClientTickEndPacket,
+        KeepAlivePlayPacket,
+        SetPlayerRotationPacket,
+        SetPlayerPositionPacket,
+        SetPlayerPositionRotationPacket,
+        SetPlayerMovementPacket,
+        PlayerInputPacket,
+        PlayerCommandPacket:
         // do not log, spams console
     case:
         log.log(LOG_LEVEL_INBOUND, "Received Packet", packet)
     }
     
     session: ^SessionData = nil
-    client_state := get_serverbound_packet_descriptor(packet).expected_client_state
     if client_state > .Handshake {
         // TODO: this logic is not correct in case of stale serverbound packets after we issued some sort of disconnect
         // (which is still buffered in the outbound queue).
@@ -42,7 +41,7 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
     defer if session != nil && session.terminating {
         // only terminate session afterwards (which will remove it from the sessions, causing a use after free if
         // there would have been an accidental extra _enqueue_packet, this procedure will check if we are already terminating)
-        // TODO: if we receive a packet afterwards, should be consider it being stale (inside the spsc queue)?
+        // TODO: if we receive a packet afterwards, should we consider it being stale (inside the spsc queue)?
         _terminate_session(server, session^)
     }
     

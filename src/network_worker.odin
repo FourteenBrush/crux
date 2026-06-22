@@ -297,6 +297,12 @@ _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^Cli
                 break loop
             }
 
+            spsc_enqueue(state.outbound_queue, PacketTransfer(ServerBoundPacket) {
+                socket=client_conn.socket,
+                packet=packet,
+                client_state=client_conn.state,
+            })
+
             // tap into inbound packets to keep our client state in sync with the main thread
             #partial switch packet in packet {
             case HandshakePacket: client_conn.state = ClientState(packet.intent) // safe to cast
@@ -304,12 +310,6 @@ _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^Cli
             case AcknowledgeFinishConfigurationPacket: client_conn.state = .Play
             }
             
-            spsc_enqueue(state.outbound_queue, PacketTransfer(ServerBoundPacket) {
-                socket=client_conn.socket,
-                packet=packet,
-                client_state=client_conn.state,
-            })
-            if client_conn.terminating do break loop
         }
     }
 }
