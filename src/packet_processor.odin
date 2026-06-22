@@ -113,6 +113,8 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
     case PluginMessagePacket:
         // empty
     case ClientInformationPacket:
+        if client_state == .Play do break
+        
         // from here on, send server configuration until we reach a serverbound finish config ack
         enqueue_packet(session, PluginMessagePacket {
             channel = "minecraft:brand",
