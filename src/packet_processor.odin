@@ -113,7 +113,7 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
     case PluginMessagePacket:
         // empty
     case ClientInformationPacket:
-        if client_state == .Play do break
+        if client_state != .Configuration do break
         
         // from here on, send server configuration until we reach a serverbound finish config ack
         enqueue_packet(session, PluginMessagePacket {
@@ -177,23 +177,25 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
         if session.pending_teleport != nil do return
         
         if player_crosses_chunk_borders(session, packet.pos) {
-            current_chunk_pos := pos_to_chunk(session.pos)
-            new_chunk_pos := pos_to_chunk(packet.pos)
+            player_chunk_pos := pos_to_chunk(session.pos)
+            entering_chunk_pos := pos_to_chunk(packet.pos)
             enqueue_packet(session, SetCenterChunkPacket {
-                chunk_pos = new_chunk_pos,
+                chunk_pos = entering_chunk_pos,
             })
 
-            if new_chunk_pos.y != current_chunk_pos.y {
+            if entering_chunk_pos.y != player_chunk_pos.y {
                 // check if position ahead of the entered chunk has to be sent
-                if abs(new_chunk_pos.y) + 1 >= CENTER_OFFSET {
+                if abs(entering_chunk_pos.y) + 1 >= CENTER_OFFSET {
+                    // {-1, -1} when moving on axis in negative direction, {1, 1} otherwise
+                    direction: ChunkPos = math.sign(entering_chunk_pos.y - player_chunk_pos.y)
                     log.warn("sending chunk ahead of z axis")
-                    _player_send_chunk(session, {new_chunk_pos.x, new_chunk_pos.y + 1}, .Stone)
+                    _player_send_chunk(session, entering_chunk_pos + {0, 1} * direction, .Stone)
                     
-                    _player_send_chunk(session, {new_chunk_pos.x - 1, new_chunk_pos.y + 1}, .Air)
-                    _player_send_chunk(session, {new_chunk_pos.x - 1, new_chunk_pos.y + 2}, .Air)
-                    _player_send_chunk(session, {new_chunk_pos.x,     new_chunk_pos.y + 2}, .Air)
-                    _player_send_chunk(session, {new_chunk_pos.x + 1, new_chunk_pos.y + 2}, .Air)
-                    _player_send_chunk(session, {new_chunk_pos.x + 1, new_chunk_pos.y + 1}, .Air)
+                    _player_send_chunk(session, entering_chunk_pos + {-1, 1} * direction, .Air)
+                    _player_send_chunk(session, entering_chunk_pos + {-1, 2} * direction, .Air)
+                    _player_send_chunk(session, entering_chunk_pos + {0, 2} * direction, .Air)
+                    _player_send_chunk(session, entering_chunk_pos + {1, 2} * direction, .Air)
+                    _player_send_chunk(session, entering_chunk_pos + {1, 1} * direction, .Air)
                 }
             }
 
@@ -319,9 +321,6 @@ _player_send_initial_chunks :: proc(session: ^SessionData, view_distance: int) {
         block_id := i < 8 ? BlockId.GoldBlock : .Air
         section = create_chunk_section(block_id)
     }
-
-    // zero initialized represents air
-    air_sections := make([]ChunkSection, OVERWORLD_HEIGHT / CHUNK_SECTION_HEIGHT, session.packet_scratch_alloc)
     
     count := 0
     for x in -center_offset..=center_offset {
@@ -329,17 +328,13 @@ _player_send_initial_chunks :: proc(session: ^SessionData, view_distance: int) {
             chunk_pos := ChunkPos { i32(x), i32(z) }
             sections := sections
             if abs(x) > 2 || abs(z) > 2 {
-                sections = air_sections
+                _player_send_chunk(session, chunk_pos, .Air)
+                continue
             } else if x == 0 && z == 0 {
                 sections = gold_sections
             }
-            enqueue_packet(session, ChunkDataPacket {
-                chunk_pos = chunk_pos,
-                height_maps = nil,
-                sections = sections,
-                light = {},
-            })
-
+            _player_send_chunk_data(session, chunk_pos, sections)
+            
             count += 1
         }
     }
@@ -347,12 +342,36 @@ _player_send_initial_chunks :: proc(session: ^SessionData, view_distance: int) {
 }
 
 @(private="file")
-_player_send_chunk :: proc(session: ^SessionData, pos: ChunkPos, block: BlockId) {
+_player_send_chunk :: proc(session: ^SessionData, pos: ChunkPos, block_id: BlockId) {
+    // only permit sending new chunks, or replacing existing air chunks
+    _, existing_block_id, inserted, _ := map_entry(&get_server().loaded_chunks, pos)
+    if !inserted && existing_block_id^ != .Air do return
+
+    existing_block_id^ = block_id
+    
     sections := make([]ChunkSection, OVERWORLD_HEIGHT / CHUNK_SECTION_HEIGHT, session.packet_scratch_alloc)
     for &section, i in sections {
-        section = create_chunk_section(i < 8 ? block : .Air)
+        section = create_chunk_section(i < 8 ? block_id : .Air)
     }
     
+    enqueue_packet(session, ChunkDataPacket {
+        chunk_pos = pos,
+        height_maps = nil,
+        sections = sections,
+        light = {},
+    })
+}
+
+@(private="file")
+_player_send_chunk_data :: proc(session: ^SessionData, pos: ChunkPos, sections: []ChunkSection) {
+    assert(len(sections) == OVERWORLD_HEIGHT / CHUNK_SECTION_HEIGHT)
+    
+    // only permit sending new chunks, or replacing existing air chunks
+    _, existing_block_id, inserted, _ := map_entry(&get_server().loaded_chunks, pos)
+    if !inserted && existing_block_id^ != .Air do return
+
+    existing_block_id^ = .Grass // just something
+
     enqueue_packet(session, ChunkDataPacket {
         chunk_pos = pos,
         height_maps = nil,

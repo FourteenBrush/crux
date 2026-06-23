@@ -123,7 +123,7 @@ _network_worker_thread_proc :: proc(shared: ^NetworkWorkerSharedData) {
     }
 
     defer cleanup: {
-        log.debug("shutting down worker")
+        log.debug("shutting down worker...")
         _network_worker_atexit(&state)
         // destroy temp alloc when this refers to the default one (thread_local)
         if context.temp_allocator.data == &runtime.global_default_temp_allocator_data {
@@ -248,31 +248,34 @@ _network_worker_atexit :: proc(state: ^NetworkWorkerState) {
         _kick_client(state, &client_conn, shutdown_msg)
     }
     
-    _drain_pending_writes(state)
+    LINGER_TIME: time.Duration : 15 * time.Second
+    _network_worker_linger_shutdown(state, timeout=LINGER_TIME)
     for _, &client_conn in state.connections {
         _finalize_client(state, &client_conn, force=true)
     }
     delete(state.connections)
 }
 
+// Awaits pending write completions, to ensure outgoing data has been successfully flushed.
 @(private="file")
-_drain_pending_writes :: proc(state: ^NetworkWorkerState) {
+_network_worker_linger_shutdown :: proc(state: ^NetworkWorkerState, timeout: time.Duration) {
     // ensure no new work is being accepted
     reactor.close_accept_loop(state.io_ctx)
     for socket, _ in state.connections {
         reactor.disable_read_interest(state.io_ctx, socket)
     }
 
-    LINGER_TIME :: 15 * time.Second
     start := time.tick_now()
     for {
         // NOTE: safe to call as we just supressed accepting new connections and reads
-        _network_worker_await_completions(state, timeout_ms=20, process_reads=false)
+        _network_worker_await_completions(state, timeout_ms=200, process_reads=false)
 
-        // TODO: should we wait for read completions?
         if state.outstanding_writes == 0 do break
-        hit_deadline := time.tick_since(start) > LINGER_TIME
-        if hit_deadline do break
+        hit_deadline := time.tick_since(start) > timeout
+        if hit_deadline {
+            log.debugf("shutdown lingering hit deadline(%v) with %d outstanding writes", timeout, state.outstanding_writes)
+            break
+        }
     }
 }
 
@@ -309,7 +312,6 @@ _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^Cli
             case LoginAcknowledgedPacket: client_conn.state = .Configuration
             case AcknowledgeFinishConfigurationPacket: client_conn.state = .Play
             }
-            
         }
     }
 }

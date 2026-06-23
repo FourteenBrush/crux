@@ -47,6 +47,11 @@ Server :: struct {
     
     // World data essentially, TODO: move this out to some world abstraction once this is established
     sessions: map[net.TCP_Socket]SessionData,
+    loaded_chunks: map[ChunkPos]BlockId,
+}
+
+get_server :: #force_inline proc "contextless" () -> ^Server {
+    return &server
 }
 
 run :: proc(endpoint: net.Endpoint, server_sock: net.TCP_Socket) -> bool {
@@ -65,6 +70,9 @@ run :: proc(endpoint: net.Endpoint, server_sock: net.TCP_Socket) -> bool {
     
     server.sessions = make(map[net.TCP_Socket]SessionData, 16, os.heap_allocator())
     defer delete(server.sessions)
+
+    server.loaded_chunks = make(map[ChunkPos]BlockId, 64, os.heap_allocator())
+    defer delete(server.loaded_chunks)
 
     net_worker_state := NetworkWorkerSharedData {
        io_ctx = &io_ctx,
@@ -97,7 +105,15 @@ run :: proc(endpoint: net.Endpoint, server_sock: net.TCP_Socket) -> bool {
     }
 
     log.info("shutting down server...")
-    // wakeup io thread from possible infinite sleep
+    // send shutting down disconnect packet to all clients
+    server_closing := text_component("Server is shutting down", .Red)
+    for _, &session in server.sessions {
+        _kick_client(&server, &session, server_closing)
+        spsc_enqueue(server.outbound_queue, TerminateClientRequest { client=session.socket })
+    }
+    
+    // wakeup io thread from possible infinite sleep to process eventual incoming messages.
+    // it will eventually observe its execution permit has expired and will naturally exit
     reactor.wakeup(&io_ctx)
     thread.join(net_worker_thread)
     thread.destroy(net_worker_thread)
