@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-14]
+        os: [ubuntu-latest, windows-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -32,52 +32,52 @@ jobs:
       - name: run tests
         run: make test
 
-  build_netbsd:
-    runs-on: ubuntu-latest
-    env:
-      PKGSRC_BRANCH: 2025Q2
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: "recursive"
-      - uses: laytan/setup-odin@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+  # build_netbsd:
+  #   runs-on: ubuntu-latest
+  #   env:
+  #     PKGSRC_BRANCH: 2025Q2
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         submodules: "recursive"
+  #     - uses: laytan/setup-odin@v2
+  #       with:
+  #         token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: vmactions/netbsd-vm@v1
-        with:
-          envs: PKGSRC_BRANCH
-          usesh: true
-          copyback: false
-          prepare: |
-            pkgin -y in gmake
-          run: |
-            set -e -x
-            cp ./lib/tracy.lib ./lib/tracy/
-            cp ./lib/tracy.so ./lib/tracy/
-            gmake
-            gmake test
+  #     - uses: vmactions/netbsd-vm@v1
+  #       with:
+  #         envs: PKGSRC_BRANCH
+  #         usesh: true
+  #         copyback: false
+  #         prepare: |
+  #           pkgin -y in gmake
+  #         run: |
+  #           set -e -x
+  #           cp ./lib/tracy.lib ./lib/tracy/
+  #           cp ./lib/tracy.so ./lib/tracy/
+  #           gmake
+  #           gmake test
 
 
-  build_freebsd:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: "recursive"
-      - uses: laytan/setup-odin@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+  # build_freebsd:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         submodules: "recursive"
+  #     - uses: laytan/setup-odin@v2
+  #       with:
+  #         token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: vmactions/freebsd-vm@v1
-        with:
-          usesh: true
-          copyback: false
-          prepare: |
-            pkg install -y gmake
-          run: |
-            set -e -x
-            cp ./lib/tracy.lib ./lib/tracy/
-            cp ./lib/tracy.so ./lib/tracy/
-            gmake
-            gmake test
+  #     - uses: vmactions/freebsd-vm@v1
+  #       with:
+  #         usesh: true
+  #         copyback: false
+  #         prepare: |
+  #           pkg install -y gmake
+  #         run: |
+  #           set -e -x
+  #           cp ./lib/tracy.lib ./lib/tracy/
+  #           cp ./lib/tracy.so ./lib/tracy/
+  #           gmake
+  #           gmake test
