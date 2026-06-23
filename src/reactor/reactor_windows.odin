@@ -123,7 +123,7 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 	    return
 	}
 	
-	ctx.accept_buf = new([ACCEPTEX_OUTPUT_BUFFER_LENGTH]u8, allocator)
+	ctx.accept_buf = new([ACCEPTEX_OUTPUT_BUFFER_LENGTH]u8, ctx.allocator)
 	_install_accept_handler(&ctx) or_return
 
 	return ctx, true
@@ -131,7 +131,10 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 
 @(private)
 _close_accept_loop :: proc(ctx: ^IOContext) {
-    unimplemented()
+	close_ok := win32.CancelIo(win32.HANDLE(ctx.server_sock))
+	if !close_ok {
+		_log_error(win32.GetLastError(), "failed to cancel outstanding accept handler")
+	}
 }
 
 @(private)
@@ -144,7 +147,7 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 
 	win32.CloseHandle(ctx.completion_port)
 	ctx.completion_port = win32.INVALID_HANDLE_VALUE
-	free(ctx.accept_buf)
+	free(ctx.accept_buf, ctx.allocator)
 	// as all overlapped IO operations on the server socket are cancelled, there should
 	// be no issues in still having it bound to this iocp
 	
@@ -268,6 +271,7 @@ _register_client :: proc(ctx: ^IOContext, conn: win32.SOCKET) -> bool {
 
 @(private)
 _disable_read_interest :: proc(ctx: ^IOContext, conn: net.TCP_Socket) -> bool {
+	// TODO: cancel WSARecv, so keep tracked of submitted OVERLAPPED or something
 	unimplemented()
 }
 
@@ -425,6 +429,8 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 				continue
 			case .Write:
 				comp.buf = op_data.write.buf
+			case .AcceptedConnection:
+				win32.closesocket(op_data.accepted_conn.socket)
 			}
 		}
 		discard := false
