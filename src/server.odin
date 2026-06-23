@@ -150,21 +150,22 @@ _main_thread_run_tick :: proc(io_ctx: ^reactor.IOContext) {
 @(private="file")
 _handle_bridge_message :: proc(server: ^Server, message: InboundMessage) {
     switch message in message {
+    // NOTE: the fact we got a termination request from the network worker indicates the client hung up itself, and has already been cleaned up
+    // TODO: properly document this
     case TerminateClientRequest:
-        session := (&server.sessions[message.client]) or_break
+	    log.error("got Terminate request; len(session) before", len(server.sessions))
+    	_, session := delete_key(&server.sessions, message.client)
+     	// check if zero initialized, which would mean we already terminated the client ourselves (due to sending a terminal packet
+      	// and immediately sending a TerminateClientRequest to the network worker)
+     	if session.socket == net.TCP_Socket(0) do break
+
+      	session.terminating = true
+     	_terminate_session(server, session)
         // TODO: do we just remove the session or set a terminating flag and do this later on?
 
         // TODO: actually remove connection from map, we still sent data allocated by this thread to the io thread
         // but this can be fixed by using a global epoch based allocator, whereas the session now doesnt
         // store any interesting state that must be retained
-        session.terminating = true
-        scratch_alloc := cast(^mem.Scratch) session.packet_scratch_alloc.data
-        if len(scratch_alloc.leaked_allocations) > 0 {
-            log.warn("Leaked the following allocations into heap allocator:")
-            for entry in scratch_alloc.leaked_allocations {
-                log.warnf("- %M", len(entry))
-            }
-        }
     case PacketTransfer(ServerBoundPacket):
         _handle_serverbound_packet(server, message.packet, message.socket)
     }
@@ -218,7 +219,6 @@ _create_session :: proc(
     }
 }
 
-// TODO: never called
 @(private)
 _terminate_session :: proc(server: ^Server, session: SessionData) {
     assert(session.terminating)
@@ -256,7 +256,6 @@ enqueue_packet :: proc(session: ^SessionData, packet: ClientBoundPacket) {
     spsc_enqueue(server.outbound_queue, PacketTransfer(ClientBoundPacket) { socket=session.socket, packet=packet })
     session.terminating |= descriptor.is_terminal
     server.messages_emitted = true
-    // log.warn("MAIN THREAD: enqueued packet", packet)
 }
 
 @(private)
