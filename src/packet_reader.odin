@@ -150,7 +150,7 @@ read_serverbound :: proc(b: ^NetworkBuffer, client_state: ClientState, allocator
     case .ClientInformationPlay:
         return _read_client_information(b, allocator)
     case:
-        log.warnf("unhandled packet id: 0x%x", id)
+        log.warnf("unhandled packet id: 0x%x for client state", id, client_state)
         return p, .InvalidData
     }
 }
