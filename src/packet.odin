@@ -95,8 +95,9 @@ ClientBoundPacketId :: enum VarInt {
     
     // sent in Login state
     
-    LoginSuccess           = 0x02,
-    DisconnectLogin        = 0x00,
+    SetCompression          = 0x03,
+    LoginSuccess            = 0x02,
+    DisconnectLogin         = 0x00,
     
     // sent in Configuration state
 
@@ -124,6 +125,7 @@ ClientBoundPacket :: union #no_nil {
     StatusResponsePacket,
     PongResponsePacket,
     // sent in .Login state
+    SetCompressionPacket,
     LoginSuccessPacket,
     DisconnectLoginPacket,
     // sent in .Configuration satte
@@ -147,20 +149,21 @@ ClientBoundPacket :: union #no_nil {
 @(private)
 get_clientbound_packet_descriptor :: proc(packet: ClientBoundPacket) -> ClientBoundPacketDescriptor {
     tag: i64 = reflect.get_union_variant_raw_tag(packet)
-    #no_bounds_check return clientbound_packet_descriptors[tag]
+    offset :: cast(i64) intrinsics.type_has_nil(type_of(packet))
+    #no_bounds_check return clientbound_packet_descriptors[tag + offset]
 }
 
 @(private="file")
 VARIANT_IDX_OF :: intrinsics.type_variant_index_of
 
 // mapping of ClientBoundPacket raw union tags to packet ids
-// IMPORTANT NOTE: ClientBoundPacket must be #no_nil or we need a +1 on the variant idx
 @(rodata, private="file")
 clientbound_packet_descriptors := [intrinsics.type_union_variant_count(ClientBoundPacket)]ClientBoundPacketDescriptor {
     // sent in Status state
     VARIANT_IDX_OF(ClientBoundPacket, StatusResponsePacket)            = { .StatusResponse,            false },
     VARIANT_IDX_OF(ClientBoundPacket, PongResponsePacket)              = { .PongResponse,              true  },
     // sent in Login state
+    VARIANT_IDX_OF(ClientBoundPacket, SetCompressionPacket)            = { .SetCompression,            false },
     VARIANT_IDX_OF(ClientBoundPacket, LoginSuccessPacket)              = { .LoginSuccess,              false },
     VARIANT_IDX_OF(ClientBoundPacket, DisconnectLoginPacket)           = { .DisconnectLogin,           true  },
     // sent in Configuration state
@@ -184,15 +187,13 @@ clientbound_packet_descriptors := [intrinsics.type_union_variant_count(ClientBou
 @(private)
 get_serverbound_packet_descriptor :: proc(packet: ServerBoundPacket) -> ServerBoundPacketDescriptor {
     tag: i64 = reflect.get_union_variant_raw_tag(packet)
-    #no_bounds_check return serverbound_packet_descriptors[tag]
+    offset :: cast(i64) intrinsics.type_has_nil(type_of(packet))
+    #no_bounds_check return serverbound_packet_descriptors[tag + offset]
 }
 
-// IMPORTANT NOTE: ServerBoundPacket must be #no_nil or we need a +1 on the variant idx
 @(rodata, private="file")
 serverbound_packet_descriptors := [intrinsics.type_union_variant_count(ServerBoundPacket)]ServerBoundPacketDescriptor {
-    // TODO: is this packet allowed in multiple states?
-    // TODO: make expected_client_state Maybe(ClientState) (this can be a constant since around 19/09 as Maybe has only one variant); wait for release dev-10
-    VARIANT_IDX_OF(ServerBoundPacket, LegacyServerListPingPacket)           = { { .Handshake } },
+    VARIANT_IDX_OF(ServerBoundPacket, LegacyServerListPingPacket)           = { { .Handshake, .Status } },
     VARIANT_IDX_OF(ServerBoundPacket, HandshakePacket)                      = { { .Handshake } },
     VARIANT_IDX_OF(ServerBoundPacket, StatusRequestPacket)                  = { { .Status } },
     VARIANT_IDX_OF(ServerBoundPacket, PingRequestPacket)                    = { { .Status } },
@@ -454,6 +455,11 @@ PongResponsePacket :: struct {
 // ---------------------------------------- 
 // Clientbound Login state related packets
 // ---------------------------------------- 
+
+SetCompressionPacket :: struct {
+    // Negative values or simply not sending this packet at all will disable compression.
+    threshold: VarInt,
+}
 
 LoginSuccessPacket :: struct {
     game_profile: GameProfile,
@@ -871,10 +877,10 @@ SetCenterChunkPacket :: struct {
 
 ChunkDataPacket :: struct {
     chunk_pos: ChunkPos,
-    height_maps: []HeightMap,
+    height_maps: []HeightMap `fmt:"-"`,
     sections: []ChunkSection `fmt:"-"`,
     // TODO: block entities
-    light: LightData,
+    light: LightData `fmt:"-"`,
 }
 
 PlayerCommandPacket :: struct {
