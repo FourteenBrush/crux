@@ -117,7 +117,7 @@ buf_ensure_readable :: proc(buf: NetworkBuffer, #any_int n: int) -> ReadError {
     return ReadError(len(buf.data) < n)
 }
 
-// Advances `n` bytes
+// Advances `n` bytes from the start of this buffer and decrements the length.
 buf_advance_pos_unchecked :: proc(buf: ^NetworkBuffer, n: int) {
     (cast(^mem.Raw_Dynamic_Array)&buf.data).len -= n
     buf.r_offset = (buf.r_offset + n) % cap(buf.data)

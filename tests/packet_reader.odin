@@ -20,6 +20,21 @@ ensure_readable :: proc(t: ^testing.T) {
 }
 
 @(test)
+advance_pos :: proc(t: ^testing.T) {
+    using crux
+    buf := scoped_create_network_buf()
+    data := random_block(20)
+
+    buf_write_bytes(&buf, data[:])
+    testing.expect_value(t, buf_length(buf), 20)
+
+    buf_advance_pos_unchecked(&buf, 15)
+    testing.expect_value(t, buf_length(buf), 5)
+    testing.expect_value(t, buf_ensure_readable(buf, 5), ReadError.None)
+    testing.expect_value(t, buf_ensure_readable(buf, 6), ReadError.ShortRead)
+}
+
+@(test)
 length_and_offset_correctness :: proc(t: ^testing.T) {
     using crux
     buf := scoped_create_network_buf()
@@ -339,7 +354,8 @@ write_var_int_at_start_buffer :: proc(t: ^testing.T) {
     buf_write_bytes(&buf, data)
     expect_buf_state(t, buf, length=len(data), r_offset=0, raw_data=data)
     
-    buf_write_var_int_at(&buf, wmark, VarInt(13159 /*0xe7, 0x66*/))
+    werr := buf_write_var_int_at(&buf, wmark, VarInt(13159 /*0xe7, 0x66*/))
+    testing.expect_value(t, werr, WriteError.None)
     
     expect_buf_state(t, buf, length=len(data) + 2, raw_data=[]u8{ 0xe7, 0x66, 0x00, 0xe4, 0x53, 0x7b })
     buf_dump(buf)
