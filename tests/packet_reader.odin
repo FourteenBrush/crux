@@ -35,6 +35,20 @@ advance_pos :: proc(t: ^testing.T) {
 }
 
 @(test)
+reset :: proc(t: ^testing.T) {
+    using crux
+    buf := scoped_create_network_buf(cap=256)
+    data := random_block(15)
+
+    buf_write_bytes(&buf, data[:])
+    testing.expect_value(t, buf_length(buf), 15)
+
+    buf_reset(&buf)
+    expect_buf_state(t, buf, length=0, r_offset=0)
+    testing.expect_value(t, buf_ensure_readable(buf, 1), ReadError.ShortRead)
+}
+
+@(test)
 length_and_offset_correctness :: proc(t: ^testing.T) {
     using crux
     buf := scoped_create_network_buf()

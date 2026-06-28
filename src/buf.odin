@@ -123,6 +123,12 @@ buf_advance_pos_unchecked :: proc(buf: ^NetworkBuffer, n: int) {
     buf.r_offset = (buf.r_offset + n) % cap(buf.data)
 }
 
+// Sets the length and the reading offset of the passed buffer to zero.
+buf_reset :: proc(buf: ^NetworkBuffer) {
+    (cast(^mem.Raw_Dynamic_Array)&buf.data).len = 0
+    buf.r_offset = 0
+}
+
 @(require_results)
 buf_write_string :: proc(buf: ^NetworkBuffer, str: string) -> WriteError {
     if len(str) > MAX_STRING_LENGTH {
