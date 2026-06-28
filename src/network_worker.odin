@@ -338,7 +338,7 @@ _enqueue_packet :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnecti
     read_err := buf_copy_into(&client_conn.tx_buf, outb)
     assert(read_err == .None, "invariant, copied full length")
 
-    submission_ok := reactor.submit_write_copy(state.io_ctx, client_conn.socket, outb)
+    submission_ok := reactor.submit_write(state.io_ctx, client_conn.socket, data)
     if !submission_ok {
         delete(outb, client_conn.packet_scratch_alloc)
         log.debug("io submission not ok")

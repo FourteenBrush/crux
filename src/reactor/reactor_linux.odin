@@ -405,7 +405,7 @@ _release_recv_buf :: proc(ctx: ^IOContext, buf: []u8) {
 }
 
 @(private)
-_submit_write_copy :: proc(ctx: ^IOContext, conn: net.TCP_Socket, data: []u8) -> bool {
+_submit_write :: proc(ctx: ^IOContext, conn: net.TCP_Socket, data: []u8) -> bool {
     _, write_queue, zeroed_insert, _ := map_entry(&ctx.pending_writes, conn)
     if zeroed_insert {
         write_queue.iovecs.allocator = ctx.allocator

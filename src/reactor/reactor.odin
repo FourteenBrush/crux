@@ -140,12 +140,12 @@ release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
     _release_recv_buf(ctx, comp.buf)
 }
 
-// Submits a write operation, the passed buffer must be valid till a write completion (or error) has been received.
-// TODO: why dont we save the allocator the passed buffer was allocated with, so we can free it
-// ourselves instead of sending it back?
+// Submits a write operation, the passed buffer must be valid till a write completion (or error) has been received by polling this context.
 @(require_results)
-submit_write_copy :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) -> bool {
-    return _submit_write_copy(ctx, client, data)
+submit_write :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) -> bool {
+    // TODO: why dont we save the allocator the passed buffer was allocated with, so we can free it
+    // ourselves instead of sending it back?
+    return _submit_write(ctx, client, data)
 }
 
 // Causes a blocking `await_io_completions` call to wake up immediately.
