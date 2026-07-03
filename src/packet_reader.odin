@@ -1,3 +1,4 @@
+#+vet explicit-allocators
 package crux
 
 import "core:log"
@@ -54,13 +55,16 @@ _deserialize_serverbound :: proc(
     
     compressed_id_and_payload := make([]u8, compressed_data_len, context.temp_allocator)
     assert(buf_read_bytes(buf, compressed_id_and_payload) == .None, "unexpected short read")
-    id_and_payload, decompress_ok := _decompress_data(
+    id_and_payload, decompression_err := _decompress_data(
         compressed_id_and_payload,
         expected_output_size=int(uncompressed_data_len),
         buf_allocator=context.temp_allocator,
     )
+    if decompression_err != nil {
+        log.debug("decompression error:", decompression_err)
+        return packet, .InvalidData
+    }
 
-    assert(decompress_ok, "TODO: handle decompression failures")
     if len(id_and_payload) != int(uncompressed_data_len) {
         // uncompressed data len does not match uncompressed data len stored in packet
         return packet, .InvalidData
@@ -71,12 +75,12 @@ _deserialize_serverbound :: proc(
 }
 
 @(private="file")
-_decompress_data :: proc(data: []u8, expected_output_size: int, buf_allocator: mem.Allocator) -> (decompressed: []u8, ok: bool) {
+_decompress_data :: proc(data: []u8, expected_output_size: int, buf_allocator: mem.Allocator) -> (decompressed: []u8, err: zlib.Error) {
     // a reserve() is performed on this buffer based on the expected_output_size
     out: bytes.Buffer
     context.allocator = buf_allocator
-    err := zlib.inflate_from_byte_array(data, &out, expected_output_size=expected_output_size)
-    return out.buf[:], err == nil
+    err = zlib.inflate_from_byte_array(data, &out, expected_output_size=expected_output_size)
+    return out.buf[:], err
 }
 
 // Attempts to parse a serverbound packet from a buffer containing the length, packet id and payload

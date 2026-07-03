@@ -1,8 +1,8 @@
 // Worker thread responsable for network related things like performing
 // IO on client sockets, (de)serialization and transmission of packets.
+#+vet explicit-allocators
 package crux
 
-import "src:epoch"
 import "core:os"
 import "core:time"
 import "core:log"
@@ -13,6 +13,7 @@ import "base:runtime"
 import "core:container/queue"
 import sa "core:container/small_array"
 
+import "src:epoch"
 import "src:reactor"
 
 import "lib:tracy"
