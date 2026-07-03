@@ -53,8 +53,7 @@ NetworkBuffer :: struct {
     r_offset: int,
 }
 
-// TODO: remove cap default value
-create_network_buf :: proc(cap := 512, allocator: mem.Allocator) -> (buf: NetworkBuffer) {
+create_network_buf :: proc(cap: int, allocator: mem.Allocator) -> (buf: NetworkBuffer) {
     assert(cap > 0)
     buf.data = make([dynamic]u8, 0, cap, allocator)
     return

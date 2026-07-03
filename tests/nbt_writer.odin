@@ -48,5 +48,5 @@ write_named_scalar_at_root_should_fail :: proc(t: ^testing.T) {
 
 @(private="file")
 _new_buf :: proc() -> crux.NetworkBuffer {
-    return crux.create_network_buf(allocator=context.temp_allocator)
+    return crux.create_network_buf(cap=512, allocator=context.temp_allocator)
 }
