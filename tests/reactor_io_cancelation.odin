@@ -6,15 +6,6 @@ import "core:time"
 import "core:testing"
 import win32 "core:sys/windows"
 
-foreign import kernel32 "system:Kernel32.lib"
-
-// TODO: change to win32 type after odin release dev-10
-@(default_calling_convention="system", private="file")
-foreign kernel32 {
-    CancelIoEx :: proc(hFile: win32.HANDLE, lpOverlapped: win32.LPOVERLAPPED) -> win32.BOOL ---
-    RtlNtStatusToDosError :: proc(status: win32.NTSTATUS) -> win32.ULONG ---
-}
-
 // Ensure an CancelIoEx call on an initiated WSARecv collects
 // an aborted completion through GetQueuedCompletionStatusEx
 @(test)
@@ -58,7 +49,7 @@ cancelation_emits_abort_completion :: proc(t: ^testing.T) {
     if !testing.expect(t, n == 0 && poll_ok, "no completions were expected") do return
 
     // cancel outstanding io operations and expect a completion packet indicating exactly that
-    cancel_result := CancelIoEx(win32.HANDLE(uintptr(client_sock)), /* cancel everything from client */nil)
+    cancel_result := win32.CancelIoEx(win32.HANDLE(uintptr(client_sock)), /* cancel everything from client */nil)
     if !testing.expect(
         t,
         cancel_result == win32.TRUE || win32.GetLastError() != win32.DWORD(win32.System_Error.NOT_FOUND),
@@ -71,7 +62,7 @@ cancelation_emits_abort_completion :: proc(t: ^testing.T) {
     n, poll_ok = poll_iocp(t, iocp, &entries)
     if !testing.expect(t, n == 1 && poll_ok, "expected an aborted completion") do return
 
-    entry_status := RtlNtStatusToDosError(win32.NTSTATUS(entries[0].Internal))
+    entry_status := win32.RtlNtStatusToDosError(win32.NTSTATUS(entries[0].Internal))
     if !testing.expect_value(t, win32.System_Error(entry_status), win32.System_Error.OPERATION_ABORTED) do return
 }
 
