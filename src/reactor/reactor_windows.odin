@@ -525,12 +525,12 @@ _release_recv_buf :: proc(ctx: ^IOContext, buf: []u8) {
     delete(buf, ctx.allocator)
 }
 
-// TODO: don't actually flush on every call
+// TODO: implement write queue with support for vectorized writes
 @(private)
-_submit_write :: proc(ctx: ^IOContext, conn: net.TCP_Socket, data: []u8) -> bool {
+_submit_write_vectored :: proc(ctx: ^IOContext, conn: net.TCP_Socket, bufs: [][]u8) -> bool {
     tracy.Zone()
 
-    return _initiate_send(ctx, win32.SOCKET(conn), data)
+    return _initiate_send(ctx, win32.SOCKET(conn), bufs)
 }
 
 @(private)

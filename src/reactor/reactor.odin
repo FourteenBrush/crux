@@ -140,12 +140,16 @@ release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
     _release_recv_buf(ctx, comp.buf)
 }
 
-// Submits a write operation, the passed buffer must be valid till a write completion (or error) has been received by polling this context.
+// Submits a write operation consisting of multiple buffers, the execution of this operation may be deferred till it is possible to do so.
+// The passed top level buffer must only outlive this procedure call, the inner buffers must stay valid till a write completion (or error)
+// has been received by polling this context.
+// Every inner buffer will produce a `.Write` completion (or an error with a buffer attached).
 @(require_results)
-submit_write :: proc(ctx: ^IOContext, client: net.TCP_Socket, data: []u8) -> bool {
+submit_write_vectored :: proc(ctx: ^IOContext, client: net.TCP_Socket, bufs: [][]u8) -> bool {
+    assert(len(bufs) > 0, "zero length buffers passed")
     // TODO: why dont we save the allocator the passed buffer was allocated with, so we can free it
     // ourselves instead of sending it back?
-    return _submit_write(ctx, client, data)
+    return _submit_write_vectored(ctx, client, bufs)
 }
 
 // Causes a blocking `await_io_completions` call to wake up immediately.

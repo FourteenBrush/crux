@@ -1,5 +1,6 @@
 package reactor
 
+import "base:intrinsics"
 import "core:sys/posix"
 @(require) import "core:log"
 @(require) import "core:net"
@@ -405,7 +406,7 @@ _release_recv_buf :: proc(ctx: ^IOContext, buf: []u8) {
 }
 
 @(private)
-_submit_write :: proc(ctx: ^IOContext, conn: net.TCP_Socket, data: []u8) -> bool {
+_submit_write_vectored :: proc(ctx: ^IOContext, conn: net.TCP_Socket, bufs: [][]u8) -> bool {
     _, write_queue, zeroed_insert, _ := map_entry(&ctx.pending_writes, conn)
     if zeroed_insert {
         write_queue.iovecs.allocator = ctx.allocator
@@ -415,7 +416,9 @@ _submit_write :: proc(ctx: ^IOContext, conn: net.TCP_Socket, data: []u8) -> bool
         _arm_epollout(ctx, write_queue, conn, .Arm) or_return
     }
     
-    append(&write_queue.iovecs, linux.IO_Vec { raw_data(data), len(data) })
+    #assert(size_of(linux.IO_Vec) == size_of([]u8) && intrinsics.type_field_index_of(linux.IO_Vec, "base") == 0)
+    vecs := transmute([]linux.IO_Vec) bufs
+    append(&write_queue.iovecs, ..vecs)
     return true
 }
 
