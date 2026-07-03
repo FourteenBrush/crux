@@ -22,6 +22,7 @@ GAME_VERSION_STR :: "1.21.10"
 
 // TODO: consider proper packet handling rate while also using a normal minecraft tick model
 TARGET_TPS :: 20 * 10
+COMPRESSION_THRESHOLD :: 1 * mem.Kilobyte
 
 VIEW_DISTANCE :: 8
 
@@ -169,7 +170,6 @@ _handle_bridge_message :: proc(server: ^Server, message: InboundMessage) {
     // NOTE: the fact we got a termination request from the network worker indicates the client hung up itself, and has already been cleaned up
     // TODO: properly document this
     case TerminateClientRequest:
-	    log.error("got Terminate request; len(session) before", len(server.sessions))
     	_, session := delete_key(&server.sessions, message.client)
      	// check if zero initialized, which would mean we already terminated the client ourselves (due to sending a terminal packet
       	// and immediately sending a TerminateClientRequest to the network worker)
@@ -177,7 +177,6 @@ _handle_bridge_message :: proc(server: ^Server, message: InboundMessage) {
 
       	session.terminating = true
      	_terminate_session(server, session)
-        // TODO: do we just remove the session or set a terminating flag and do this later on?
 
         // TODO: actually remove connection from map, we still sent data allocated by this thread to the io thread
         // but this can be fixed by using a global epoch based allocator, whereas the session now doesnt

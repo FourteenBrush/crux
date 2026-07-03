@@ -2,6 +2,7 @@
 // IO on client sockets, (de)serialization and transmission of packets.
 package crux
 
+import "src:epoch"
 import "core:os"
 import "core:time"
 import "core:log"
@@ -10,11 +11,13 @@ import "core:net"
 import "core:sync"
 import "base:runtime"
 import "core:container/queue"
+import sa "core:container/small_array"
 
 import "src:reactor"
 
 import "lib:tracy"
 
+// TODO: document properly, we are in theory blocking indefinitely but this ensures we do not wakeup hundreds of times in a short timespan
 @(private="file")
 WORKER_TARGET_MSPT :: 5
 
@@ -25,9 +28,6 @@ PACKET_SCRATCH_BUFFER_SIZE :: 256 * 1024
 
 NetworkWorkerSharedData :: struct {
     io_ctx: ^reactor.IOContext,
-    // A shutdown will keep lingering till this number reaches zero, to ensure a proper packet flush.
-    // Decremented on write completions.
-    outstanding_writes: int,
     // Non-blocking server socket.
     server_sock: net.TCP_Socket,
     // Ptr to atomic bool, indicating whether to continue running, modified upstream.
@@ -42,6 +42,10 @@ NetworkWorkerSharedData :: struct {
 NetworkWorkerState :: struct {
     using shared: NetworkWorkerSharedData,
     connections: map[net.TCP_Socket]ClientConnection,
+    
+    // A shutdown will keep lingering till this number reaches zero, to ensure a proper packet flush.
+    // Decremented on write completions.
+    outstanding_writes: int,
 }
 
 @(private)
@@ -58,10 +62,10 @@ TerminateClientRequest :: struct {
 @(private)
 PacketTransfer :: struct($P: typeid) {
     socket: net.TCP_Socket,
-    // FIXME: store epoch for recycling
-    packet: P,
-    // The state that the client that sent this packet, is currently in.
+    // The protocol state of the client that has sent this packet.
     client_state: ClientState,
+    epoch: epoch.Epoch,
+    packet: P,
 }
 
 // TODO: make this a wait-free ringbuffer instead of whatever nonsense this is
@@ -94,23 +98,27 @@ ClientConnection :: struct {
     // Protocol state of this client, used for determining whether a packet is sent in the right state.
     state: ClientState,
     // Whether a packet with an `is_terminal = true` flag has been sent or an explicit termination
-    // request was issued, this indicates that this connection will be closed shortly
-    // and any consecutive `enqueue_packet` calls will silently ignore that packet.
+    // request was issued. This indicates that this connection will be closed after `outstanding_writes` reaches zero,
+    // any consecutive `enqueue_packet` calls will silently ignore that packet.
     terminating: bool,
     // Number of outstanding write operations, which has not yet received a completion.
     // This acts as a refcount to the allocator data being stored here, to ensure all writes are properly deallocated.
     // While it is not an issue to just clear the whole allocator at once (effectively getting rid of the writes
     // needing to be deallocated problem), it remains important that we do not close this connection till all
     // writes are flushed (as there may be a terminal packet at the end of the tx buf, which definitely needs to be transferred).
-    // When this number reaches zero, and `terminating` is true, this connection will be fully closed and cleaned up.
+    // When this number reaches zero, and `terminating` is true, this connection will be closed and cleaned up.
     outstanding_writes: u32,
+
+    // Packet compression threshold, negative values disable compression (uncompressed packet format still being used).
+    // Specified as Maybe so that zero initialization uses no compression by default.
+    compression_threshold: Maybe(i32),
     
     // Allocator to deal with all packet related allocations, overwriting itself
     // if there is too much backpressure.
     packet_scratch_alloc: mem.Allocator,
 
     rx_buf: NetworkBuffer,
-    // FIXME: may in fact be a linear buffer as it is always sent at once
+    // FIXME: may in fact be a linear buffer as it is always sent at once, also avoids buf_copy_into calls
     tx_buf: NetworkBuffer,
 }
 
@@ -167,7 +175,6 @@ _network_worker_run_tick :: proc(state: ^NetworkWorkerState) {
         }
     }
     
-    // TODO: get rid of this WORKER_TARGET_MSPT, we are permanently blocking unless woken up
     REACTOR_TIMEOUT_MS :: 1
     #assert(REACTOR_TIMEOUT_MS < WORKER_TARGET_MSPT)
     
@@ -276,6 +283,7 @@ _network_worker_linger_shutdown :: proc(state: ^NetworkWorkerState, timeout: tim
             log.debugf("shutdown lingering hit deadline(%v) with %d outstanding writes", timeout, state.outstanding_writes)
             break
         }
+        log.debug("lingering shutdown")
     }
 }
 
@@ -284,7 +292,7 @@ _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^Cli
     tracy.Zone()
 
     loop: for {
-        packet, err := read_serverbound(&client_conn.rx_buf, client_conn.state, allocator=client_conn.packet_scratch_alloc)
+        packet, err := _deserialize_serverbound(&client_conn.rx_buf, client_conn.state, client_conn.compression_threshold, allocator=client_conn.packet_scratch_alloc)
         switch err {
         case .ShortRead: break loop
         case .InvalidData:
@@ -295,7 +303,7 @@ _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^Cli
         case .None:
             packet_desc := get_serverbound_packet_descriptor(packet)
             if client_conn.state not_in packet_desc.expected_client_states {
-                log.debugf("client sent packet in wrong client state (%v != %v): %v", client_conn.state, packet_desc.expected_client_states, packet)
+                log.debugf("client sent packet in wrong client state (%v not in %v): %v", client_conn.state, packet_desc.expected_client_states, packet)
                 client_conn.terminating = true
                 break loop
             }
@@ -306,7 +314,7 @@ _drain_serverbound_packets :: proc(state: ^NetworkWorkerState, client_conn: ^Cli
                 client_state=client_conn.state,
             })
 
-            // tap into inbound packets to keep our client state in sync with the main thread
+            // tap into inbound packet to keep our client state in sync with the main thread
             #partial switch packet in packet {
             case HandshakePacket: client_conn.state = ClientState(packet.intent) // safe to cast
             case LoginAcknowledgedPacket: client_conn.state = .Configuration
@@ -326,28 +334,27 @@ _enqueue_packet :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnecti
 
     descriptor := get_clientbound_packet_descriptor(packet)
     log.log(LOG_LEVEL_OUTBOUND, "Sending packet", packet)
-    _serialize_clientbound(&client_conn.tx_buf, packet, descriptor)
-    
-    // freed after receiving write completion
-    outb, alloc_err := mem.alloc_bytes_non_zeroed(buf_length(client_conn.tx_buf), align_of(u8), client_conn.packet_scratch_alloc)
-    if alloc_err != nil {
-        log.debug("failed to allocate write submission buffer:", alloc_err)
-        return false
+
+    // must run after the SetCompressionPacket has been sent
+    defer if compression, ok := packet.(SetCompressionPacket); ok {
+        client_conn.compression_threshold = i32(compression.threshold)
     }
+    
+    bufs := _serialize_clientbound(packet, descriptor, client_conn.compression_threshold, &client_conn.tx_buf, client_conn.packet_scratch_alloc) or_return
+    assert(sa.len(bufs) >= 2, "expected at least length header and (id, payload) combination")
 
-    read_err := buf_copy_into(&client_conn.tx_buf, outb)
-    assert(read_err == .None, "invariant, copied full length")
-
-    submission_ok := reactor.submit_write(state.io_ctx, client_conn.socket, data)
+    submission_ok := reactor.submit_write_vectored(state.io_ctx, client_conn.socket, sa.slice(&bufs))
     if !submission_ok {
-        delete(outb, client_conn.packet_scratch_alloc)
+        for buf in sa.slice(&bufs) do delete(buf, client_conn.packet_scratch_alloc)
         log.debug("io submission not ok")
         return false
     }
-    buf_advance_pos_unchecked(&client_conn.tx_buf, len(outb))
-    state.outstanding_writes += 1
+    // TODO: can we consider removing the tx_buf from ClientConnection, as we only use it for temporary serialization,
+    // after which it is submitted and reset, maybe just use a temporary allocation for every call
+    buf_reset(&client_conn.tx_buf)
     
-    client_conn.outstanding_writes += 1
+    state.outstanding_writes += sa.len(bufs)
+    client_conn.outstanding_writes += cast(u32) sa.len(bufs)
     client_conn.terminating |= descriptor.is_terminal
     return true
 }
@@ -386,7 +393,7 @@ _create_client_connection :: proc(socket: net.TCP_Socket) -> ClientConnection {
         // packet_scratch_alloc = mem.scratch_allocator(packet_scratch),
         packet_scratch_alloc = mem.mutex_allocator(packet_scratch),
         rx_buf = create_network_buf(160*mem.Megabyte, allocator=os.heap_allocator()),
-        tx_buf = create_network_buf(160*mem.Megabyte, allocator=os.heap_allocator()),
+        tx_buf = create_network_buf(16 * mem.Kilobyte, allocator=os.heap_allocator()),
     }
 }
 

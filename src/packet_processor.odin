@@ -47,9 +47,12 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
     
     switch packet in packet {
     case LegacyServerListPingPacket:
-        session.terminating = true
-        _terminate_session(server, session^)
-        return
+        // TODO: there is no session, how do we disconnect?
+        if session != nil {
+            session.terminating = true
+            _terminate_session(server, session^)
+            return
+        }
     case HandshakePacket:
         assert(packet.intent != .Transfer, "TODO: we do not initiate transfers")
         if packet.intent == .Status || packet.intent == .Login {
@@ -97,8 +100,8 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
             _kick_client(server, session, text_component(error_msg, .Red))
             return
         }
-        // FIXME: negotiate compression here
-
+        player_set_compression(session, COMPRESSION_THRESHOLD)
+        
         // TODO: fetch skin here and cache
         session.game_profile = GameProfile {
             uuid = packet.uuid,

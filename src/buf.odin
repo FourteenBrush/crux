@@ -19,6 +19,7 @@ Int :: distinct i32be
 Utf16String :: distinct []u8
 
 MAX_VAR_INT :: int(max(VarInt))
+VAR_INT_MAX_BYTES :: 5 // ceil(32 / 7)
 
 @(private="file")
 SEGMENT_BITS :: 0x7F
@@ -42,6 +43,7 @@ _init :: proc "contextless" () {
 // Not thread-safe.
 // NOTE: all reading procs act transactional when returning .ShortRead, thus
 // not modifying their inner state when not enough bytes are available.
+// An exception on this rule are types with an unknown size, such as varints and varlongs.
 // All other errors are considered fatal and will modify the state of the buffer.
 NetworkBuffer :: struct {
     // len(data) is used instead of storing an additional length field, this stores the amount
@@ -83,8 +85,7 @@ BufWriteMark :: distinct int
 buf_dump :: proc(buf: NetworkBuffer, limit: Maybe(int) = nil) #no_bounds_check {
     dumped_len := min(limit.?, buf_length(buf)) if limit != nil else buf_length(buf)
     linear_buf := make([]u8, dumped_len, context.temp_allocator)
-    buf := buf // copy is fine here
-    assert(buf_copy_into(&buf, linear_buf) == .None)
+    assert(buf_copy_into(buf, linear_buf) == .None)
     fmt.printfln("NetworkBuffer{{len=%d, r_offset=%d, linear_data=%2x (len=%d) %s (hex)}}",
         len(buf.data), buf.r_offset, linear_buf, len(buf.data),
         "(limited)" if limit != nil && limit.? != buf_length(buf) else "",
@@ -196,7 +197,8 @@ buf_write_var_int_at :: proc(buf: ^NetworkBuffer, mark: BufWriteMark, val: VarIn
         return .InvalidMark
     }
     
-    vbuf, vlen := _buf_prepare_var_int(val)
+    vbuf: [VAR_INT_MAX_BYTES]u8
+    vlen := buf_prepare_var_int(val, &vbuf)
     space := cap(buf.data) - len(buf.data)
     if space < vlen {
         _buf_grow(buf)
@@ -248,15 +250,16 @@ buf_write_var_int_at :: proc(buf: ^NetworkBuffer, mark: BufWriteMark, val: VarIn
     return .None
 }
 
-@(private)
-_buf_prepare_var_int :: proc(val: VarInt) -> (buf: [5]u8, n: int) {
+// Serializes a VarInt to the passed buffer, returns the amount of bytes written.
+@(require_results)
+buf_prepare_var_int :: proc(val: VarInt, dst: ^[VAR_INT_MAX_BYTES]u8) -> int {
     val := cast(u32le) val
-    for _, i in buf {
+    #no_bounds_check for _, i in dst {
         if val & ~u32le(SEGMENT_BITS) == 0 {
-            buf[i] = u8(val)
-            return buf, i + 1
+            dst[i] = u8(val)
+            return i + 1
         }
-        buf[i] = u8(val & SEGMENT_BITS | CONTINUE_BIT)
+        dst[i] = u8(val & SEGMENT_BITS | CONTINUE_BIT)
         val >>= 7
     }
     unreachable()
@@ -391,6 +394,7 @@ buf_read_long :: proc(buf: ^NetworkBuffer) -> (l: Long, err: ReadError) {
 }
 
 // Reads an enum value backed by a varint, and validates it contains an actual enum variant.
+// Does _not_ act transactional.
 @(require_results)
 buf_read_var_int_enum :: proc(buf: ^NetworkBuffer, $E: typeid) -> (e: E, err: ReadError)
 where
@@ -411,6 +415,7 @@ where
 }
 
 // See `buf_read_var_int_enum`.
+// Does _not_ act transactional.
 @(require_results)
 buf_unchecked_read_var_int_enum :: proc(buf: ^NetworkBuffer, $E: typeid) -> (e: E, err: ReadError)
 where
@@ -439,6 +444,26 @@ buf_read_int :: proc(buf: ^NetworkBuffer) -> (val: i32be, err: ReadError) {
     return
 }
 
+// Does _not_ act transactional.
+@(require_results)
+buf_unchecked_read_var_int_ex :: proc(buf: ^NetworkBuffer) -> (val: VarInt, nbytes: int, err: ReadError) {
+    pos: u16
+
+    for {
+        curr := buf_unchecked_read_byte(buf)
+
+        val |= VarInt(curr & SEGMENT_BITS) << pos
+        if curr & CONTINUE_BIT == 0 do break
+
+        pos += 7
+        if pos >= 32 {
+            return 0, nbytes, .InvalidData // too big
+        }
+    }
+    return val, int(pos / 7), .None
+}
+
+// Does _not_ act transactional.
 @(require_results)
 buf_unchecked_read_var_int :: proc(buf: ^NetworkBuffer) -> (val: VarInt, err: ReadError) {
     pos: u16
@@ -457,6 +482,7 @@ buf_unchecked_read_var_int :: proc(buf: ^NetworkBuffer) -> (val: VarInt, err: Re
     return val, .None
 }
 
+// Does _not_ act transactional.
 @(require_results)
 buf_read_var_int :: proc(buf: ^NetworkBuffer) -> (val: VarInt, err: ReadError) {
     len_mark := len(buf.data)
@@ -503,6 +529,7 @@ buf_peek_var_int :: proc(buf: ^NetworkBuffer) -> (val: VarInt, nbytes: int, err:
     return val, int(pos / 7), .None
 }
 
+// Does _not_ act transactional.
 @(require_results)
 buf_read_var_long :: proc(buf: ^NetworkBuffer) -> (val: VarLong, err: ReadError) {
     len_mark := len(buf.data)
@@ -532,7 +559,7 @@ buf_read_var_long :: proc(buf: ^NetworkBuffer) -> (val: VarLong, err: ReadError)
 // See ´buf_copy_into´, additionally, the internal state is updated to reflect the consumed bytes.
 @(require_results)
 buf_read_bytes :: proc(buf: ^NetworkBuffer, outb: []u8) -> ReadError #no_bounds_check {
-    buf_copy_into(buf, outb) or_return
+    buf_copy_into(buf^, outb) or_return
     n := len(outb)
     
     buf.r_offset = (buf.r_offset + n) % cap(buf.data)
@@ -543,9 +570,9 @@ buf_read_bytes :: proc(buf: ^NetworkBuffer, outb: []u8) -> ReadError #no_bounds_
 // Copies `len(outb)` bytes from this buffer into `outb` (starting from the read offset), `ReadError.ShortRead` is returned
 // when not enough bytes are available, the internal state is not updated, merely a copy is made.
 @(require_results)
-buf_copy_into :: proc(buf: ^NetworkBuffer, outb: []u8) -> ReadError #no_bounds_check {
+buf_copy_into :: proc(buf: NetworkBuffer, outb: []u8) -> ReadError #no_bounds_check {
     n := len(outb)
-    buf_ensure_readable(buf^, n) or_return
+    buf_ensure_readable(buf, n) or_return
 
     // bytes copyable from read offset to boundary (array end or length)
     n_nowrap := min(n, cap(buf.data) - buf.r_offset, len(buf.data))

@@ -63,3 +63,8 @@ player_teleport :: proc(session: ^SessionData, pos: Pos) {
     // TODO: pass id based on tick/pos combination
     session.pending_teleport = PendingTeleport { pos=pos }
 }
+
+player_set_compression :: proc(session: ^SessionData, threshold: i32) {
+    assert(session.state == .Login, "compression may only be configured in login state")
+    enqueue_packet(session, SetCompressionPacket { threshold=VarInt(threshold) })
+}

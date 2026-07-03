@@ -1,23 +1,129 @@
 package crux
 
-import "base:runtime"
+import "core:log"
+import "core:mem"
 import "core:encoding/json"
+import sa "core:container/small_array"
+
+import "base:runtime"
 import "base:intrinsics"
+
+import "vendor:zlib"
 
 @(private="file")
 LOG2 :: intrinsics.constant_log2
 
+// Serializes a packet into the passed buffers.
+// Returns:
+// - `bufs`: a list of buffers that will hold the serialized packet data (header, payload, etc).
+//           Multiple buffers are used instead of one contiguous one to ensure prepending packet headers (compression and length related)
+//           does not need to shift the entire data payload.
+// 
+// ### Outputted buffers layout: 
+//   - Data Length (uncompressed) or 0 if compressed
+//   - packet id & payload (may be compressed)  
+//   `if the compressed packet format is used, a Packet Length is prepended in front of these two`
 @(private)
-_serialize_clientbound :: proc(outb: ^NetworkBuffer, packet: ClientBoundPacket, descriptor: ClientBoundPacketDescriptor) -> WriteError {
-    initial_len := buf_length(outb^)
-    begin_payload_mark := buf_emit_write_mark(outb^)
-    defer {
-        // FIXME: can we instead of moving data, reserve space for a (unnecessarily long) encoded VarInt
-        payload_len := buf_length(outb^) - initial_len
-        err := buf_write_var_int_at(outb, begin_payload_mark, VarInt(payload_len))
-        assert(err == .None, "invariant, mark could not have become invalid")
+_serialize_clientbound :: proc(
+    packet: ClientBoundPacket,
+    packet_desc: ClientBoundPacketDescriptor,
+    compression_threshold: Maybe(i32),
+    tx_buf: ^NetworkBuffer,
+    allocator: mem.Allocator,
+) -> (
+    bufs: sa.Small_Array(3, []u8),
+    ok: bool,
+) {
+    assert(buf_length(tx_buf^) == 0, "tx buf is only used for temporary construction")
+    compression_threshold, uses_compressed_format := compression_threshold.?
+    
+    uncompressed_data_len, werr := _serialize_clientbound_uncompressed(tx_buf, packet, packet_desc)
+    if werr != .None do return bufs, false
+
+    data_len := uses_compressed_format && uncompressed_data_len < int(compression_threshold)  \
+        ? 0 \
+        : uncompressed_data_len
+
+    data_len_buf := _serialize_var_int(VarInt(data_len), allocator)
+    defer if !ok do delete(data_len_buf, allocator)
+
+    // freed after receiving write completion
+    id_and_payload, alloc_err := mem.alloc_bytes_non_zeroed(buf_length(tx_buf^), align_of(u8), allocator)
+    defer if !ok do delete(id_and_payload, allocator)
+    if alloc_err != nil {
+        log.debug("failed to allocate write submission buffer:", alloc_err)
+        return bufs, false
     }
 
+    // TODO: instead of copying tx buf (which is essentially linear, does not need to be a rb) into a new allocation,
+    // can we simply submit this tx buf to the io subsystem, and then swap tx_buf out (assuming alloc is fast path).
+    read_err := buf_copy_into(tx_buf^, id_and_payload)
+    assert(read_err == .None, "invariant, copied full length")
+
+    sa.append(&bufs, data_len_buf, id_and_payload)
+    
+    if !uses_compressed_format || compression_threshold < 0 {
+        return bufs, true
+    }
+    
+    // compression used below, if size >= threshold, replace id and payload with compressed variant, if not, replace Data Length with 0
+    // always prepend total packet length header
+    if uncompressed_data_len >= int(compression_threshold) {
+        compressed_id_and_payload := _compress_data(id_and_payload, allocator) or_return
+        
+        // replace uncompressed buffer with compressed one
+        // FIXME: some arena like allocators only support freeing last allocation
+        delete(id_and_payload, allocator)
+        id_and_payload = compressed_id_and_payload
+        sa.set(&bufs, 1, compressed_id_and_payload)
+    }
+
+    packet_length := len(data_len_buf) + len(id_and_payload)
+    packet_len_buf := _serialize_var_int(VarInt(packet_length), allocator)
+    defer if !ok do delete(packet_len_buf, allocator)
+    sa.push_front(&bufs, packet_len_buf)
+    
+    return bufs, true
+}
+
+@(private="file")
+_serialize_var_int :: proc(val: VarInt, allocator: mem.Allocator) -> []u8 {
+    buf := new([VAR_INT_MAX_BYTES]u8, allocator)
+    n := buf_prepare_var_int(val, buf)
+    return buf[:n]
+}
+
+@(private="file")
+_compress_data :: proc(data: []u8, allocator: mem.Allocator) -> (compressed: []u8, ok: bool) {
+    compression_upper_bound := zlib.compressBound(cast(u64) len(data))
+    compression_buf, cbuf_err := mem.alloc_bytes_non_zeroed(int(compression_upper_bound), align_of(u8), allocator)
+    defer if !ok do delete(compression_buf, allocator)
+    if cbuf_err != nil {
+        log.debug("failed to allocate compression buffer:", cbuf_err)
+        return nil, false
+    }
+
+    dst_len := cast(u64) len(compression_buf) // actual compressed length will be stored after compress call
+    cerr := zlib.compress(
+        raw_data(compression_buf),
+        &dst_len,
+        raw_data(data),
+        cast(u64) len(data),
+    )
+    if cerr != zlib.OK {
+        log.debug("compression error:", cerr)
+        return nil, false
+    }
+    // reduction_pct := f32( len(data) - int(dst_len) ) / f32(len(data)) * 100
+    // log.debugf("compression size: %d -> %d (%d%% reduction)", len(data), dst_len, int(reduction_pct))
+    return compression_buf, true
+}
+
+// Writes the packet id and payload to the given buffer, does not prepend a packet length, this is returned instead.
+@(private="file", require_results)
+_serialize_clientbound_uncompressed :: proc(outb: ^NetworkBuffer, packet: ClientBoundPacket, descriptor: ClientBoundPacketDescriptor) -> (packet_len: int, err: WriteError) {
+    initial_len := buf_length(outb^)
+    
     buf_write_var_int(outb, VarInt(descriptor.packet_id))
 
     switch packet in packet {
@@ -29,6 +135,8 @@ _serialize_clientbound :: proc(outb: ^NetworkBuffer, packet: ClientBoundPacket, 
         assert(werr == .None, "max string length exceeded") // TODO
     case PongResponsePacket:
         buf_write_long(outb, packet.payload)
+    case SetCompressionPacket:
+        buf_write_var_int(outb, packet.threshold)
     case LoginSuccessPacket:
         buf_write_uuid(outb, packet.game_profile.uuid)
         _ = buf_write_string(outb, packet.game_profile.username)
@@ -62,27 +170,27 @@ _serialize_clientbound :: proc(outb: ^NetworkBuffer, packet: ClientBoundPacket, 
     case RegistryDataPacket:
     switch reg in packet {
     case DimensionTypeRegistry:
-        return _serialize_registry(outb, reg, Identifier("minecraft:dimension_type"), _serialize_dimension_type_registry_entry)
+        _serialize_registry(outb, reg, Identifier("minecraft:dimension_type"), _serialize_dimension_type_registry_entry) or_return
     case CatVariantRegistry:
-        return _serialize_registry(outb, reg, Identifier("minecraft:cat_variant"), _serialize_cat_variant_registry_entry)
+        _serialize_registry(outb, reg, Identifier("minecraft:cat_variant"), _serialize_cat_variant_registry_entry) or_return
     case ChickenVariantRegistry:
-        return _serialize_registry(outb, reg, Identifier("minecraft:chicken_variant"), _serialize_chicken_variant_registry_entry)
+        _serialize_registry(outb, reg, Identifier("minecraft:chicken_variant"), _serialize_chicken_variant_registry_entry) or_return
     case CowVariantRegistry:
-        return _serialize_registry(outb, reg, Identifier("minecraft:cow_variant"), _serialize_cow_variant_registry_entry)
+        _serialize_registry(outb, reg, Identifier("minecraft:cow_variant"), _serialize_cow_variant_registry_entry) or_return
     case FrogVariantRegistry:
-        return _serialize_registry(outb, reg, Identifier("minecraft:frog_variant"), _serialize_mob_registry_entry)
+        _serialize_registry(outb, reg, Identifier("minecraft:frog_variant"), _serialize_mob_registry_entry) or_return
     case PigVariantRegistry:
-        return _serialize_registry(outb, reg, Identifier("minecraft:pig_variant"), _serialize_pig_variant_registry_entry)
+        _serialize_registry(outb, reg, Identifier("minecraft:pig_variant"), _serialize_pig_variant_registry_entry) or_return
     case WolfVariantRegistry:
-        return _serialize_registry(outb, reg, Identifier("minecraft:wolf_variant"), _serialize_wolf_variant_registry_entry)
+        _serialize_registry(outb, reg, Identifier("minecraft:wolf_variant"), _serialize_wolf_variant_registry_entry) or_return
     case WolfSoundVariantRegistry:
-        return _serialize_registry(outb, reg, Identifier("minecraft:wolf_sound_variant"), _serialize_wolf_sound_variant_registry_entry)
+        _serialize_registry(outb, reg, Identifier("minecraft:wolf_sound_variant"), _serialize_wolf_sound_variant_registry_entry) or_return
     case PaintingVariantRegistry:
-        return _serialize_registry(outb, reg, Identifier("minecraft:painting_variant"), _serialize_painting_variant_registry_entry)
+        _serialize_registry(outb, reg, Identifier("minecraft:painting_variant"), _serialize_painting_variant_registry_entry) or_return
     case DamageTypeRegistry:
-        return _serialize_registry(outb, reg, Identifier("minecraft:damage_type"), _serialize_damage_type_registry_entry)
+        _serialize_registry(outb, reg, Identifier("minecraft:damage_type"), _serialize_damage_type_registry_entry) or_return
     case BiomeRegistry:
-        return _serialize_registry(outb, reg, Identifier("minecraft:worldgen/biome"), _serialize_biome_registry_entry)
+        _serialize_registry(outb, reg, Identifier("minecraft:worldgen/biome"), _serialize_biome_registry_entry) or_return
     }
     case FinishConfigurationPacket:
         // no fields
@@ -315,7 +423,9 @@ _serialize_clientbound :: proc(outb: ^NetworkBuffer, packet: ClientBoundPacket, 
             buf_write_bytes(outb, section_light[:])
         }
     }
-    return .None
+    
+    packet_len = buf_length(outb^) - initial_len
+    return packet_len, .None
 }
 
 @(private="file", require_results)
