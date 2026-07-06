@@ -450,13 +450,13 @@ buf_unchecked_read_var_int_ex :: proc(buf: ^NetworkBuffer) -> (val: VarInt, nbyt
 
     for {
         curr := buf_unchecked_read_byte(buf)
+        pos += 7
 
         val |= VarInt(curr & SEGMENT_BITS) << pos
         if curr & CONTINUE_BIT == 0 do break
 
-        pos += 7
         if pos >= 32 {
-            return 0, nbytes, .InvalidData // too big
+            return 0, 0, .InvalidData // too big
         }
     }
     return val, int(pos / 7), .None
@@ -509,7 +509,7 @@ buf_read_var_int :: proc(buf: ^NetworkBuffer) -> (val: VarInt, err: ReadError) {
 }
 
 // Outputs:
-// `nbytes`: the number of bytes this VarInt uses (continuation byte included)
+// `nbytes`: the number of bytes this VarInt uses.
 @(require_results)
 buf_peek_var_int :: proc(buf: ^NetworkBuffer) -> (val: VarInt, nbytes: int, err: ReadError) {
     pos: u16
