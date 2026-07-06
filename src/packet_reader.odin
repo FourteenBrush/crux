@@ -39,13 +39,14 @@ _deserialize_serverbound :: proc(
     uncompressed_data_len, uncompressed_data_len_nbytes := buf_unchecked_read_var_int_ex(buf) or_return
     if uncompressed_data_len == 0 {
         // no compression in use, compute packet length from total length - 1 (for VarInt(0) nr of bytes)
-        return _deserialize_serverbound_id_and_payload(buf, client_state, allocator, int(packet_len - 1))
+        length := int(packet_len) - uncompressed_data_len_nbytes
+        return _deserialize_serverbound_id_and_payload(buf, client_state, allocator, length)
     }
     
     // actually stores compressed data, data_len represents uncompressed id and payload length
     // vanilla server rejects compressed packets smaller than compression threshold but accepts
     // uncompressed packets exceeding the threshold
-    if uncompressed_data_len > MAX_COMPRESSED_DATA_LEN /*|| i32(data_len) < compression_threshold*/ {
+    if uncompressed_data_len > MAX_COMPRESSED_DATA_LEN || i32(uncompressed_data_len) < compression_threshold {
         return packet, .InvalidData
     }
     compressed_data_len := int(packet_len) - uncompressed_data_len_nbytes
