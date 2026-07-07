@@ -193,6 +193,8 @@ _serialize_clientbound_uncompressed :: proc(outb: ^NetworkBuffer, packet: Client
     case BiomeRegistry:
         _serialize_registry(outb, reg, Identifier("minecraft:worldgen/biome"), _serialize_biome_registry_entry) or_return
     }
+    case KeepAliveConfigurationPacket:
+        buf_write_long(outb, packet.id)
     case FinishConfigurationPacket:
         // no fields
     case LoginPacket:

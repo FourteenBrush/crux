@@ -195,7 +195,7 @@ _handle_keepalives :: proc(server: ^Server) {
     now := time.tick_now()
     
     for _, &session in server.sessions {
-        if session.state != .Play || session.terminating do continue
+        if session.terminating || (session.state != .Configuration && session.state != .Play) do continue
         
         last_keepalive := &session.clientbound_keepalive
         elapsed := time.tick_diff(last_keepalive.sent, now)
@@ -205,11 +205,8 @@ _handle_keepalives :: proc(server: ^Server) {
                 continue
             }
         } else if elapsed > KEEPALIVE_INTERVAL {
-            id := i64(elapsed)
-            enqueue_packet(&session, KeepAlivePlayPacket { id=Long(id) })
-            last_keepalive.sent = now
-            last_keepalive.id = id
-            last_keepalive.awaiting_serverbound = true
+            random_id := i64(elapsed)
+            player_send_keepalive(&session, random_id, now)
         }
     }
 }

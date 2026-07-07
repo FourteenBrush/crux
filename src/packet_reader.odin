@@ -182,6 +182,9 @@ _deserialize_serverbound_id_and_payload :: proc(
             pack.version = buf_read_string(buf, 32767, allocator) or_return
         }
         return KnownPacksPacket { known_packs }, .None
+    case .KeepAliveConfiguration:
+        id := buf_read_long(buf) or_return
+        return KeepAliveConfigurationPacket { id=id }, .None
     case .ClientTickEnd:
         return ClientTickEndPacket {}, .None
     case .SetPlayerRotation:

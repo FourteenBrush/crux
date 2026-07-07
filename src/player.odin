@@ -68,3 +68,17 @@ player_set_compression :: proc(session: ^SessionData, threshold: i32) {
     assert(session.state == .Login, "compression may only be configured in login state")
     enqueue_packet(session, SetCompressionPacket { threshold=VarInt(threshold) })
 }
+
+player_send_keepalive :: proc(session: ^SessionData, id: i64, now: time.Tick) {
+    assert(session.state == .Configuration || session.state == .Play, "keepalives may only be sent in selected states")
+    #partial switch session.state {
+    case .Configuration:
+        enqueue_packet(session, KeepAliveConfigurationPacket { id=Long(id) })
+    case .Play:
+        enqueue_packet(session, KeepAlivePlayPacket { id=Long(id) })
+    }
+
+    session.clientbound_keepalive.id = id
+    session.clientbound_keepalive.sent = now
+    session.clientbound_keepalive.awaiting_serverbound = true
+}

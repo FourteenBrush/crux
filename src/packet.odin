@@ -27,6 +27,7 @@ ServerBoundPacketId :: enum VarInt {
     PluginMessage                    = 0x02,
     ClientInformationConfiguration   = 0x00,
     KnownPacks                       = 0x07,
+    KeepAliveConfiguration           = 0x04,
     AcknowledgeFinishConfiguration   = 0x03,
     
     // sent in .Play state
@@ -66,6 +67,7 @@ ServerBoundPacket :: union #no_nil {
     PluginMessagePacket,
     ClientInformationPacket,
     KnownPacksPacket,
+    KeepAliveConfigurationPacket,
     AcknowledgeFinishConfigurationPacket,
     // sent in .Play state
     ClientTickEndPacket,
@@ -106,6 +108,7 @@ ClientBoundPacketId :: enum VarInt {
     KnownPacks              = 0x0e,
     RegistryData            = 0x07,
     FinishConfiguration     = 0x03,
+    KeepAliveConfiguration  = 0x04,
 
     // sent in Play state
 
@@ -133,6 +136,7 @@ ClientBoundPacket :: union #no_nil {
     DisconnectConfigurationPacket,
     KnownPacksPacket,
     RegistryDataPacket,
+    KeepAliveConfigurationPacket,
     FinishConfigurationPacket,
     // sent in .Play state
     LoginPacket,
@@ -171,6 +175,7 @@ clientbound_packet_descriptors := [intrinsics.type_union_variant_count(ClientBou
     VARIANT_IDX_OF(ClientBoundPacket, DisconnectConfigurationPacket)   = { .DisconnectConfiguration,   true  },
     VARIANT_IDX_OF(ClientBoundPacket, KnownPacksPacket)                = { .KnownPacks,                false },
     VARIANT_IDX_OF(ClientBoundPacket, RegistryDataPacket)              = { .RegistryData,              false },
+    VARIANT_IDX_OF(ClientBoundPacket, KeepAliveConfigurationPacket)    = { .KeepAliveConfiguration,    false },
     VARIANT_IDX_OF(ClientBoundPacket, FinishConfigurationPacket)       = { .FinishConfiguration,       false },
     // sent in Play state
     VARIANT_IDX_OF(ClientBoundPacket, LoginPacket)                     = { .Login,                     false },
@@ -194,15 +199,20 @@ get_serverbound_packet_descriptor :: proc(packet: ServerBoundPacket) -> ServerBo
 @(rodata, private="file")
 serverbound_packet_descriptors := [intrinsics.type_union_variant_count(ServerBoundPacket)]ServerBoundPacketDescriptor {
     VARIANT_IDX_OF(ServerBoundPacket, LegacyServerListPingPacket)           = { { .Handshake, .Status } },
+    
     VARIANT_IDX_OF(ServerBoundPacket, HandshakePacket)                      = { { .Handshake } },
     VARIANT_IDX_OF(ServerBoundPacket, StatusRequestPacket)                  = { { .Status } },
     VARIANT_IDX_OF(ServerBoundPacket, PingRequestPacket)                    = { { .Status } },
+    
     VARIANT_IDX_OF(ServerBoundPacket, LoginStartPacket)                     = { { .Login } },
     VARIANT_IDX_OF(ServerBoundPacket, LoginAcknowledgedPacket)              = { { .Login } },
+    
     VARIANT_IDX_OF(ServerBoundPacket, PluginMessagePacket)                  = { { .Configuration } },
     VARIANT_IDX_OF(ServerBoundPacket, ClientInformationPacket)              = { { .Configuration, .Play } },
     VARIANT_IDX_OF(ServerBoundPacket, KnownPacksPacket)                     = { { .Configuration } },
+    VARIANT_IDX_OF(ServerBoundPacket, KeepAliveConfigurationPacket)         = { { .Configuration } },
     VARIANT_IDX_OF(ServerBoundPacket, AcknowledgeFinishConfigurationPacket) = { { .Configuration } },
+    
     VARIANT_IDX_OF(ServerBoundPacket, ClientTickEndPacket)                  = { { .Play } },
     VARIANT_IDX_OF(ServerBoundPacket, SetPlayerRotationPacket)              = { { .Play } },
     VARIANT_IDX_OF(ServerBoundPacket, SetPlayerPositionPacket)              = { { .Play } },
@@ -690,6 +700,10 @@ Biome :: struct {
 }
 
 FinishConfigurationPacket :: struct {}
+
+KeepAliveConfigurationPacket :: struct {
+    id: Long,
+}
 
 // ---------------------------------------- 
 //  Clientbound Play state related packets

@@ -3,6 +3,7 @@
 #+vet explicit-allocators
 package crux
 
+import "core:fmt"
 import "core:os"
 import "core:time"
 import "core:log"
@@ -363,16 +364,18 @@ _enqueue_packet :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnecti
 // Kicks a client with a message, begins client termination.
 @(private="file")
 _kick_client :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection, reason: TextComponent) {
-    disconnect_packet: ClientBoundPacket
+    disconnect_packet: Maybe(ClientBoundPacket) = nil
     #partial switch client_conn.state {
     case .Login: disconnect_packet = DisconnectLoginPacket { reason = reason }
     case .Configuration: disconnect_packet = DisconnectConfigurationPacket { reason = reason }
     case .Play: disconnect_packet = DisconnectPlayPacket { reason = reason }
-    case: panic(#procedure + " called in client state which does not permit disconnect packets")
+    case: // ignore reason, protocol state does not allow disconnect packets here, just terminate
     }
 
-    // NOTE: ignore enqueing failures, we set the connection to terminating either way
-    _ = _enqueue_packet(state, client_conn, disconnect_packet)
+    if disconnect_packet, ok := disconnect_packet.?; ok {
+        // NOTE: ignore enqueing failures, we set the connection to terminating either way
+        _ = _enqueue_packet(state, client_conn, disconnect_packet)
+    }
     client_conn.terminating = true
 }
 
@@ -408,6 +411,7 @@ _should_finalize :: proc(conn: ClientConnection) -> bool {
 _try_finalize_client :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection) -> bool {
     if _should_finalize(client_conn^) {
         _finalize_client(state, client_conn)
+        log.debug("finalized client, nr of client connections now", len(state.connections))
         return true
     }
     return false

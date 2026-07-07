@@ -1,5 +1,6 @@
 package crux
 
+import "core:time"
 import "core:fmt"
 import "core:net"
 import "core:log"
@@ -113,6 +114,7 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
         enqueue_packet(session, LoginSuccessPacket { game_profile=session.game_profile })
     case LoginAcknowledgedPacket:
         session.state = .Configuration
+        player_send_keepalive(session, 012375873, time.tick_now())
     case PluginMessagePacket:
         // empty
     case ClientInformationPacket:
@@ -144,6 +146,8 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
         _send_registry_data(session)
         
         enqueue_packet(session, FinishConfigurationPacket {})
+    case KeepAliveConfigurationPacket:
+        _player_handle_keepalive(server, session, packet.id)
     case AcknowledgeFinishConfigurationPacket:
         session.state = .Play
         enqueue_packet(session, LoginPacket {
@@ -270,16 +274,7 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
     case PlayerLoadedPacket:
         // empty
     case KeepAlivePlayPacket:
-        last_keepalive := &session.clientbound_keepalive
-        if !last_keepalive.awaiting_serverbound {
-            _kick_client(server, session, text_component("Unexpected keepalive", .Red))
-            return
-        }
-        if packet.id != Long(last_keepalive.id) {
-            _kick_client(server, session, text_component("Keepalive id mismatch", .Red))
-            return
-        }
-        last_keepalive.awaiting_serverbound = false
+        _player_handle_keepalive(server, session, packet.id)
     case SwingArmPacket:
         // empty
     case PlayerInputPacket:
@@ -302,6 +297,22 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
             _player_send_initial_chunks(session, VIEW_DISTANCE)
         }
     }
+}
+
+@(private="file")
+_player_handle_keepalive :: proc(server: ^Server, session: ^SessionData, id: Long) {
+    id := i64(id)
+    
+    last_keepalive := &session.clientbound_keepalive
+    if !last_keepalive.awaiting_serverbound {
+        _kick_client(server, session, text_component("Unexpected keepalive", .Red))
+        return
+    }
+    if id != last_keepalive.id {
+        _kick_client(server, session, text_component("Keepalive id mismatch", .Red))
+        return
+    }
+    last_keepalive.awaiting_serverbound = false
 }
 
 CENTER_OFFSET :: 4
