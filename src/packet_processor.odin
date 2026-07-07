@@ -48,11 +48,12 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
     
     switch packet in packet {
     case LegacyServerListPingPacket:
-        // TODO: there is no session, how do we disconnect?
         if session != nil {
             session.terminating = true
             _terminate_session(server, session^)
             return
+        } else {
+            spsc_enqueue(server.outbound_queue, TerminateClientRequest { client=socket })
         }
     case HandshakePacket:
         assert(packet.intent != .Transfer, "TODO: we do not initiate transfers")
