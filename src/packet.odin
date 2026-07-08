@@ -245,6 +245,20 @@ ServerBoundPacketDescriptor :: struct {
     expected_client_states: bit_set[ClientState],
 }
 
+@(private, require_results)
+_disconnect_packet_from_client_state :: proc(state: ClientState, reason: TextComponent) -> (packet: ClientBoundPacket, ok: bool) {
+    #partial switch state {
+    case .Login:
+        return DisconnectLoginPacket { reason = reason }, true
+    case .Configuration:
+        return DisconnectConfigurationPacket { reason = reason }, true
+    case .Play:
+        return DisconnectPlayPacket { reason = reason }, true
+    case:
+        return packet, false
+    }
+}
+
 // ---------------------------------------- 
 // Serverbound Handshake state related packets
 // ---------------------------------------- 

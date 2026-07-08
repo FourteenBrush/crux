@@ -3,7 +3,6 @@
 #+vet explicit-allocators
 package crux
 
-import "core:fmt"
 import "core:os"
 import "core:time"
 import "core:log"
@@ -160,27 +159,17 @@ _network_worker_thread_proc :: proc(shared: ^NetworkWorkerSharedData) {
 
 @(private="file")
 _network_worker_run_tick :: proc(state: ^NetworkWorkerState) {
-    // process clientbound packets coming from the main thread
-    for message in spsc_dequeue(state.inbound_queue) {
-        s: switch message in message {
-        case TerminateClientRequest:
-            // may be a stale request
-            client_conn := (&state.connections[message.client]) or_break s
-            client_conn.terminating = true
-        case PacketTransfer(ClientBoundPacket):
-            client_conn := &state.connections[message.socket]
-            if client_conn.terminating do break s
-            enqueue_ok := _enqueue_packet(state, client_conn, message.packet)
-            if !enqueue_ok {
-                client_conn.terminating = true
-            }
-        }
-    }
-    
     REACTOR_TIMEOUT_MS :: 1
     #assert(REACTOR_TIMEOUT_MS < WORKER_TARGET_MSPT)
     
-    _network_worker_await_completions(state, reactor.TIMEOUT_INFINITE)
+    completions: [512]reactor.Completion
+    // TODO: thread sometimes stalls with reactor.TIMEOUT_INFINITE
+    nready, await_ok := reactor.await_io_completions(state.io_ctx, completions[:], reactor.TIMEOUT_INFINITE)
+    assert(await_ok, "failed to await io completions") // FIXME: proper error handling
+    
+    _network_worker_process_completions(state, completions[:nready])
+
+    _network_worker_process_inbound(state)
 }
 
 // Awaits completions and processes them.
@@ -188,13 +177,8 @@ _network_worker_run_tick :: proc(state: ^NetworkWorkerState) {
 // - `process_reads`: whether an attempt at parsing serverbound packets will be made, will be `false` when this
 // worker is shutting down and is therefore suppressing any operations that could lead to more work.
 @(private="file")
-_network_worker_await_completions :: proc(state: ^NetworkWorkerState, timeout_ms: int, process_reads := true) {
-    completions: [512]reactor.Completion
-    // TODO: thread sometimes stalls with reactor.TIMEOUT_INFINITE
-    nready, await_ok := reactor.await_io_completions(state.io_ctx, completions[:], timeout_ms)
-    assert(await_ok, "failed to await io events") // FIXME: proper error handling
-
-    for comp in completions[:nready] {
+_network_worker_process_completions :: proc(state: ^NetworkWorkerState, completions: []reactor.Completion, process_reads := true) {
+    for comp in completions {
         tracy.ZoneN("ProcessCompletion")
         
         client_conn := &state.connections[comp.socket]
@@ -249,14 +233,29 @@ _network_worker_await_completions :: proc(state: ^NetworkWorkerState, timeout_ms
     }
 }
 
+// Process clientbound packets coming from the main thread
+@(private="file")
+_network_worker_process_inbound :: proc(state: ^NetworkWorkerState) {
+    for message in spsc_dequeue(state.inbound_queue) {
+        log.warn(message)
+        s: switch message in message {
+        case TerminateClientRequest:
+            // may be a stale request
+            client_conn := (&state.connections[message.client]) or_break s
+            client_conn.terminating = true
+        case PacketTransfer(ClientBoundPacket):
+            client_conn := &state.connections[message.socket]
+            if client_conn.terminating do break s
+            enqueue_ok := _enqueue_packet(state, client_conn, message.packet)
+            if !enqueue_ok {
+                client_conn.terminating = true
+            }
+        }
+    }
+}
+
 @(private="file")
 _network_worker_atexit :: proc(state: ^NetworkWorkerState) {
-    // TODO: is this a responsability for the main thread?
-    shutdown_msg := text_component("Server is closing..", COLOR_RED)
-    for _, &client_conn in state.connections {
-        _kick_client(state, &client_conn, shutdown_msg)
-    }
-    
     LINGER_TIME: time.Duration : 15 * time.Second
     _network_worker_linger_shutdown(state, timeout=LINGER_TIME)
     for _, &client_conn in state.connections {
@@ -277,7 +276,11 @@ _network_worker_linger_shutdown :: proc(state: ^NetworkWorkerState, timeout: tim
     start := time.tick_now()
     for {
         // NOTE: safe to call as we just supressed accepting new connections and reads
-        _network_worker_await_completions(state, timeout_ms=200, process_reads=false)
+        completions: [512]reactor.Completion
+        // TODO: thread sometimes stalls with reactor.TIMEOUT_INFINITE
+        nready, await_ok := reactor.await_io_completions(state.io_ctx, completions[:], timeout_ms=200)
+        assert(await_ok, "failed to await io completions") // FIXME: proper error handling
+        _network_worker_process_completions(state, completions[:nready], process_reads=false)
 
         if state.outstanding_writes == 0 do break
         hit_deadline := time.tick_since(start) > timeout
@@ -364,15 +367,9 @@ _enqueue_packet :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnecti
 // Kicks a client with a message, begins client termination.
 @(private="file")
 _kick_client :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection, reason: TextComponent) {
-    disconnect_packet: Maybe(ClientBoundPacket) = nil
-    #partial switch client_conn.state {
-    case .Login: disconnect_packet = DisconnectLoginPacket { reason = reason }
-    case .Configuration: disconnect_packet = DisconnectConfigurationPacket { reason = reason }
-    case .Play: disconnect_packet = DisconnectPlayPacket { reason = reason }
-    case: // ignore reason, protocol state does not allow disconnect packets here, just terminate
-    }
+    disconnect_packet, has_packet_for_state := _disconnect_packet_from_client_state(client_conn.state, reason)
 
-    if disconnect_packet, ok := disconnect_packet.?; ok {
+    if has_packet_for_state {
         // NOTE: ignore enqueing failures, we set the connection to terminating either way
         _ = _enqueue_packet(state, client_conn, disconnect_packet)
     }
