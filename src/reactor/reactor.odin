@@ -123,10 +123,13 @@ unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 }
 
 // Await IO completions for any of the registered clients (excluding the server socket).
-// This function returns when either `timeout_ms` has elapsed, or at least one completion has been awaited.
-// Inputs:
-// - `timeout_ms`: the waiting timeout in ms, pass `TIMEOUT_INFINITE` to block until a completion is delivered,
-// or a `wakeup()` was issued.
+// # Inputs:
+// - `timeout_ms`: the waiting timeout in ms, pass `TIMEOUT_INFINITE` to block until a completion is delivered
+//  
+// This call will block until either:
+// - At least one completion has been delivered
+// - The timeout expires
+// - An explicit `wakeup()` call was issued
 @(require_results)
 await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, timeout_ms: int) -> (n: int, ok: bool) {
     assert(timeout_ms != 0, "non blocking await_io_completions makes no sense here")
