@@ -85,7 +85,7 @@ create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator)
 
 // Prevents the io context from accepting any new incoming client connections. After this call, no new
 // `.NewConnection` completions will be emitted.
-// Exiting client registrations are uneffected and may continue emitting completions. In particular, `.Read`
+// Existing client registrations are uneffected and may continue emitting completions. In particular, `.Read`
 // completions may still be produced for registered clients unless `disable_read_interest` is called on them.
 //
 // This procedure is typically called during shutdown before draining outstanding completions, ensuring no new
