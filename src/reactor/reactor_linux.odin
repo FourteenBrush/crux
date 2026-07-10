@@ -32,6 +32,9 @@ _IOContext :: struct {
     // Maximum number of iovecs to be sent at once over the network. If bigger vectorized writes occur,
     // they will be buffered.
     sysconf_iov_max: int,
+    
+    // Used per `await_io_completions()` call, otherwise nil.
+    active_completion_sink: Maybe(CompletionSink),
     // Internal completion queue used when the `completions_out` buffer passed to `await_io_completions`
     // is saturated and we cannot reconstruct completion state from epoll alone.
     // Also handles epoll event batching as one EPoll_Event may occasionaly produce more than one completion.
@@ -52,6 +55,15 @@ WriteQueue :: struct {
     // is fully drained, this to avoid unnecessary thread wakeups for data that isn't there.
     // The opposite is done whenever a write is submitted.
     epollout_armed: bool,
+}
+
+// Short lived object associated with a single `await_io_completions()` call, either places emitted
+// completions in the given buffer till it becomes full, or resorts to queueing them in the IOContext itself.
+@(private="file")
+CompletionSink :: struct {
+    out: []Completion,
+    // Number of completions placed inside the above buffer.
+    nproduced: int,
 }
 
 // NOTE: .HUP and .ERR are implicit for epoll_wait
@@ -143,7 +155,6 @@ _unregister_client :: proc(ctx: ^IOContext, conn: net.TCP_Socket) -> bool {
             operation = .Error,
             buf = stale_write.base[:stale_write.len],
         }
-        // TODO: replace with _emit_completion() here, but we do not have access to its required params
         queue.append(&ctx.completion_queue, comp)
     }
     
@@ -157,18 +168,25 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
     tracy.Zone()
     
     // drain internal queue first
-    nproduced := 0
-    for ; nproduced < len(completions_out); nproduced += 1 {
+    _nproduced_buffered := 0
+    for ; _nproduced_buffered < len(completions_out); _nproduced_buffered += 1 {
         comp := queue.pop_front_safe(&ctx.completion_queue) or_break
-        #no_bounds_check completions_out[nproduced] = comp
+        #no_bounds_check completions_out[_nproduced_buffered] = comp
     }
     // if user buffer is full, return early
-    if nproduced == len(completions_out) {
+    if _nproduced_buffered == len(completions_out) {
         tracy.Message("reactor_epoll internal completion queue saturates user buffer")
-        return nproduced, true
+        return _nproduced_buffered, true
     }
     
-    events := make([]linux.EPoll_Event, len(completions_out) - nproduced, context.temp_allocator)
+    ctx.active_completion_sink = CompletionSink {
+        out = completions_out,
+        nproduced = _nproduced_buffered,
+    }
+    sink := &ctx.active_completion_sink.?
+    defer ctx.active_completion_sink = nil
+    
+    events := make([]linux.EPoll_Event, len(completions_out) - _nproduced_buffered, context.temp_allocator)
     epoll_nready: i32
     errno: linux.Errno
     for {
@@ -178,7 +196,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
         if errno != .EINTR do break
     }
     if errno != .NONE do return 0, false
-
+    
     for event in events[:epoll_nready] {
         tracy.ZoneN("event io")
         socket := net.TCP_Socket(event.data.fd)
@@ -186,7 +204,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 
         // batch order processing: ERR -> IN -> OUT -> HUP/RDHUP
         if .ERR in event.events {
-            _emit_completion(ctx, completions_out, &nproduced, Completion { socket = socket, operation = .Error })
+            _emit_completion(ctx, Completion { socket = socket, operation = .Error })
             
             actual_err: linux.Errno
             _, opt_err := linux.getsockopt_base(linux.Fd(socket), int(linux.SOL_SOCKET), .ERROR, &actual_err)
@@ -209,19 +227,19 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
                 ? _do_accept(ctx) or_continue \
                 : _do_read(ctx, socket) or_continue
                 
-            _emit_completion(ctx, completions_out, &nproduced, comp)
+            _emit_completion(ctx, comp)
             emitted_hangup = comp.operation == .PeerHangup
         }
         if .OUT in event.events {
             assert(linux.Fd(socket) != ctx.wakeup_eventfd)
-            _do_write(ctx, socket, completions_out, &nproduced)
+            _do_write(ctx, socket)
         }
         if !emitted_hangup && (.HUP in event.events || .RDHUP in event.events) {
             // handle abrupt disconnection and read hangup the same way
-            _emit_completion(ctx, completions_out, &nproduced, Completion { socket = socket, operation = .PeerHangup })
+            _emit_completion(ctx, Completion { socket = socket, operation = .PeerHangup })
         }
     }
-    return nproduced, true
+    return sink.nproduced, true
 }
 
 @(private="file", require_results)
@@ -273,15 +291,12 @@ _do_read :: proc(ctx: ^IOContext, socket: net.TCP_Socket) -> (comp: Completion, 
 _do_write :: proc(
     ctx: ^IOContext,
     socket: net.TCP_Socket,
-    // params from _emit_completion()
-    completions_out: []Completion,
-    idx_ptr: ^int,
 ) {
     wq := &ctx.pending_writes[socket]
     if wq == nil || len(wq.iovecs) == 0 do return
     assert(wq.iov_idx < len(wq.iovecs), "full drain did not reset write queue")
     
-    // apply iovec head_off by mutating first one in iovec slice, then restore it after syscall
+    // apply iovec offset by mutating first one in iovec slice, then restore it after syscall
     orig_vec: Maybe(linux.IO_Vec) = nil
     if wq.iov_off > 0 {
         vec := &wq.iovecs[wq.iov_idx]
@@ -311,7 +326,7 @@ _do_write :: proc(
                 operation = .Error,
                 buf = vec.base[:vec.len],
             }
-            _emit_completion(ctx, completions_out, idx_ptr, comp)
+            _emit_completion(ctx, comp)
         }
         // drop buffers to not resume on next EPOLLOUT
         _reset_write_queue(wq)
@@ -319,7 +334,7 @@ _do_write :: proc(
         return
     }
     
-    fully_drained := _advance_write_queue(ctx, wq, socket, nwritten, completions_out, idx_ptr)
+    fully_drained := _advance_write_queue(ctx, wq, socket, nwritten)
     if fully_drained {
         _ = _arm_epollout(ctx, wq, socket, .Disarm)
     }
@@ -334,9 +349,6 @@ _advance_write_queue :: proc(
     wq: ^WriteQueue,
     socket: net.TCP_Socket,
     nwritten: int,
-    // params from _emit_completion()
-    completions_out: []Completion,
-    idx_ptr: ^int,
 ) -> (fully_drained: bool) {
     // for partial writes: advance cursor and resume sending on the next EPOLLOUT.
     // every iovec corresponds to a write operation so send completions for all fully written ones
@@ -361,7 +373,7 @@ _advance_write_queue :: proc(
             operation = .Write,
             buf = vec.base[:vec.len],
         }
-        _emit_completion(ctx, completions_out, idx_ptr, comp)
+        _emit_completion(ctx, comp)
         wq.iov_idx += 1
         wq.iov_off = 0
     }
@@ -386,13 +398,12 @@ _reset_write_queue :: proc(wq: ^WriteQueue) {
 @(private="file")
 _emit_completion :: proc(
     ctx: ^IOContext,
-    completions_out: []Completion,
-    idx_ptr: ^int,
     comp: Completion,
 ) {
-    if idx_ptr^ < len(completions_out) {
-        #no_bounds_check completions_out[idx_ptr^] = comp
-        idx_ptr^ += 1
+    sink := &ctx.active_completion_sink.? or_else panic("completion sink not initialized prior to io calls")
+    if sink.nproduced < len(sink.out) {
+        #no_bounds_check sink.out[sink.nproduced] = comp
+        sink.nproduced += 1
     } else {
         context.allocator = ctx.allocator // in case queue lazily initializes itself
         // TODO: make queue bounded

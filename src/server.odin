@@ -243,21 +243,19 @@ _terminate_session :: proc(server: ^Server, session: SessionData) {
     free(scratch_alloc, os.heap_allocator())
 }
 
+@(private)
+_kick_client_no_session :: proc(server: ^Server, client: net.TCP_Socket, client_state: ClientState, reason: TextComponent) {
+}
+
 // Kicks a client with a message, enters a termination state.
 @(private)
 _kick_client :: proc(server: ^Server, session: ^SessionData, reason: TextComponent) {
     if session.terminating do return
+
+    disconnect_packet := _disconnect_packet_from_client_state(session.state, reason) \
+        or_else panic(#procedure + " called in client state which does not permit disconnect packets")
     
-    #partial switch session.state {
-    case .Login:
-        enqueue_packet(session, DisconnectLoginPacket { reason = reason })
-    case .Configuration: 
-        enqueue_packet(session, DisconnectConfigurationPacket { reason = reason })
-    case .Play:
-        enqueue_packet(session, DisconnectPlayPacket { reason = reason })
-    case:
-        panic(#procedure + " called in client state which does not permit disconnect packets")
-    }
+    enqueue_packet(session, disconnect_packet)
     session.terminating = true
 }
 

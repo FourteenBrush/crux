@@ -237,7 +237,6 @@ _network_worker_process_completions :: proc(state: ^NetworkWorkerState, completi
 @(private="file")
 _network_worker_process_inbound :: proc(state: ^NetworkWorkerState) {
     for message in spsc_dequeue(state.inbound_queue) {
-        log.warn(message)
         s: switch message in message {
         case TerminateClientRequest:
             // may be a stale request
@@ -277,7 +276,6 @@ _network_worker_linger_shutdown :: proc(state: ^NetworkWorkerState, timeout: tim
     for {
         // NOTE: safe to call as we just supressed accepting new connections and reads
         completions: [512]reactor.Completion
-        // TODO: thread sometimes stalls with reactor.TIMEOUT_INFINITE
         nready, await_ok := reactor.await_io_completions(state.io_ctx, completions[:], timeout_ms=200)
         assert(await_ok, "failed to await io completions") // FIXME: proper error handling
         _network_worker_process_completions(state, completions[:nready], process_reads=false)

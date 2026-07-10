@@ -93,6 +93,7 @@ create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator)
 // 
 // Thread safe, does not require a preceding `wakeup()` call, this operation cannot be reverted.
 close_accept_loop :: proc(ctx: ^IOContext) {
+    // FIXME: do we really need a wakeup call here?
     wakeup(ctx)
     _close_accept_loop(ctx)
 }
