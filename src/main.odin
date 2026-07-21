@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:time"
+import "base:runtime"
 import "core:strings"
 import "core:terminal"
 import "core:encoding/uuid"
@@ -48,8 +49,11 @@ main :: proc() {
     }
 
     back.register_segfault_handler()
-    // TODO: fix panic() callsite recursively calling into panic allocator inside handler, causing stack overflow
-    // context.assertion_failure_proc = back.assertion_failure_proc
+    context.assertion_failure_proc = proc(prefix, message: string, loc: runtime.Source_Code_Location) -> ! {
+        // ensure we do not enter recursive panic by calling into callsite mem.panic_allocator()
+        context.allocator = runtime.default_allocator()
+        back.assertion_failure_proc(prefix, message, loc)
+    }
 
     alloc_formatters := fmt._user_formatters == nil
     defer if alloc_formatters {
