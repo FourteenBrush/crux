@@ -10,7 +10,7 @@ COLLECTIONS = -collection:src=$(SRC) -collection:lib=lib
 
 CC = odin
 BUILD_DIR = build
-CFLAGS = -out:$(BUILD_DIR)/$(PROG) -strict-style -vet-semicolon -vet-cast $(COLLECTIONS) -define:CRUX_USE_IO_URING=false # -vet-using-param
+CFLAGS = -out:$(BUILD_DIR)/$(PROG) -strict-style -vet-semicolon -vet-cast $(COLLECTIONS) -define:CRUX_USE_IO_URING=false -vet-using-param
 
 all: release
 
@@ -30,7 +30,7 @@ $(PROG):
 	$(CC) build $(SRC) $(CFLAGS)
 
 run: debug
-	./$(BUILD_DIR)/$(PROG)
+	./$(BUILD_DIR)/$(PROG) $(ARGS)
 
 profile: CFLAGS += -define:TRACY_ENABLE=true -debug
 profile: release
