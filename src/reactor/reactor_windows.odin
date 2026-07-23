@@ -1,3 +1,5 @@
+#+build windows
+#+vet explicit-allocators
 package reactor
 
 import "core:log"
@@ -36,7 +38,7 @@ _accept_ex := win32.LPFN_ACCEPTEX(nil)
 _get_accept_ex_sock_addrs := win32.LPFN_GETACCEPTEXSOCKADDRS(nil)
 
 @(private)
-_IOContext :: struct {
+PlatformIOContext :: struct {
 	completion_port: win32.HANDLE,
 	server_sock: win32.SOCKET,
 	timer_resolution: u32,
@@ -54,7 +56,7 @@ _IOContext :: struct {
 }
 
 @(private)
-_create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (ctx: IOContext, ok: bool) {
+_create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (ctx: PlatformIOContext, ok: bool) {
     tracy.Zone()
     // NOTE: while it would be theoretically more interesting to only surround the timing critical GetQueuedCompletionStatusEx
     // call with a timeBeginPeriod/timeEndPeriod (to save power etc..), this does not reliably affect the timer
@@ -130,7 +132,7 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 }
 
 @(private)
-_close_accept_loop :: proc(ctx: ^IOContext) {
+_close_accept_loop :: proc(ctx: ^PlatformIOContext) {
 	close_ok := win32.CancelIo(win32.HANDLE(ctx.server_sock))
 	if !close_ok {
 		_log_error(win32.GetLastError(), "failed to cancel outstanding accept handler")
@@ -138,7 +140,7 @@ _close_accept_loop :: proc(ctx: ^IOContext) {
 }
 
 @(private)
-_destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
+_destroy_io_context :: proc(ctx: ^PlatformIOContext, allocator: mem.Allocator) {
     // cancel AcceptEx call
     _ = win32.CancelIoEx(win32.HANDLE(ctx.server_sock), nil)
     
@@ -159,7 +161,7 @@ _destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
 
 // Installs an `AcceptEx` handler to the context, which will emit IOCP packets for inbound connections.
 @(private="file")
-_install_accept_handler :: proc(ctx: ^IOContext) -> bool {
+_install_accept_handler :: proc(ctx: ^PlatformIOContext) -> bool {
     tracy.Zone()
 
     // socket that AcceptEx will use to bind the accepted client to,
@@ -195,7 +197,7 @@ _install_accept_handler :: proc(ctx: ^IOContext) -> bool {
 }
 
 @(private="file")
-_reap_pending_completions :: proc(ctx: ^IOContext) {
+_reap_pending_completions :: proc(ctx: ^PlatformIOContext) {
 	if ctx.outstanding_net_ops == 0 do return
 	
 	// await completion for all cancelled io operations (read/writes/accepts)
@@ -243,7 +245,7 @@ _reap_pending_completions :: proc(ctx: ^IOContext) {
 }
 
 @(private="file")
-_register_client :: proc(ctx: ^IOContext, conn: win32.SOCKET) -> bool {
+_register_client :: proc(ctx: ^PlatformIOContext, conn: win32.SOCKET) -> bool {
     tracy.Zone()
     handle := win32.HANDLE(conn)
 
@@ -270,14 +272,14 @@ _register_client :: proc(ctx: ^IOContext, conn: win32.SOCKET) -> bool {
 }
 
 @(private)
-_disable_read_interest :: proc(ctx: ^IOContext, conn: net.TCP_Socket) -> bool {
+_disable_read_interest :: proc(ctx: ^PlatformIOContext, conn: net.TCP_Socket) -> bool {
 	// TODO: cancel WSARecv, so keep tracked of submitted OVERLAPPED or something
 	unimplemented()
 }
 
 // Initiate async recv call to emit an iocp packet with the read data.
 @(private="file")
-_initiate_recv :: proc(ctx: ^IOContext, conn: win32.SOCKET) -> bool {
+_initiate_recv :: proc(ctx: ^PlatformIOContext, conn: win32.SOCKET) -> bool {
     tracy.Zone()
 
     // alloc a new recv buffer per recv operation, we could in theory use two buffers per client
@@ -347,7 +349,7 @@ IOOperation :: enum u8 {
 }
 
 @(private)
-_unregister_client :: proc(ctx: ^IOContext, conn: net.TCP_Socket) -> bool {
+_unregister_client :: proc(ctx: ^PlatformIOContext, conn: net.TCP_Socket) -> bool {
     tracy.Zone()
     // This affects the installed WSARecv and potential WSASend operations
     // NOTE: it seems like it is safe to close the client socket with completion packets still in flight,
@@ -376,7 +378,7 @@ _unregister_client :: proc(ctx: ^IOContext, conn: net.TCP_Socket) -> bool {
 }
 
 @(private="file")
-_poll_iocp :: proc(ctx: ^IOContext, entries_out: []win32.OVERLAPPED_ENTRY, timeout_ms: int) -> (nready: u32, ok: bool) {
+_poll_iocp :: proc(ctx: ^PlatformIOContext, entries_out: []win32.OVERLAPPED_ENTRY, timeout_ms: int) -> (nready: u32, ok: bool) {
 	tracy.ZoneN("GetQueuedCompletionStatusEx")
 		
     // NOTE: nothing is guaranteed in terms of dequeuing order, but we only have one concurrent read for each socket,
@@ -399,10 +401,10 @@ _poll_iocp :: proc(ctx: ^IOContext, entries_out: []win32.OVERLAPPED_ENTRY, timeo
 }
 
 @(private)
-_await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, timeout_ms: int) -> (n: int, ok: bool) {
+_await_io_completions :: proc(ctx: ^PlatformIOContext, sink: ^CompletionSink, timeout_ms: int) -> (ok: bool) {
     tracy.Zone()
     
-	completion_entries := make([]win32.OVERLAPPED_ENTRY, len(completions_out), context.temp_allocator)
+	completion_entries := make([]win32.OVERLAPPED_ENTRY, _sink_free_space(sink^), context.temp_allocator)
 	nready := _poll_iocp(ctx, completion_entries, timeout_ms) or_return
 
 	ncompletions := 0
@@ -433,7 +435,6 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 				win32.closesocket(op_data.accepted_conn.socket)
 			}
 		}
-		discard := false
 		
 		switch op_data.op {
 		case .AcceptedConnection:
@@ -450,17 +451,13 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
 			comp = _process_write(ctx, emitter, entry, op_data^) or_continue
 		}
 
-		if !discard {
-			completions_out[ncompletions] = comp
-			ncompletions += 1
-		}
+		_emit_completion(ctx, comp)
 	}
-
-	return ncompletions, true
+	return true
 }
 
 @(private="file", require_results)
-_process_accept :: proc(ctx: ^IOContext, client_sock: win32.SOCKET) -> (comp: Completion, emit: bool) {
+_process_accept :: proc(ctx: ^PlatformIOContext, client_sock: win32.SOCKET) -> (comp: Completion, emit: bool) {
 	defer if !emit {
 		win32.closesocket(client_sock)
 	}
@@ -476,7 +473,7 @@ _process_accept :: proc(ctx: ^IOContext, client_sock: win32.SOCKET) -> (comp: Co
 }
 
 @(private="file", require_results)
-_process_read :: proc(ctx: ^IOContext, client_sock: win32.SOCKET, entry: win32.OVERLAPPED_ENTRY, passed_buf: []u8) -> (comp: Completion) {
+_process_read :: proc(ctx: ^PlatformIOContext, client_sock: win32.SOCKET, entry: win32.OVERLAPPED_ENTRY, passed_buf: []u8) -> (comp: Completion) {
 	comp.socket = net.TCP_Socket(client_sock)
 	
 	if entry.dwNumberOfBytesTransferred == 0 {
@@ -496,7 +493,7 @@ _process_read :: proc(ctx: ^IOContext, client_sock: win32.SOCKET, entry: win32.O
 }
 
 @(private="file", require_results)
-_process_write :: proc(ctx: ^IOContext, client_sock: win32.SOCKET, entry: win32.OVERLAPPED_ENTRY, op_data: IOOperationData) -> (comp: Completion, emit: bool) {
+_process_write :: proc(ctx: ^PlatformIOContext, client_sock: win32.SOCKET, entry: win32.OVERLAPPED_ENTRY, op_data: IOOperationData) -> (comp: Completion, emit: bool) {
 	total_transfer := entry.dwNumberOfBytesTransferred + op_data.write.already_transferred
 	partial_write := int(total_transfer) != len(op_data.write.buf)
 	transport_buf := op_data.write.buf
@@ -520,21 +517,21 @@ _process_write :: proc(ctx: ^IOContext, client_sock: win32.SOCKET, entry: win32.
 }
 
 @(private)
-_release_recv_buf :: proc(ctx: ^IOContext, buf: []u8) {
+_release_recv_buf :: proc(ctx: ^PlatformIOContext, buf: []u8) {
     tracy.Zone()
     delete(buf, ctx.allocator)
 }
 
 // TODO: implement write queue with support for vectorized writes
 @(private)
-_submit_write_vectored :: proc(ctx: ^IOContext, conn: net.TCP_Socket, bufs: [][]u8) -> bool {
+_submit_write_vectored :: proc(ctx: ^PlatformIOContext, conn: net.TCP_Socket, bufs: [][]u8) -> bool {
     tracy.Zone()
 
     return _initiate_send(ctx, win32.SOCKET(conn), bufs)
 }
 
 @(private)
-_wakeup :: proc(ctx: ^IOContext) {
+_wakeup :: proc(ctx: ^PlatformIOContext) {
 	// submit emulated iocp packet
 	if !win32.PostQueuedCompletionStatus(ctx.completion_port, 0, WAKEUP_COMPLETION_KEY, nil) {
 		_log_error(win32.GetLastError(), "failed to wakeup iocp")
@@ -542,7 +539,7 @@ _wakeup :: proc(ctx: ^IOContext) {
 }
 
 @(private="file")
-_initiate_send :: proc(ctx: ^IOContext, socket: win32.SOCKET, data: []u8, partial_write_off: u32 = 0) -> bool {
+_initiate_send :: proc(ctx: ^PlatformIOContext, socket: win32.SOCKET, data: []u8, partial_write_off: u32 = 0) -> bool {
     tracy.Zone()
 
     op_data := _alloc_operation_data(ctx^, .Write, socket, data)
@@ -571,7 +568,7 @@ _initiate_send :: proc(ctx: ^IOContext, socket: win32.SOCKET, data: []u8, partia
 }
 
 @(private="file")
-_configure_accepted_client :: proc(ctx: ^IOContext, client_sock: win32.SOCKET) -> (remote_addr: ^win32.sockaddr, ok: bool) {
+_configure_accepted_client :: proc(ctx: ^PlatformIOContext, client_sock: win32.SOCKET) -> (remote_addr: ^win32.sockaddr, ok: bool) {
     tracy.Zone()
 
     // parse AcceptEx buffer to find addresses and unblock socket
@@ -611,7 +608,7 @@ _configure_accepted_client :: proc(ctx: ^IOContext, client_sock: win32.SOCKET) -
 }
 
 @(private="file")
-_alloc_operation_data :: proc(ctx: IOContext, $Op: IOOperation, source: win32.SOCKET, buf: []u8) -> ^IOOperationData {
+_alloc_operation_data :: proc(ctx: PlatformIOContext, $Op: IOOperation, source: win32.SOCKET, buf: []u8) -> ^IOOperationData {
     tracy.Zone()
 
     op_data := new(IOOperationData, ctx.allocator) or_else panic("OOM")
@@ -627,7 +624,7 @@ _alloc_operation_data :: proc(ctx: IOContext, $Op: IOOperation, source: win32.SO
 
 // Dynamically loads a WSA function pointer, returns `nil` on failure.
 @(private="file")
-_load_wsa_fn_ptr :: proc(ctx: ^IOContext, guid: win32.GUID, $Sig: typeid) -> (fn_ptr: Sig) {
+_load_wsa_fn_ptr :: proc(ctx: ^PlatformIOContext, guid: win32.GUID, $Sig: typeid) -> (fn_ptr: Sig) {
     assert(ctx.server_sock != 0)
     guid := guid
     nbytes: u32
