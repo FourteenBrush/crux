@@ -57,7 +57,6 @@ PlatformIOContext :: struct {
 
 @(private)
 _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (ctx: PlatformIOContext, ok: bool) {
-    tracy.Zone()
     // NOTE: while it would be theoretically more interesting to only surround the timing critical GetQueuedCompletionStatusEx
     // call with a timeBeginPeriod/timeEndPeriod (to save power etc..), this does not reliably affect the timer
     // resolution (especially for code that only runs in this short period). For instance, switching power modes has a negative
@@ -350,7 +349,6 @@ IOOperation :: enum u8 {
 
 @(private)
 _unregister_client :: proc(ctx: ^PlatformIOContext, conn: net.TCP_Socket) -> bool {
-    tracy.Zone()
     // This affects the installed WSARecv and potential WSASend operations
     // NOTE: it seems like it is safe to close the client socket with completion packets still in flight,
     // but only with CancelIoEx, not with CancelIo
@@ -402,8 +400,6 @@ _poll_iocp :: proc(ctx: ^PlatformIOContext, entries_out: []win32.OVERLAPPED_ENTR
 
 @(private)
 _await_io_completions :: proc(ctx: ^PlatformIOContext, sink: ^CompletionSink, timeout_ms: int) -> (ok: bool) {
-    tracy.Zone()
-    
 	completion_entries := make([]win32.OVERLAPPED_ENTRY, _sink_free_space(sink^), context.temp_allocator)
 	nready := _poll_iocp(ctx, completion_entries, timeout_ms) or_return
 
@@ -518,15 +514,12 @@ _process_write :: proc(ctx: ^PlatformIOContext, client_sock: win32.SOCKET, entry
 
 @(private)
 _release_recv_buf :: proc(ctx: ^PlatformIOContext, buf: []u8) {
-    tracy.Zone()
     delete(buf, ctx.allocator)
 }
 
 // TODO: implement write queue with support for vectorized writes
 @(private)
 _submit_write_vectored :: proc(ctx: ^PlatformIOContext, conn: net.TCP_Socket, bufs: [][]u8) -> bool {
-    tracy.Zone()
-
     return _initiate_send(ctx, win32.SOCKET(conn), bufs)
 }
 

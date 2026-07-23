@@ -129,8 +129,6 @@ _disable_read_interest :: proc(ctx: ^PlatformIOContext, conn: net.TCP_Socket) ->
 
 @(private)
 _unregister_client :: proc(ctx: ^PlatformIOContext, conn: net.TCP_Socket) -> bool {
-    tracy.Zone()
-
     ok := linux.epoll_ctl(ctx.epoll_fd, .DEL, linux.Fd(conn), nil) == .NONE
     
     _, pending_writes := delete_key(&ctx.pending_writes, conn)
@@ -151,8 +149,6 @@ _unregister_client :: proc(ctx: ^PlatformIOContext, conn: net.TCP_Socket) -> boo
 
 @(private)
 _await_io_completions :: proc(ctx: ^PlatformIOContext, sink: ^CompletionSink, timeout_ms: int) -> (ok: bool) {
-    tracy.Zone()
-    
     events := make([]linux.EPoll_Event, _sink_free_space(sink^), context.temp_allocator)
     epoll_nready: i32
     errno: linux.Errno

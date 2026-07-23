@@ -13,7 +13,7 @@ package reactor
 @(require) import "lib:tracy"
 
 // TODO: VV
-when USE_IO_URING {
+when true {
 
     @(private)
     _TIMEOUT_INFINITE :: -1
@@ -82,14 +82,11 @@ when USE_IO_URING {
 
     @(private)
     _unregister_client :: proc(ctx: ^PlatformIOContext, conn: net.TCP_Socket) -> bool {
-        tracy.Zone()
         return false
     }
 
     @(private)
     _await_io_completions :: proc(ctx: ^PlatformIOContext, sink: ^CompletionSink, timeout_ms: int) -> (ok: bool) {
-        tracy.Zone()
-
         // wait timeout, requires a kernel version >= 5.11
         timeout: ^linux.Time_Spec = nil
         if timeout_ms != TIMEOUT_INFINITE {
@@ -132,7 +129,11 @@ when USE_IO_URING {
             _log_error(linux.Errno(-ret), "accept did not complete successfully")
             return
         }
-        _register_client(ctx, linux.Fd(ret)) or_else unimplemented()
+        // TODO: standardize this error handling behaviour across all platforms
+        if registration_ok := _register_client(ctx, linux.Fd(ret)); !registration_ok {
+            log.warn("failed to accept client")
+            return
+        }
     }
 
     @(private="file")

@@ -89,6 +89,8 @@ IOContext :: struct {
 // completion is returned. Upon registration `Operation.Read` completions may immediately be emitted
 // whenever the client sends data. Write completions only occur after calling `submit_write_*` procedures.
 create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (IOContext, bool) {
+    tracy.Zone()
+    
     impl, impl_ok := _create_io_context(server_sock, allocator)
     if !impl_ok do return {}, false
     ctx := IOContext { impl, {}, {} }
@@ -106,6 +108,8 @@ create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator)
 // 
 // Thread safe, does not require a preceding `wakeup()` call, this operation cannot be reverted.
 close_accept_loop :: proc(ctx: ^IOContext) {
+    tracy.Zone()
+
     // FIXME: do we really need a wakeup call here?
     wakeup(ctx)
     _close_accept_loop(ctx)
@@ -116,12 +120,15 @@ close_accept_loop :: proc(ctx: ^IOContext) {
 // data that points to this IO context. This task is delegated to them as they probably have better means of
 // keeping track of registered clients, whereas we do not want to pay for that overhead.
 destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
+    tracy.Zone()
+    
     _destroy_io_context(ctx, allocator)
     queue.destroy(&ctx._completion_queue) // no-op if zero initialized
 }
 
 // Ensures no new read completions will be emitted for the given client.
 disable_read_interest :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
+    tracy.Zone()
     return _disable_read_interest(ctx, client)
 }
 
@@ -134,6 +141,8 @@ disable_read_interest :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 // no new IO operations were issued. The application should safeguard against this behaviour.
 // The passed socket will be closed after this call completes.
 unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
+    tracy.Zone()
+    
     return _unregister_client(ctx, client)
 }
 
@@ -158,6 +167,8 @@ _emit_completion :: proc(
     ctx: ^PlatformIOContext,
     comp: Completion,
 ) {
+    tracy.Zone()
+
     // somewhat hacky way to get access to device independent fields
     ctx: ^IOContext = container_of(ctx, IOContext, "_")
     sink := &ctx._sink
@@ -181,6 +192,8 @@ _emit_completion :: proc(
 // - An explicit `wakeup()` call was issued
 @(require_results)
 await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, timeout_ms: int) -> (n: int, ok: bool) {
+    tracy.Zone()
+
     assert(timeout_ms != 0, "timeout_ms must be != 0")
 
     // drain internal queue first
@@ -199,6 +212,7 @@ await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, tim
         out = completions_out,
         nproduced = nconsumed,
     }
+    defer ctx._sink = {}
     
     _await_io_completions(ctx, &ctx._sink, timeout_ms) or_return
     return ctx._sink.nproduced, true
@@ -207,6 +221,8 @@ await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, tim
 // Releases the ´buf´ of the given completion, must be called on completions of type ´.Read´ after
 // the application processed the data, this data cannot be used afterwards.
 release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
+    tracy.Zone()
+
     assert(comp.operation == .Read && comp.buf != nil)
     _release_recv_buf(ctx, comp.buf)
 }
@@ -217,6 +233,8 @@ release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
 // Every inner buffer will produce a `.Write` completion (or an error with a buffer attached).
 @(require_results)
 submit_write_vectored :: proc(ctx: ^IOContext, client: net.TCP_Socket, bufs: [][]u8) -> bool {
+    tracy.Zone()
+
     assert(len(bufs) > 0, "zero length buffers passed")
     // TODO: why dont we save the allocator the passed buffer was allocated with, so we can free it
     // ourselves instead of sending it back?
@@ -228,6 +246,8 @@ submit_write_vectored :: proc(ctx: ^IOContext, client: net.TCP_Socket, bufs: [][
 // instead of relying on another form of synchronization.
 // Thread safe.
 wakeup :: proc(ctx: ^IOContext) {
+    tracy.Zone()
+
     _wakeup(ctx)
 }
 
