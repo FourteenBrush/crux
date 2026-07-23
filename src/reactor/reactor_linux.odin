@@ -1,13 +1,16 @@
+#+build linux
+#+vet explicit-allocators
 package reactor
 
-import "base:intrinsics"
-import "core:sys/posix"
 @(require) import "core:log"
 @(require) import "core:net"
 @(require) import "core:mem"
-@(require) import "base:runtime"
+@(require) import "core:sys/posix"
 @(require) import "core:sys/linux"
 @(require) import "core:container/queue"
+
+@(require) import "base:runtime"
+@(require) import "base:intrinsics"
 
 @(require) import "lib:tracy"
 
@@ -18,10 +21,10 @@ when !USE_IO_URING {
 _TIMEOUT_INFINITE :: -1
 
 @(private)
-_IOContext :: struct {
+PlatformIOContext :: struct {
+    server_sock: net.TCP_Socket,
     epoll_fd: linux.Fd,
     wakeup_eventfd: linux.Fd,
-    server_sock: net.TCP_Socket,
     // Allocator used to allocate recv buffers, the pending writes map and slices of iovecs.
     allocator: mem.Allocator,
     
@@ -32,14 +35,6 @@ _IOContext :: struct {
     // Maximum number of iovecs to be sent at once over the network. If bigger vectorized writes occur,
     // they will be buffered.
     sysconf_iov_max: int,
-    
-    // Used per `await_io_completions()` call, otherwise nil.
-    active_completion_sink: Maybe(CompletionSink),
-    // Internal completion queue used when the `completions_out` buffer passed to `await_io_completions`
-    // is saturated and we cannot reconstruct completion state from epoll alone.
-    // Also handles epoll event batching as one EPoll_Event may occasionaly produce more than one completion.
-    // NOTE: Lazily allocated.
-    completion_queue: queue.Queue(Completion),
 }
 
 // Client socket specific write queue, to handle partial write state correctly.
@@ -57,15 +52,6 @@ WriteQueue :: struct {
     epollout_armed: bool,
 }
 
-// Short lived object associated with a single `await_io_completions()` call, either places emitted
-// completions in the given buffer till it becomes full, or resorts to queueing them in the IOContext itself.
-@(private="file")
-CompletionSink :: struct {
-    out: []Completion,
-    // Number of completions placed inside the above buffer.
-    nproduced: int,
-}
-
 // NOTE: .HUP and .ERR are implicit for epoll_wait
 @(private="file")
 EPOLL_EVENTS_NO_OUT :: linux.EPoll_Event_Set { .IN, .RDHUP }
@@ -74,7 +60,9 @@ EPOLL_EVENTS_NO_OUT :: linux.EPoll_Event_Set { .IN, .RDHUP }
 EPOLL_EVENTS_OUT_ARMED :: EPOLL_EVENTS_NO_OUT | { .OUT }
 
 @(private)
-_create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (ctx: IOContext, ok: bool) {
+_create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (ctx: PlatformIOContext, ok: bool) {
+    ctx.server_sock = server_sock
+    
     epoll_fd, errno := linux.epoll_create()
     if errno != .NONE do return
     defer if !ok do linux.close(epoll_fd)
@@ -84,7 +72,6 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
     defer if !ok do linux.close(ctx.wakeup_eventfd)
     
     ctx.epoll_fd = epoll_fd
-    ctx.server_sock = server_sock
     // TODO: convert to pool based thing, together with reactor_windows
     ctx.allocator = _make_instrumented_alloc(runtime.heap_allocator(), meta_allocator=runtime.heap_allocator())
     ctx.pending_writes = make(map[net.TCP_Socket]WriteQueue, ctx.allocator)
@@ -101,26 +88,25 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
 }
 
 @(private)
-_close_accept_loop :: proc(ctx: ^IOContext) {
-    errno := linux.epoll_ctl(ctx.epoll_fd, .DEL, linux.Fd(ctx.server_sock), nil)
-    assert(errno == .NONE, "failed to unregister server sock")
-}
-
-@(private)
-_destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
+_destroy_io_context :: proc(ctx: ^PlatformIOContext, allocator: mem.Allocator) {
     // NOTE: only holds the clients that have already performed writes, so not 100% correct
     assert(len(ctx.pending_writes) == 0, "clients must be unregistered")
     
     linux.close(ctx.epoll_fd)
     linux.close(ctx.wakeup_eventfd)
     delete(ctx.pending_writes)
-    queue.destroy(&ctx.completion_queue) // no-op if zero initialized
     _destroy_instrumented_alloc(ctx.allocator, meta_allocator=runtime.heap_allocator())
+}
+
+@(private)
+_close_accept_loop :: proc(ctx: ^PlatformIOContext) {
+    errno := linux.epoll_ctl(ctx.epoll_fd, .DEL, linux.Fd(ctx.server_sock), nil)
+    assert(errno == .NONE, "failed to unregister server sock")
 }
 
 // NOTE: also used by server socket
 @(private="file")
-_register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
+_register_client :: proc(ctx: ^PlatformIOContext, client: net.TCP_Socket) -> bool {
     tracy.Zone()
 
     event := _epoll_event(ctx, client, EPOLL_EVENTS_NO_OUT)
@@ -129,7 +115,7 @@ _register_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 }
 
 @(private)
-_disable_read_interest :: proc(ctx: ^IOContext, conn: net.TCP_Socket) -> bool {
+_disable_read_interest :: proc(ctx: ^PlatformIOContext, conn: net.TCP_Socket) -> bool {
     // preserve existing EPOLLOUT bit to not block writes
     events := EPOLL_EVENTS_NO_OUT
     if wq := &ctx.pending_writes[conn]; wq != nil && wq.epollout_armed {
@@ -142,7 +128,7 @@ _disable_read_interest :: proc(ctx: ^IOContext, conn: net.TCP_Socket) -> bool {
 }
 
 @(private)
-_unregister_client :: proc(ctx: ^IOContext, conn: net.TCP_Socket) -> bool {
+_unregister_client :: proc(ctx: ^PlatformIOContext, conn: net.TCP_Socket) -> bool {
     tracy.Zone()
 
     ok := linux.epoll_ctl(ctx.epoll_fd, .DEL, linux.Fd(conn), nil) == .NONE
@@ -155,7 +141,7 @@ _unregister_client :: proc(ctx: ^IOContext, conn: net.TCP_Socket) -> bool {
             operation = .Error,
             buf = stale_write.base[:stale_write.len],
         }
-        queue.append(&ctx.completion_queue, comp)
+        _emit_completion(ctx, comp)
     }
     
     delete(pending_writes.iovecs)
@@ -164,29 +150,10 @@ _unregister_client :: proc(ctx: ^IOContext, conn: net.TCP_Socket) -> bool {
 }
 
 @(private)
-_await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, timeout_ms: int) -> (n: int, ok: bool) {
+_await_io_completions :: proc(ctx: ^PlatformIOContext, sink: ^CompletionSink, timeout_ms: int) -> (ok: bool) {
     tracy.Zone()
     
-    // drain internal queue first
-    _nproduced_buffered := 0
-    for ; _nproduced_buffered < len(completions_out); _nproduced_buffered += 1 {
-        comp := queue.pop_front_safe(&ctx.completion_queue) or_break
-        #no_bounds_check completions_out[_nproduced_buffered] = comp
-    }
-    // if user buffer is full, return early
-    if _nproduced_buffered == len(completions_out) {
-        tracy.Message("reactor_epoll internal completion queue saturates user buffer")
-        return _nproduced_buffered, true
-    }
-    
-    ctx.active_completion_sink = CompletionSink {
-        out = completions_out,
-        nproduced = _nproduced_buffered,
-    }
-    sink := &ctx.active_completion_sink.?
-    defer ctx.active_completion_sink = nil
-    
-    events := make([]linux.EPoll_Event, len(completions_out) - _nproduced_buffered, context.temp_allocator)
+    events := make([]linux.EPoll_Event, _sink_free_space(sink^), context.temp_allocator)
     epoll_nready: i32
     errno: linux.Errno
     for {
@@ -195,7 +162,7 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
         epoll_nready, errno = linux.epoll_wait(ctx.epoll_fd, &events[0], i32(len(events)), i32(timeout_ms))
         if errno != .EINTR do break
     }
-    if errno != .NONE do return 0, false
+    if errno != .NONE do return false
     
     for event in events[:epoll_nready] {
         tracy.ZoneN("event io")
@@ -206,10 +173,10 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
         if .ERR in event.events {
             _emit_completion(ctx, Completion { socket = socket, operation = .Error })
             
-            actual_err: linux.Errno
-            _, opt_err := linux.getsockopt_base(linux.Fd(socket), int(linux.SOL_SOCKET), .ERROR, &actual_err)
+            cause: linux.Errno
+            _, opt_err := linux.getsockopt_base(linux.Fd(socket), int(linux.SOL_SOCKET), .ERROR, &cause)
             if opt_err == .NONE {
-                _log_error(actual_err, "failed to poll client socket")
+                _log_error(cause, "failed to poll client socket")
             }
             continue
         }
@@ -239,11 +206,11 @@ _await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, ti
             _emit_completion(ctx, Completion { socket = socket, operation = .PeerHangup })
         }
     }
-    return sink.nproduced, true
+    return true
 }
 
 @(private="file", require_results)
-_do_accept :: proc(ctx: ^IOContext) -> (comp: Completion, emit: bool) {
+_do_accept :: proc(ctx: ^PlatformIOContext) -> (comp: Completion, emit: bool) {
     client_sock, endpoint, accept_err := net.accept_tcp(ctx.server_sock, /*client options*/{ no_delay=true })
     if accept_err != .None {
         log.warn("failed to accept client:", accept_err)
@@ -262,7 +229,7 @@ _do_accept :: proc(ctx: ^IOContext) -> (comp: Completion, emit: bool) {
 }
 
 @(private="file", require_results)
-_do_read :: proc(ctx: ^IOContext, socket: net.TCP_Socket) -> (comp: Completion, emit: bool) {
+_do_read :: proc(ctx: ^PlatformIOContext, socket: net.TCP_Socket) -> (comp: Completion, emit: bool) {
     recv_buf := mem.alloc_bytes_non_zeroed(RECV_BUF_SIZE, align_of(u8), ctx.allocator) or_else panic("OOM")
     nread, recv_err := linux.recv(linux.Fd(socket), recv_buf, {.NOSIGNAL})
     if recv_err == .EAGAIN || recv_err == .EWOULDBLOCK {
@@ -289,7 +256,7 @@ _do_read :: proc(ctx: ^IOContext, socket: net.TCP_Socket) -> (comp: Completion, 
 
 @(private="file")
 _do_write :: proc(
-    ctx: ^IOContext,
+    ctx: ^PlatformIOContext,
     socket: net.TCP_Socket,
 ) {
     wq := &ctx.pending_writes[socket]
@@ -345,7 +312,7 @@ _do_write :: proc(
 // - Advances offsets to handle partial writes
 @(private="file", require_results)
 _advance_write_queue :: proc(
-    ctx: ^IOContext,
+    ctx: ^PlatformIOContext,
     wq: ^WriteQueue,
     socket: net.TCP_Socket,
     nwritten: int,
@@ -393,31 +360,13 @@ _reset_write_queue :: proc(wq: ^WriteQueue) {
     wq.iov_off = 0
 }
 
-// Either stores a completion directly to an output buffer if not saturated,
-// otherwise queues it internally.
-@(private="file")
-_emit_completion :: proc(
-    ctx: ^IOContext,
-    comp: Completion,
-) {
-    sink := &ctx.active_completion_sink.? or_else panic("completion sink not initialized prior to io calls")
-    if sink.nproduced < len(sink.out) {
-        #no_bounds_check sink.out[sink.nproduced] = comp
-        sink.nproduced += 1
-    } else {
-        context.allocator = ctx.allocator // in case queue lazily initializes itself
-        // TODO: make queue bounded
-        queue.push_back(&ctx.completion_queue, comp)
-    }
-}
-
 @(private)
-_release_recv_buf :: proc(ctx: ^IOContext, buf: []u8) {
+_release_recv_buf :: proc(ctx: ^PlatformIOContext, buf: []u8) {
     delete(buf, ctx.allocator)
 }
 
 @(private)
-_submit_write_vectored :: proc(ctx: ^IOContext, conn: net.TCP_Socket, bufs: [][]u8) -> bool {
+_submit_write_vectored :: proc(ctx: ^PlatformIOContext, conn: net.TCP_Socket, bufs: [][]u8) -> bool {
     _, write_queue, zeroed_insert, _ := map_entry(&ctx.pending_writes, conn)
     if zeroed_insert {
         write_queue.iovecs.allocator = ctx.allocator
@@ -434,7 +383,7 @@ _submit_write_vectored :: proc(ctx: ^IOContext, conn: net.TCP_Socket, bufs: [][]
 }
 
 @(private)
-_wakeup :: proc(ctx: ^IOContext) {
+_wakeup :: proc(ctx: ^PlatformIOContext) {
     // add one to counter, a value > 0 causes epoll to wake up with an EPOLLIN for this fd
     one := u64(1) // needs an 8 bytes buffer or EINVAL is returned
     _, errno := linux.write(ctx.wakeup_eventfd, mem.ptr_to_bytes(&one))
@@ -442,7 +391,7 @@ _wakeup :: proc(ctx: ^IOContext) {
 }
 
 @(private="file", require_results)
-_arm_epollout :: proc(ctx: ^IOContext, wq: ^WriteQueue, socket: net.TCP_Socket, mode: enum { Arm, Disarm }) -> bool {
+_arm_epollout :: proc(ctx: ^PlatformIOContext, wq: ^WriteQueue, socket: net.TCP_Socket, mode: enum { Arm, Disarm }) -> bool {
     event := _epoll_event(ctx, socket, mode == .Arm ? EPOLL_EVENTS_OUT_ARMED : EPOLL_EVENTS_NO_OUT)
     errno := linux.epoll_ctl(ctx.epoll_fd, .MOD, linux.Fd(socket), &event)
     if errno != .NONE do return false
@@ -452,7 +401,7 @@ _arm_epollout :: proc(ctx: ^IOContext, wq: ^WriteQueue, socket: net.TCP_Socket, 
 }
 
 @(private="file")
-_epoll_event :: proc(ctx: ^IOContext, socket: net.TCP_Socket, events: linux.EPoll_Event_Set) -> (ev: linux.EPoll_Event) {
+_epoll_event :: proc(ctx: ^PlatformIOContext, socket: net.TCP_Socket, events: linux.EPoll_Event_Set) -> (ev: linux.EPoll_Event) {
     ev.events = events
     ev.data.fd = linux.Fd(socket)
     return

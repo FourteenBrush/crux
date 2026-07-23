@@ -6,6 +6,7 @@ package reactor
 import "core:net"
 import "core:mem"
 import "core:log"
+import "core:container/queue"
 
 import "lib:back"
 import "lib:tracy"
@@ -69,7 +70,15 @@ Operation :: enum u8 {
 }
 
 // Operation context, must not be moved after first use.
-IOContext :: _IOContext
+IOContext :: struct {
+    #subtype _: PlatformIOContext,
+    // Internal completion queue used when the `completions_out` buffer passed to `await_io_completions`
+    // is saturated and we cannot reconstruct completion state from native apis alone.
+    // Also handles os event batching. Lazily allocated.
+    _completion_queue: queue.Queue(Completion),
+    // Stored here to retain access on _emit_completion.
+    _sink: CompletionSink,
+}
 
 // Creates a new `IOContext`, which registers the server socket as a source to accept new incoming clients.
 // Inputs:
@@ -80,7 +89,11 @@ IOContext :: _IOContext
 // completion is returned. Upon registration `Operation.Read` completions may immediately be emitted
 // whenever the client sends data. Write completions only occur after calling `submit_write_*` procedures.
 create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator) -> (IOContext, bool) {
-    return _create_io_context(server_sock, allocator)
+    impl, impl_ok := _create_io_context(server_sock, allocator)
+    if !impl_ok do return {}, false
+    ctx := IOContext { impl, {}, {} }
+    ctx._completion_queue.data.allocator = allocator
+    return ctx, true
 }
 
 // Prevents the io context from accepting any new incoming client connections. After this call, no new
@@ -104,6 +117,7 @@ close_accept_loop :: proc(ctx: ^IOContext) {
 // keeping track of registered clients, whereas we do not want to pay for that overhead.
 destroy_io_context :: proc(ctx: ^IOContext, allocator: mem.Allocator) {
     _destroy_io_context(ctx, allocator)
+    queue.destroy(&ctx._completion_queue) // no-op if zero initialized
 }
 
 // Ensures no new read completions will be emitted for the given client.
@@ -123,6 +137,40 @@ unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
     return _unregister_client(ctx, client)
 }
 
+// Short lived object associated with a single `await_io_completions()` call, either places emitted
+// completions in the given buffer till it becomes full, or resorts to queueing them internally.
+@(private)
+CompletionSink :: struct {
+    out: []Completion,
+    // Number of completions placed inside the above buffer.
+    nproduced: int,
+}
+
+@(private)
+_sink_free_space :: proc(sink: CompletionSink) -> int {
+    return len(sink.out) - sink.nproduced
+}
+
+// Either stores a completion directly to an output buffer if not saturated,
+// otherwise queues it internally.
+@(private)
+_emit_completion :: proc(
+    ctx: ^PlatformIOContext,
+    comp: Completion,
+) {
+    // somewhat hacky way to get access to device independent fields
+    ctx: ^IOContext = container_of(ctx, IOContext, "_")
+    sink := &ctx._sink
+    if sink.nproduced < len(sink.out) {
+        #no_bounds_check sink.out[sink.nproduced] = comp
+        sink.nproduced += 1
+    } else {
+        assert(ctx._completion_queue.data.allocator.procedure != nil)
+        // TODO: make queue bounded
+        queue.push_back(&ctx._completion_queue, comp)
+    }
+}
+
 // Await IO completions for any of the registered clients (excluding the server socket).
 // # Inputs:
 // - `timeout_ms`: the waiting timeout in ms, pass `TIMEOUT_INFINITE` to block until a completion is delivered
@@ -133,8 +181,27 @@ unregister_client :: proc(ctx: ^IOContext, client: net.TCP_Socket) -> bool {
 // - An explicit `wakeup()` call was issued
 @(require_results)
 await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, timeout_ms: int) -> (n: int, ok: bool) {
-    assert(timeout_ms != 0, "non blocking await_io_completions makes no sense here")
-    return _await_io_completions(ctx, completions_out, timeout_ms)
+    assert(timeout_ms != 0, "timeout_ms must be != 0")
+
+    // drain internal queue first
+    nconsumed := 0
+    for ; nconsumed < len(completions_out); nconsumed += 1 {
+        comp := queue.pop_front_safe(&ctx._completion_queue) or_break
+        #no_bounds_check completions_out[nconsumed] = comp
+    }
+    if nconsumed == len(completions_out) {
+        tracy.Message(#procedure + " internal completion queue saturates user buffer")
+        return nconsumed, true
+    }
+
+    ctx._sink = CompletionSink {
+        // may as well pass (completions_out[nconsumed:], 0) here, but does not matter
+        out = completions_out,
+        nproduced = nconsumed,
+    }
+    
+    _await_io_completions(ctx, &ctx._sink, timeout_ms) or_return
+    return ctx._sink.nproduced, true
 }
 
 // Releases the ´buf´ of the given completion, must be called on completions of type ´.Read´ after
