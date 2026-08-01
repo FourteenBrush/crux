@@ -125,6 +125,8 @@ ClientConnection :: struct {
 
 @(private)
 _network_worker_thread_proc :: proc(shared: ^NetworkWorkerSharedData) {
+    context.allocator = mem.panic_allocator()
+    
     tracy.SetThreadName("crux-NetWorker")
     state := NetworkWorkerState {
         shared = shared^,

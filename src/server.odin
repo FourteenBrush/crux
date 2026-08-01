@@ -84,10 +84,15 @@ run :: proc(endpoint: net.Endpoint, server_sock: net.TCP_Socket) -> bool {
     }
 
     init_context := context
-    init_context.allocator = mem.panic_allocator()
+    // NOTE: we cannot assign a panic allocator to the context and thread.create_(name=..) will use this allocator to allocate the name
     // TODO: logger is not threadsafe
     init_context.logger = create_logger(LOG_LEVEL, {.Level, .Terminal_Color}, "io")
-    net_worker_thread := thread.create_and_start_with_poly_data(&net_worker_state, _network_worker_thread_proc, init_context=init_context)
+    net_worker_thread := thread.create_and_start_with_poly_data(
+        &net_worker_state,
+        _network_worker_thread_proc,
+        init_context=init_context,
+        name="crux-NetWorker",
+    )
     if net_worker_thread == nil {
         log.fatal("failed to start worker thread")
         return false
