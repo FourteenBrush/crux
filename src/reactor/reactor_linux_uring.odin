@@ -143,10 +143,10 @@ when true {
             case IOSend:
                 _process_send_cqe(ctx, &ctrl, cqe.res)
             case IOAccept:
+                defer free(&ctrl, ctx.allocator)
                 if ctx.accept_loop_closed do continue
 
                 _process_accept_cqe(ctx, ctrl, cqe.res)
-                free(&ctrl, ctx.allocator)
             case: panic("invalid union tag")
             }
         }
