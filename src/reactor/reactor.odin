@@ -12,7 +12,6 @@ import "lib:back"
 import "lib:tracy"
 
 _ :: back
-_ :: tracy
 
 @(private)
 USE_IO_URING :: #config(CRUX_USE_IO_URING, false)
@@ -71,7 +70,7 @@ Operation :: enum u8 {
 
 // Operation context, must not be moved after first use.
 IOContext :: struct {
-    #subtype _: PlatformIOContext,
+    #subtype _impl: PlatformIOContext,
     // Internal completion queue used when the `completions_out` buffer passed to `await_io_completions`
     // is saturated and we cannot reconstruct completion state from native apis alone.
     // Also handles os event batching. Lazily allocated.
@@ -155,6 +154,7 @@ CompletionSink :: struct {
     nproduced: int,
 }
 
+// Returns the number of unused completions, without resorting to internal buffering.
 @(private)
 _sink_free_space :: proc(sink: CompletionSink) -> int {
     return len(sink.out) - sink.nproduced
@@ -169,8 +169,8 @@ _emit_completion :: proc(
 ) {
     tracy.Zone()
 
-    // somewhat hacky way to get access to device independent fields
-    ctx: ^IOContext = container_of(ctx, IOContext, "_")
+    // somewhat hacky way to get access to platform independent fields
+    ctx: ^IOContext = container_of(ctx, IOContext, "_impl")
     sink := &ctx._sink
     if sink.nproduced < len(sink.out) {
         #no_bounds_check sink.out[sink.nproduced] = comp
@@ -208,7 +208,6 @@ await_io_completions :: proc(ctx: ^IOContext, completions_out: []Completion, tim
     }
 
     ctx._sink = CompletionSink {
-        // may as well pass (completions_out[nconsumed:], 0) here, but does not matter
         out = completions_out,
         nproduced = nconsumed,
     }
@@ -227,7 +226,7 @@ release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
     _release_recv_buf(ctx, comp.buf)
 }
 
-// Submits a write operation consisting of multiple buffers, the execution of this operation may be deferred till it is possible to do so.
+// Submits a write operation consisting of multiple buffers, the execution of this write operation may be deferred till it is possible to do so.
 // The passed top level buffer must only outlive this procedure call, the inner buffers must stay valid till a write completion (or error)
 // has been received by polling this context.
 // Every inner buffer will produce a `.Write` completion (or an error with a buffer attached).
@@ -236,8 +235,6 @@ submit_write_vectored :: proc(ctx: ^IOContext, client: net.TCP_Socket, bufs: [][
     tracy.Zone()
 
     assert(len(bufs) > 0, "zero length buffers passed")
-    // TODO: why dont we save the allocator the passed buffer was allocated with, so we can free it
-    // ourselves instead of sending it back?
     return _submit_write_vectored(ctx, client, bufs)
 }
 

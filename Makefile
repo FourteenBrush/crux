@@ -1,7 +1,6 @@
-ifeq ($(OS), Windows_NT)
-	PROG = crux.exe
-else
-	PROG = crux
+PROG = crux
+ifeq ($(OS),Windows_NT)
+	PROG := $(addsuffix .exe,$(PROG))
 endif
 
 SRC = src
@@ -10,7 +9,7 @@ COLLECTIONS = -collection:src=$(SRC) -collection:lib=lib
 
 CC = odin
 BUILD_DIR = build
-CFLAGS = -out:$(BUILD_DIR)/$(PROG) -strict-style -vet-semicolon -vet-cast $(COLLECTIONS) -define:CRUX_USE_IO_URING=false -vet-using-param
+CFLAGS = -out:$(BUILD_DIR)/$(PROG) -strict-style -vet-semicolon -vet-cast $(COLLECTIONS) -define:CRUX_USE_IO_URING=true -vet-using-param
 
 all: release
 
@@ -32,6 +31,7 @@ $(PROG):
 run: debug
 	./$(BUILD_DIR)/$(PROG) $(ARGS)
 
+# TODO: in non profile modes, tracy threads are also started for some reason, is this because it is being linked in even though its not used?
 profile: CFLAGS += -define:TRACY_ENABLE=true -debug
 profile: release
 	./$(BUILD_DIR)/$(PROG)

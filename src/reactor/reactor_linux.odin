@@ -7,7 +7,6 @@ package reactor
 @(require) import "core:mem"
 @(require) import "core:sys/posix"
 @(require) import "core:sys/linux"
-@(require) import "core:container/queue"
 
 @(require) import "base:runtime"
 @(require) import "base:intrinsics"
@@ -67,7 +66,7 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
     if errno != .NONE do return
     defer if !ok do linux.close(epoll_fd)
     
-    ctx.wakeup_eventfd, errno = linux.eventfd(0, {.NONBLOCK})
+    ctx.wakeup_eventfd, errno = linux.eventfd(0, {.NONBLOCK, .CLOEXEC})
     if errno != .NONE do return
     defer if !ok do linux.close(ctx.wakeup_eventfd)
     

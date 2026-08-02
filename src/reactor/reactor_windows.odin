@@ -70,6 +70,9 @@ _create_io_context :: proc(server_sock: net.TCP_Socket, allocator: mem.Allocator
     res = win32.timeBeginPeriod(ctx.timer_resolution)
     assert(res == win32.TIMERR_NOERROR, "invariant, resolution should not be out of range")
 
+    // we dont really need a corresponding WSACleanup as this proc will only initialize winsock once, future calls do nothing
+    win32.ensure_winsock_initialized()
+
     ctx.completion_port = win32.CreateIoCompletionPort(
 		win32.INVALID_HANDLE_VALUE,
 		win32.HANDLE(nil),
@@ -321,7 +324,7 @@ IOOperationData :: struct {
 	    read: struct {
 			// Dynamically allocated recv buf.
 			buf: []u8,
-		},
+		} `raw_union_tag:"op=.Read"`,
 		// Only applicable when `op == .Write`.
 		write: struct {
 		    // User allocated buffer that holds written data, in the case of partial writes, this always
@@ -329,11 +332,11 @@ IOOperationData :: struct {
     		// which part actually still needs to be transferred. (we must store the whole buffer to avoid leaking it)
 			buf: []u8,
 			already_transferred: u32,
-		},
+		} `raw_union_tag:"type=.Write"`,
 		// Only applicable when `op == .AcceptedConnection`.
 		accepted_conn: struct {
 		    socket: win32.SOCKET,
-		},
+		} `raw_union_tag:"type=.AcceptedConnection"`,
 	},
 	op: IOOperation,
 }
