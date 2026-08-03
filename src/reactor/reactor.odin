@@ -3,6 +3,7 @@
 // were started beforehand. The application code is given an opportunity to act on the result of those operations.
 package reactor
 
+import "core:os"
 import "core:net"
 import "core:mem"
 import "core:log"
@@ -244,6 +245,11 @@ wakeup :: proc(ctx: ^IOContext) {
     tracy.Zone()
 
     _wakeup(ctx)
+}
+
+@(private)
+_log_error :: proc(err: os.Platform_Error, message: string) {
+    log.errorf("%s: %s (%s)", message, err, os.error_string(err))
 }
 
 @(private)

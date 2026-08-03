@@ -408,9 +408,4 @@ _epoll_event :: proc(ctx: ^PlatformIOContext, socket: net.TCP_Socket, events: li
     return
 }
 
-@(private="file")
-_log_error :: proc(#any_int err: u32, message: string) {
-    log.logf(ERROR_LOG_LEVEL, "%s: %s", message, linux.Errno(err))
-}
-
 }

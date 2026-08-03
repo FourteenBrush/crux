@@ -184,11 +184,6 @@ when true {
         uring.submit(&ctx.ring, wait_nr=0) // flush
     }
 
-    @(private="file")
-    _log_error :: proc(errno: linux.Errno, message: string, level := ERROR_LOG_LEVEL) {
-        log.logf(level, "%s: %s", message, os.error_string(errno))
-    }
-
     // //////////////////////////////
     // IO OPERATIONS
     // //////////////////////////////

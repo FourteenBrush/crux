@@ -662,8 +662,3 @@ _sockaddr_to_endpoint :: proc(addr: ^win32.sockaddr) -> net.Endpoint {
     case: panic("neither ipv4 nor ipv6 address")
     }
 }
-
-@(private="file")
-_log_error :: proc(#any_int err: win32.DWORD, message: string) {
-    log.logf(ERROR_LOG_LEVEL, "%s: %s", message, win32.System_Error(err))
-}
