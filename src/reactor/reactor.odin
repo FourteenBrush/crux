@@ -6,12 +6,10 @@ package reactor
 import "core:net"
 import "core:mem"
 import "core:log"
+import "core:debug/trace"
 import "core:container/queue"
 
-import "lib:back"
 import "lib:tracy"
-
-_ :: back
 
 @(private)
 USE_IO_URING :: #config(CRUX_USE_IO_URING, false)
@@ -251,19 +249,19 @@ wakeup :: proc(ctx: ^IOContext) {
 @(private)
 _make_instrumented_alloc :: proc(backing: mem.Allocator, meta_allocator: mem.Allocator) -> mem.Allocator {
     when ODIN_DEBUG && !tracy.TRACY_ENABLE && !ODIN_TEST {
-        tracking_alloc := new(back.Tracking_Allocator, meta_allocator)
-        back.tracking_allocator_init(
+        tracking_alloc := new(trace.Tracking_Allocator, meta_allocator)
+        trace.tracking_allocator_init(
             tracking_alloc,
             backing_allocator=backing,
             internals_allocator=meta_allocator,
         )
-        return back.tracking_allocator(tracking_alloc)
+        return trace.tracking_allocator(tracking_alloc)
     }
     when tracy.TRACY_ENABLE {
         return tracy.MakeProfiledAllocator(
             new(tracy.ProfiledAllocatorData, meta_allocator),
             callstack_size=14,
-            backing_allocator=backing,
+            traceing_allocator=backing,
         )
     }
     return backing
@@ -273,14 +271,14 @@ _make_instrumented_alloc :: proc(backing: mem.Allocator, meta_allocator: mem.All
 _destroy_instrumented_alloc :: proc(instrumented: mem.Allocator, meta_allocator: mem.Allocator) -> (unwrapped: mem.Allocator) {
     when tracy.TRACY_ENABLE {
         profiler_data := cast(^tracy.ProfiledAllocatorData) instrumented.data
-        unwrapped = profiler_data.backing_allocator
+        unwrapped = profiler_data.traceing_allocator
         free(profiler_data, meta_allocator)
         return
     }
     when ODIN_DEBUG && !tracy.TRACY_ENABLE && !ODIN_TEST {
-        tracking_alloc := cast(^back.Tracking_Allocator) instrumented.data
-        back.tracking_allocator_print_results(tracking_alloc)
-        back.tracking_allocator_destroy(tracking_alloc)
+        tracking_alloc := cast(^trace.Tracking_Allocator) instrumented.data
+        trace.tracking_allocator_print_results(tracking_alloc)
+        trace.tracking_allocator_destroy(tracking_alloc)
         unwrapped = tracking_alloc.backing
         free(tracking_alloc, meta_allocator)
         return

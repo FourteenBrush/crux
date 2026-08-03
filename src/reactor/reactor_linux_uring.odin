@@ -139,14 +139,12 @@ when true {
             switch &ctrl in ctrl {
             case IORecv:
                 _process_recv_cqe(ctx, ctrl, cqe.res)
-                // freed with _release_recv_buf()
+                // freed by _release_recv_buf()
             case IOSend:
                 _process_send_cqe(ctx, &ctrl, cqe.res)
             case IOAccept:
-                defer free(&ctrl, ctx.allocator)
-                if ctx.accept_loop_closed do continue
-
                 _process_accept_cqe(ctx, ctrl, cqe.res)
+                free(&ctrl, ctx.allocator)
             case: panic("invalid union tag")
             }
         }
@@ -163,7 +161,10 @@ when true {
 
     @(private)
     _submit_write_vectored :: proc(ctx: ^PlatformIOContext, sock: net.TCP_Socket, bufs: [][]u8) -> bool {
-        ctrlp, ctrl, ancillary := _alloc_control_with_data(ctx, IOSend, len(bufs) * size_of(linux.IO_Vec))
+        ancillary_size := len(bufs) * size_of(linux.IO_Vec)
+        ctrlp, ctrl, ancillary := _alloc_control_with_data(ctx, IOSend, ancillary_size)
+
+        // ensure bufs lifetime survives in sqe
         ctrl.msghdr.iov = mem.slice_ptr(cast(^linux.IO_Vec)raw_data(ancillary), len(bufs))
         iovecs := transmute([]linux.IO_Vec)bufs
         copy(ctrl.msghdr.iov, iovecs)
@@ -238,6 +239,9 @@ when true {
             _log_error(linux.Errno(-ret), "accept did not complete successfully")
             return
         }
+
+        if ctx.accept_loop_closed do return
+        
         _initiate_recv(ctx, linux.Fd(ret))
 
         _emit_completion(ctx, Completion {
@@ -246,9 +250,7 @@ when true {
             endpoint = _sockaddr_to_endpoint(ctrl.dst_addr),
         })
 
-        if !ctx.accept_loop_closed {
-            _initiate_accept(ctx)
-        }
+        _initiate_accept(ctx)
     }
     
     @(private="file")

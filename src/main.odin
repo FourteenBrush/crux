@@ -9,6 +9,7 @@ import "core:time"
 import "base:runtime"
 import "core:strings"
 import "core:terminal"
+import "core:debug/trace"
 import "core:encoding/uuid"
 import "core:terminal/ansi"
 
@@ -28,16 +29,15 @@ _ :: mem
 
 main :: proc() {
     exit_success := false
-    // NOTE: must be put before all other deferred statements
+    // must be put before all other deferred statements
     defer os.exit(0 if exit_success else 1)
 
-    // in debug mode, wrap a tracking allocator around the dynamic arena
     when ODIN_DEBUG && !tracy.TRACY_ENABLE {
-        tracking_alloc: back.Tracking_Allocator
-        back.tracking_allocator_init(&tracking_alloc, context.allocator)
-        defer back.tracking_allocator_destroy(&tracking_alloc)
-        context.allocator = back.tracking_allocator(&tracking_alloc)
-        defer back.tracking_allocator_print_results(&tracking_alloc, .Both)
+        tracking_alloc: trace.Tracking_Allocator
+        trace.tracking_allocator_init(&tracking_alloc, context.allocator)
+        defer trace.tracking_allocator_destroy(&tracking_alloc)
+        context.allocator = trace.tracking_allocator(&tracking_alloc)
+        defer trace.tracking_allocator_print_results(&tracking_alloc)
     }
 
     when tracy.TRACY_ENABLE {
@@ -48,11 +48,12 @@ main :: proc() {
         )
     }
 
+    // TODO: get rid of back dependency here, replace with cross platform handler which invokes trace.capture()
     back.register_segfault_handler()
     context.assertion_failure_proc = proc(prefix, message: string, loc: runtime.Source_Code_Location) -> ! {
         // ensure we do not enter recursive panic by calling into callsite mem.panic_allocator()
         context.allocator = runtime.default_allocator()
-        back.assertion_failure_proc(prefix, message, loc)
+        trace.assertion_failure_proc(prefix, message, loc)
     }
 
     alloc_formatters := fmt._user_formatters == nil
@@ -64,9 +65,6 @@ main :: proc() {
         fmt.set_user_formatters(&formatters)
     }
     _register_user_formatters()
-
-    // TODO
-    // args, ok := parse_cli_args(allocator)
     
     // NOTE: log package respects NO_COLOR env var and will not output colors if this is set
     log_opts := log.Options {.Level, .Terminal_Color}
@@ -84,6 +82,11 @@ main :: proc() {
     	40..<50 = "fatal",
     }
     context.logger = create_logger(LOG_LEVEL, log_opts, "core")
+    
+    // TODO
+    args, ok := parse_cli_args()
+    _ = args
+    if !ok do return
     
     tracy.SetThreadName("main")
     

@@ -48,6 +48,7 @@ _serialize_clientbound :: proc(
     data_len_buf := _serialize_var_int(VarInt(data_len), allocator)
     defer if !ok do delete(data_len_buf, allocator)
 
+    assert(buf_length(tx_buf^) == uncompressed_data_len)
     // freed after receiving write completion
     id_and_payload, alloc_err := mem.alloc_bytes_non_zeroed(buf_length(tx_buf^), align_of(u8), allocator)
     defer if !ok do delete(id_and_payload, allocator)

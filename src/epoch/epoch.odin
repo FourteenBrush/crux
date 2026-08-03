@@ -17,7 +17,7 @@ Allocator :: struct {
 
 // Represents a logical block which forms an epoch arena, every BlockHeader starts off as a physical
 // block allocated by `block_allocator`, after which it may eventually be split to form a logical block
-// that represents data for a certain epoch. Blocks may be merged on freeing and they keep track the next
+// that represents data for a certain epoch. Blocks may be merged on freeing and they keep track of the next
 // logical and physical block (which may be the same).
 BlockHeader :: struct {
     // Usable size of this block excluding the header, to support splitting.
