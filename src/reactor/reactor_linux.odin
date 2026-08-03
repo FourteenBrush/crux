@@ -22,11 +22,13 @@ _TIMEOUT_INFINITE :: -1
 @(private)
 PlatformIOContext :: struct {
     server_sock: net.TCP_Socket,
-    epoll_fd: linux.Fd,
-    wakeup_eventfd: linux.Fd,
     // Allocator used to allocate recv buffers, the pending writes map and slices of iovecs.
     allocator: mem.Allocator,
+
+    epoll_fd: linux.Fd,
+    wakeup_eventfd: linux.Fd,
     
+    accept_loop_closed: bool,
     // Per socket queue of pending outbound writes, each entry inside the write queue represents a buffer
     // previously submitted via `submit_write_copy`. Buffers remain owned by the caller until a corresponding
     // `.Write` or `.Error` completion is emitted for every one of them.
@@ -101,6 +103,7 @@ _destroy_io_context :: proc(ctx: ^PlatformIOContext, allocator: mem.Allocator) {
 _close_accept_loop :: proc(ctx: ^PlatformIOContext) {
     errno := linux.epoll_ctl(ctx.epoll_fd, .DEL, linux.Fd(ctx.server_sock), nil)
     assert(errno == .NONE, "failed to unregister server sock")
+    ctx.accept_loop_closed = true
 }
 
 // NOTE: also used by server socket
@@ -206,6 +209,9 @@ _await_io_completions :: proc(ctx: ^PlatformIOContext, sink: ^CompletionSink, ti
 
 @(private="file", require_results)
 _do_accept :: proc(ctx: ^PlatformIOContext) -> (comp: Completion, emit: bool) {
+    // ensure cached notification is ignored
+    if ctx.accept_loop_closed do return comp, false
+    
     client_sock, endpoint, accept_err := net.accept_tcp(ctx.server_sock, /*client options*/{ no_delay=true })
     if accept_err != .None {
         log.warn("failed to accept client:", accept_err)
