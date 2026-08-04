@@ -103,12 +103,6 @@ buf_length :: proc(buf: NetworkBuffer) -> int {
     return len(buf.data)
 }
 
-// Returns the amount of bytes consumed since the last recorded read offset passed.
-@(require_results)
-buf_bytes_consumed_since :: proc(buf: NetworkBuffer, old_offset: int) -> int {
-    return (buf.r_offset - old_offset + len(buf.data)) % len(buf.data)
-}
-
 // Checks whether `n` bytes are readable, returns .ShortRead if not.
 @(require_results)
 buf_ensure_readable :: proc(buf: NetworkBuffer, #any_int n: int) -> ReadError {

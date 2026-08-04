@@ -24,6 +24,13 @@ _deserialize_serverbound :: proc(
     packet: ServerBoundPacket,
     err: ReadError,
 ) {
+    when ODIN_DEBUG {
+        orig_len := buf_length(buf^)
+        defer if err == .ShortRead {
+            assert(buf_length(buf^) == orig_len, ".ShortRead errors must not consume bytes, this is a bug")
+        }
+    }
+
     compression_threshold, uses_compressed_format := compression_threshold.?
     if !uses_compressed_format || compression_threshold < 0 {
         return _deserialize_serverbound_packet(buf, client_state, allocator)
@@ -63,6 +70,7 @@ _deserialize_serverbound :: proc(
     )
     if decompression_err != nil {
         log.debug("decompression error:", decompression_err)
+        log.debugf("packet_len=%d, compressed_data_len=%d, compressed data dump: %2x", packet_len, compressed_data_len, compressed_id_and_payload)
         return packet, .InvalidData
     }
 
@@ -118,7 +126,7 @@ _deserialize_serverbound_id_and_payload :: proc(
     buf: ^NetworkBuffer,
     client_state: ClientState,
     allocator: mem.Allocator,
-    length: int,
+    id_and_payload_length: int,
 ) -> (
     packet: ServerBoundPacket,
     err: ReadError,
@@ -170,7 +178,8 @@ _deserialize_serverbound_id_and_payload :: proc(
         return LoginAcknowledgedPacket {}, .None
     case .PluginMessage:
         channel := buf_read_identifier(buf, allocator) or_return
-        payload, _ := mem.alloc_bytes_non_zeroed(int(length) - buf_bytes_consumed_since(buf^, start_off), allocator=allocator)
+        payload_len := id_and_payload_length - (buf.r_offset - start_off)
+        payload, _ := mem.alloc_bytes_non_zeroed(payload_len, alignment=align_of(u8), allocator=allocator)
         buf_read_bytes(buf, payload[:]) or_return
         return PluginMessagePacket { channel=channel, payload=payload }, .None
     case .KnownPacks:

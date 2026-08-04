@@ -1,0 +1,12 @@
+[
+  {
+    "label": "Debug Odin program",
+    "adapter": "GDB", // or CodeLLDB,
+    "program": "$ZED_WORKTREE_ROOT/build/crux",
+    "build": {
+      "command": "make",
+      "args": ["debug"],
+    },
+    "request": "launch",
+  },
+]
