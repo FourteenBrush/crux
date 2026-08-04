@@ -47,6 +47,10 @@ NetworkWorkerState :: struct {
     // A shutdown will keep lingering till this number reaches zero, to ensure a proper packet flush.
     // Decremented on write completions.
     outstanding_writes: int,
+    // Temporary buffer for serializing packets into, and extract the written bytes out from, does
+    // not need to be stored per client connection as packets are immediately submitted to the io subsystem and cached there.
+    // FIXME: may in fact be a linear buffer as it is always sent at once, also avoids buf_copy_into calls
+    temp_tx_buf: NetworkBuffer,
 }
 
 @(private)
@@ -119,8 +123,6 @@ ClientConnection :: struct {
     packet_scratch_alloc: mem.Allocator,
 
     rx_buf: NetworkBuffer,
-    // FIXME: may in fact be a linear buffer as it is always sent at once, also avoids buf_copy_into calls
-    tx_buf: NetworkBuffer,
 }
 
 @(private)
@@ -131,6 +133,7 @@ _network_worker_thread_proc :: proc(shared: ^NetworkWorkerSharedData) {
     state := NetworkWorkerState {
         shared = shared^,
         connections = make(map[net.TCP_Socket]ClientConnection, 16, os.heap_allocator()),
+        temp_tx_buf = create_network_buf(2048, os.heap_allocator()),
     }
 
     defer cleanup: {
@@ -161,11 +164,8 @@ _network_worker_thread_proc :: proc(shared: ^NetworkWorkerSharedData) {
 
 @(private="file")
 _network_worker_run_tick :: proc(state: ^NetworkWorkerState) {
-    REACTOR_TIMEOUT_MS :: 1
-    #assert(REACTOR_TIMEOUT_MS < WORKER_TARGET_MSPT)
-    
     completions: [512]reactor.Completion
-    // TODO: thread sometimes stalls with reactor.TIMEOUT_INFINITE
+    // TODO: thread sometimes stalls with reactor.TIMEOUT_INFINITE for epoll
     nready, await_ok := reactor.await_io_completions(state.io_ctx, completions[:], reactor.TIMEOUT_INFINITE)
     assert(await_ok, "failed to await io completions") // FIXME: proper error handling
     
@@ -263,6 +263,7 @@ _network_worker_atexit :: proc(state: ^NetworkWorkerState) {
         _finalize_client(state, &client_conn, force=true)
     }
     delete(state.connections)
+    destroy_network_buf(state.temp_tx_buf)
 }
 
 // Awaits pending write completions, to ensure outgoing data has been successfully flushed.
@@ -345,7 +346,8 @@ _enqueue_packet :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnecti
         client_conn.compression_threshold = i32(compression.threshold)
     }
     
-    bufs := _serialize_clientbound(packet, descriptor, client_conn.compression_threshold, &client_conn.tx_buf, client_conn.packet_scratch_alloc) or_return
+    bufs := _serialize_clientbound(packet, descriptor, client_conn.compression_threshold, &state.temp_tx_buf, client_conn.packet_scratch_alloc) or_return
+    buf_reset(&state.temp_tx_buf)
     assert(sa.len(bufs) >= 2, "expected at least length header and (id, payload) combination")
 
     submission_ok := reactor.submit_write_vectored(state.io_ctx, client_conn.socket, sa.slice(&bufs))
@@ -354,9 +356,6 @@ _enqueue_packet :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnecti
         log.debug("io submission not ok")
         return false
     }
-    // TODO: can we consider removing the tx_buf from ClientConnection, as we only use it for temporary serialization,
-    // after which it is submitted and reset, maybe just use a temporary allocation for every call
-    buf_reset(&client_conn.tx_buf)
     
     state.outstanding_writes += sa.len(bufs)
     client_conn.outstanding_writes += cast(u32) sa.len(bufs)
@@ -394,7 +393,6 @@ _create_client_connection :: proc(socket: net.TCP_Socket) -> ClientConnection {
         // packet_scratch_alloc = mem.scratch_allocator(packet_scratch),
         packet_scratch_alloc = mem.mutex_allocator(packet_scratch),
         rx_buf = create_network_buf(160*mem.Megabyte, allocator=os.heap_allocator()),
-        tx_buf = create_network_buf(16 * mem.Kilobyte, allocator=os.heap_allocator()),
     }
 }
 
@@ -432,7 +430,6 @@ _finalize_client :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnect
     spsc_enqueue(state.outbound_queue, TerminateClientRequest { client=client_conn.socket })
     
     _, client_conn := delete_key(&state.connections, client_conn.socket)
-    destroy_network_buf(client_conn.tx_buf)
     destroy_network_buf(client_conn.rx_buf)
     
     scratch_alloc := cast(^mem.Mutex_Allocator) client_conn.packet_scratch_alloc.data
