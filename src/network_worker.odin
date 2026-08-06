@@ -190,8 +190,10 @@ _network_worker_process_completions :: proc(state: ^NetworkWorkerState, completi
             "completion with outstanding write ownership arrived after ClientConnection destruction",
         )
         if comp_holds_conn_alive {
-            assert(client_conn.outstanding_writes > 0)
+            assert(client_conn.outstanding_writes > 0, "client_conn write refcount was not incremented")
             client_conn.outstanding_writes -= 1
+            assert(state.outstanding_writes > 0, "write refcount was not incremented")
+            state.outstanding_writes -= 1
         }
 
         switch comp.operation {
@@ -221,8 +223,6 @@ _network_worker_process_completions :: proc(state: ^NetworkWorkerState, completi
                 _drain_serverbound_packets(state, client_conn)
             }
         case .Write:
-            assert(state.outstanding_writes > 0, "write refcount was not incremented")
-            state.outstanding_writes -= 1
             // must be freed using the same allocator the reactor write call was made with
             delete(comp.buf, client_conn.packet_scratch_alloc)
             if _try_finalize_client(state, client_conn) {
@@ -279,17 +279,23 @@ _network_worker_linger_shutdown :: proc(state: ^NetworkWorkerState, timeout: tim
     for {
         // NOTE: safe to call as we just supressed accepting new connections and reads
         completions: [512]reactor.Completion
-        nready, await_ok := reactor.await_io_completions(state.io_ctx, completions[:], timeout_ms=200)
+        nready, await_ok := reactor.await_io_completions(state.io_ctx, completions[:], timeout_ms=1000)
         assert(await_ok, "failed to await io completions") // FIXME: proper error handling
         _network_worker_process_completions(state, completions[:nready], process_reads=false)
 
         if state.outstanding_writes == 0 do break
-        hit_deadline := time.tick_since(start) > timeout
+        elapsed := time.tick_since(start)
+        hit_deadline := elapsed > timeout
         if hit_deadline {
             log.debugf("shutdown lingering hit deadline(%v) with %d outstanding writes", timeout, state.outstanding_writes)
             break
         }
-        log.debug("lingering shutdown")
+        log.debugf(
+            "lingering shutdown (outstanding=%d) [%v/%v]",
+            state.outstanding_writes,
+            time.duration_round(elapsed, time.Second),
+            time.duration_round(timeout, time.Second),
+        )
     }
 }
 
