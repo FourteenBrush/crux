@@ -12,6 +12,8 @@ import "core:container/queue"
 
 import "lib:tracy"
 
+_ :: trace
+
 @(private)
 USE_IO_URING :: #config(CRUX_USE_IO_URING, false)
 
@@ -168,6 +170,7 @@ _emit_completion :: proc(
 ) {
     tracy.Zone()
 
+    assert(comp.socket > 0)
     // somewhat hacky way to get access to platform independent fields
     ctx: ^IOContext = container_of(ctx, IOContext, "_impl")
     sink := &ctx._sink

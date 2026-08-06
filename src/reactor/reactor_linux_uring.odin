@@ -14,8 +14,7 @@ package reactor
 
 @(require) import "lib:tracy"
 
-// TODO: VV
-when true {
+when USE_IO_URING {
 
     @(private)
     _TIMEOUT_INFINITE :: -1
@@ -154,7 +153,7 @@ when true {
     
     @(private)
     _release_recv_buf :: proc(ctx: ^PlatformIOContext, buf: []u8) {
-        // offset ptr to wrapping allocation containing io control block
+        // offset ptr to free wrapping allocation containing both io control block and recv buf
         ptr := uintptr(raw_data(buf)) - size_of(IOOperation)
         free(rawptr(ptr), ctx.allocator)
     }
@@ -263,6 +262,9 @@ when true {
     @(private="file")
     _process_recv_cqe :: proc(ctx: ^PlatformIOContext, ctrl: IORecv, ret: i32) {
         tracy.Zone()
+
+        // NOTE: explicit copy to work around pass by ptr optimization, where _release_recv_buf corrupts this seemingly stack allocated value
+        ctrl := ctrl
 
         if ret < 0 {
             _log_error(linux.Errno(-ret), "recv did not complete successfully")
