@@ -218,35 +218,35 @@ get_clientbound_packet_descriptor :: proc(packet: ClientBoundPacket) -> ClientBo
 @(rodata, private="file")
 clientbound_packet_descriptors := [intrinsics.type_union_variant_count(ClientBoundPacket)]ClientBoundPacketDescriptor {
     // sent in Status state
-    VARIANT_IDX_OF(ClientBoundPacket, StatusResponsePacket)            = { .StatusResponse,            false },
-    VARIANT_IDX_OF(ClientBoundPacket, PongResponsePacket)              = { .PongResponse,              true  },
+    VARIANT_IDX_OF(ClientBoundPacket, StatusResponsePacket)            = { .StatusResponse,            false, .Status },
+    VARIANT_IDX_OF(ClientBoundPacket, PongResponsePacket)              = { .PongResponse,              true,  .Status },
     // sent in Login state
-    VARIANT_IDX_OF(ClientBoundPacket, SetCompressionPacket)            = { .SetCompression,            false },
-    VARIANT_IDX_OF(ClientBoundPacket, LoginSuccessPacket)              = { .LoginSuccess,              false },
-    VARIANT_IDX_OF(ClientBoundPacket, DisconnectLoginPacket)           = { .DisconnectLogin,           true  },
+    VARIANT_IDX_OF(ClientBoundPacket, SetCompressionPacket)            = { .SetCompression,            false, .Login },
+    VARIANT_IDX_OF(ClientBoundPacket, LoginSuccessPacket)              = { .LoginSuccess,              false, .Login },
+    VARIANT_IDX_OF(ClientBoundPacket, DisconnectLoginPacket)           = { .DisconnectLogin,           true,  .Login } ,
     // sent in Configuration state
-    VARIANT_IDX_OF(ClientBoundPacket, PluginMessagePacket)             = { .PluginMessage,             false },
-    VARIANT_IDX_OF(ClientBoundPacket, DisconnectConfigurationPacket)   = { .DisconnectConfiguration,   true  },
-    VARIANT_IDX_OF(ClientBoundPacket, KnownPacksPacket)                = { .KnownPacks,                false },
-    VARIANT_IDX_OF(ClientBoundPacket, RegistryDataPacket)              = { .RegistryData,              false },
-    VARIANT_IDX_OF(ClientBoundPacket, KeepAliveConfigurationPacket)    = { .KeepAliveConfiguration,    false },
-    VARIANT_IDX_OF(ClientBoundPacket, FinishConfigurationPacket)       = { .FinishConfiguration,       false },
+    VARIANT_IDX_OF(ClientBoundPacket, PluginMessagePacket)             = { .PluginMessage,             false, .Configuration },
+    VARIANT_IDX_OF(ClientBoundPacket, DisconnectConfigurationPacket)   = { .DisconnectConfiguration,   true,  .Configuration },
+    VARIANT_IDX_OF(ClientBoundPacket, KnownPacksPacket)                = { .KnownPacks,                false, .Configuration },
+    VARIANT_IDX_OF(ClientBoundPacket, RegistryDataPacket)              = { .RegistryData,              false, .Configuration },
+    VARIANT_IDX_OF(ClientBoundPacket, KeepAliveConfigurationPacket)    = { .KeepAliveConfiguration,    false, .Configuration },
+    VARIANT_IDX_OF(ClientBoundPacket, FinishConfigurationPacket)       = { .FinishConfiguration,       false, .Configuration },
     // sent in Play state
-    VARIANT_IDX_OF(ClientBoundPacket, LoginPacket)                     = { .Login,                     false },
-    VARIANT_IDX_OF(ClientBoundPacket, DisconnectPlayPacket)            = { .DisconnectPlay,            true  },
-    VARIANT_IDX_OF(ClientBoundPacket, SynchronizePlayerPositionPacket) = { .SynchronizePlayerPosition, false },
-    VARIANT_IDX_OF(ClientBoundPacket, PlayerInfoUpdatePacket)          = { .PlayerInfoUpdate,          false },
-    VARIANT_IDX_OF(ClientBoundPacket, GameEventPacket)                 = { .GameEvent,                 false },
-    VARIANT_IDX_OF(ClientBoundPacket, PlayerAbilitiesPacket)           = { .PlayerAbilities,           false },
-    VARIANT_IDX_OF(ClientBoundPacket, KeepAlivePlayPacket)             = { .KeepAlivePlay,             false },
-    VARIANT_IDX_OF(ClientBoundPacket, SetCenterChunkPacket)            = { .SetCenterChunk,            false },
-    VARIANT_IDX_OF(ClientBoundPacket, ChunkDataPacket)                 = { .ChunkData,                 false },
-    VARIANT_IDX_OF(ClientBoundPacket, ContainerSetSlotPacket)          = { .ContainerSetSlot,          false },
+    VARIANT_IDX_OF(ClientBoundPacket, LoginPacket)                     = { .Login,                     false, .Play },
+    VARIANT_IDX_OF(ClientBoundPacket, DisconnectPlayPacket)            = { .DisconnectPlay,            true,  .Play },
+    VARIANT_IDX_OF(ClientBoundPacket, SynchronizePlayerPositionPacket) = { .SynchronizePlayerPosition, false, .Play },
+    VARIANT_IDX_OF(ClientBoundPacket, PlayerInfoUpdatePacket)          = { .PlayerInfoUpdate,          false, .Play },
+    VARIANT_IDX_OF(ClientBoundPacket, GameEventPacket)                 = { .GameEvent,                 false, .Play },
+    VARIANT_IDX_OF(ClientBoundPacket, PlayerAbilitiesPacket)           = { .PlayerAbilities,           false, .Play },
+    VARIANT_IDX_OF(ClientBoundPacket, KeepAlivePlayPacket)             = { .KeepAlivePlay,             false, .Play },
+    VARIANT_IDX_OF(ClientBoundPacket, SetCenterChunkPacket)            = { .SetCenterChunk,            false, .Play },
+    VARIANT_IDX_OF(ClientBoundPacket, ChunkDataPacket)                 = { .ChunkData,                 false, .Play },
+    VARIANT_IDX_OF(ClientBoundPacket, ContainerSetSlotPacket)          = { .ContainerSetSlot,          false, .Play },
 }
 
 @(private)
 ServerBoundPacketDescriptor :: struct {
-    // Client state in which this packet should arrive.
+    // Client states in which this packet should arrive.
     expected_client_states: bit_set[ClientState],
 }
 
@@ -255,6 +255,8 @@ ClientBoundPacketDescriptor :: struct {
     packet_id: ClientBoundPacketId,
     // Whether the `ClientConnection` sending this packet will enter a terminating state.
     is_terminal: bool,
+    // Client state in which this packet should be sent, to catch bugs where we attempt to send a packet in the wrong state.
+    expected_client_state: ClientState,
 }
 
 @(private, require_results)
