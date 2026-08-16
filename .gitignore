@@ -11,6 +11,7 @@ build/
 .task
 /.odin-cache
 *.spall
+.cache
 
 Session.vim
 Sessionx.vim
