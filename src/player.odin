@@ -29,6 +29,7 @@ SessionData :: struct {
     },
 
     current_breaking_sequence: Maybe(i32),
+    #subtype inventory: Inventory,
     
     // TODO: move to global arena list based on epoch, backed by vmem allocator
     packet_scratch_alloc: mem.Allocator,
@@ -52,6 +53,10 @@ PendingTeleport :: struct {
     pos: Pos,
 }
 
+Inventory :: struct {
+    items: []ItemStack,
+}
+
 player_crosses_chunk_borders :: proc(session: ^SessionData, new_pos: Pos) -> bool {
     // TODO: consider caching chunk positions for entities to avoid floor operations
     chunk_pos := pos_to_chunk(session.pos)
@@ -67,12 +72,10 @@ player_teleport :: proc(session: ^SessionData, pos: Pos) {
 }
 
 player_set_compression :: proc(session: ^SessionData, threshold: i32) {
-    assert(session.state == .Login, "compression may only be configured in login state")
     enqueue_packet(session, SetCompressionPacket { threshold=VarInt(threshold) })
 }
 
 player_send_keepalive :: proc(session: ^SessionData, id: i64, now: time.Tick) {
-    assert(session.state == .Configuration || session.state == .Play, "keepalives may only be sent in selected states")
     #partial switch session.state {
     case .Configuration:
         enqueue_packet(session, KeepAliveConfigurationPacket { id=Long(id) })
@@ -83,4 +86,15 @@ player_send_keepalive :: proc(session: ^SessionData, id: i64, now: time.Tick) {
     session.clientbound_keepalive.id = id
     session.clientbound_keepalive.sent = now
     session.clientbound_keepalive.awaiting_serverbound = true
+}
+
+PLAYER_INV_SLOT_COUNT :: 46
+
+@(rodata, private)
+INVENTORY_INSERT_ORDER := [36]i16 {
+    // try hotbar first
+    36, 37, 38, 39, 40, 41, 42, 43, 44,
+     9, 10, 11, 12, 13, 14, 15, 16, 17,
+    18, 19, 20, 21, 22, 23, 24, 25, 26,
+    27, 28, 29, 30, 31, 32, 33, 34, 35,
 }

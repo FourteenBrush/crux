@@ -430,7 +430,7 @@ _serialize_clientbound_uncompressed :: proc(outb: ^NetworkBuffer, packet: Client
         buf_write_var_int(outb, packet.window_id)
         buf_write_var_int(outb, packet.state_id)
         buf_write_i16(outb, packet.slot)
-        _serialize_slot(outb, packet.slot_data) or_return
+        _serialize_item_stack(outb, packet.slot_data) or_return
     }
     
     packet_len = buf_length(outb^) - initial_len
@@ -680,18 +680,30 @@ _serialize_biome_registry_entry :: proc(writer: ^NBTWriter, entry: Biome) -> Wri
 }
 
 @(private="file", require_results)
-_serialize_slot :: proc(outb: ^NetworkBuffer, slot: Slot) -> WriteError {
-    buf_write_var_int(outb, slot.item_count)
-    if slot.item_count > 0 {
-        buf_write_var_int(outb, slot.item_id)
+_serialize_item_stack :: proc(outb: ^NetworkBuffer, item: ItemStack) -> WriteError {
+    buf_write_var_int(outb, VarInt(item.count))
+    if item.count > 0 {
+        buf_write_var_int(outb, VarInt(item.item.protocol_id))
 
-        buf_write_var_int(outb, VarInt(len(slot.components_to_add)))
-        buf_write_var_int(outb, VarInt(len(slot.components_to_remove)))
-        for comp in slot.components_to_add {
-            _serialize_data_component(outb, comp)
+        components_to_add, components_to_remove := 0, 0
+        for patch in item.patches {
+            if data := patch.right; data != nil {
+                components_to_add += 1
+            } else {
+                components_to_remove += 1
+            }
         }
-        for comp_type in slot.components_to_remove {
-            buf_write_var_int(outb, VarInt(comp_type))
+        buf_write_var_int(outb, VarInt(components_to_add))
+        buf_write_var_int(outb, VarInt(components_to_remove))
+        for patch in item.patches {
+            if data, has_data := patch.right.?; has_data {
+                _serialize_data_component(outb, data)
+            }
+        }
+        for patch in item.patches {
+            if type, data := **patch; data == nil {
+                buf_write_var_int(outb, VarInt(type))
+            }
         }
     }
     return .None

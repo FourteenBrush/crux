@@ -7,6 +7,7 @@ import "core:mem"
 import "core:net"
 import "core:sync"
 import "core:time"
+import "core:slice"
 import "core:thread"
 import "core:c/libc"
 import "core:strings"
@@ -46,8 +47,8 @@ Server :: struct {
     outbound_queue: ^SPSC(OutboundMessage),
     messages_emitted: bool,
     
-    // World data essentially, TODO: move this out to some world abstraction once this is established
     sessions: map[net.TCP_Socket]SessionData,
+    // World data essentially, TODO: move this out to some world abstraction once this is established
     loaded_chunks: map[ChunkPos]BlockId,
 }
 
@@ -84,7 +85,7 @@ run :: proc(endpoint: net.Endpoint, server_sock: net.TCP_Socket) -> bool {
     }
 
     init_context := context
-    // NOTE: we cannot assign a panic allocator to the context and thread.create_(name=..) will use this allocator to allocate the name
+    // NOTE: we cannot assign a panic allocator to the context as thread.create_(name=..) will use this allocator to allocate the name
     // TODO: logger is not threadsafe
     init_context.logger = create_logger(LOG_LEVEL, {.Level, .Terminal_Color}, "io")
     net_worker_thread := thread.create_and_start_with_poly_data(
@@ -178,11 +179,10 @@ _handle_bridge_message :: proc(server: ^Server, message: InboundMessage) {
     	_, session := delete_key(&server.sessions, message.client)
      	// check if zero initialized, which would mean we already terminated the client ourselves (due to sending a terminal packet
       	// and immediately sending a TerminateClientRequest to the network worker)
-     	if session.socket == net.TCP_Socket(0) do break
+     	if session.packet_scratch_alloc.procedure == nil do break
 
       	session.terminating = true
-        // TODO: _terminate_session sends TerminateClientRequest, even though we just received one from the io worker, no confirmation is needed
-      	_terminate_session(server, session)
+      	_terminate_session(server, session, .RemoteInitiated)
 
         // TODO: actually remove connection from map, we still sent data allocated by this thread to the io thread
         // but this can be fixed by using a global epoch based allocator, whereas the session now doesnt
@@ -223,34 +223,40 @@ _create_session :: proc(
     state: ClientState,
     protocol_version: ProtocolVersion,
 ) -> SessionData {
-    // scratch_alloc := new(mem.Mutex_Allocator, os.heap_allocator())
-    // mem.mutex_allocator_init(scratch_alloc, os.heap_allocator())
     scratch_alloc := new(mem.Scratch, os.heap_allocator())
     mem.scratch_init(scratch_alloc, 16 * mem.Megabyte, os.heap_allocator())
+
+    inv_items := make([]ItemStack, PLAYER_INV_SLOT_COUNT, os.heap_allocator() /*gpa*/)
+    slice.fill(inv_items, ItemStack { item=&ITEM_AIR, count=0 })
     
+    // TODO: optimize to reduce allocation count
     return SessionData {
         socket=socket,
         state=state,
         protocol_version=protocol_version,
         // packet_scratch_alloc=mem.mutex_allocator(scratch_alloc),
         packet_scratch_alloc=mem.scratch_allocator(scratch_alloc),
+        inventory=Inventory { items=inv_items },
     }
 }
 
+// Inputs:
+// - `origin`: specifies where the termination originated.
+//   `.Local` indicates that the main thread initiated the termination, in which case
+//   the network thread must be notified. `.RemoteInitiated` indicates that the
+//   network thread already initiated the termination, so no response is necessary.
 @(private)
-_terminate_session :: proc(server: ^Server, session: SessionData) {
+_terminate_session :: proc(server: ^Server, session: SessionData, origin: enum { Local, RemoteInitiated }) {
     assert(session.terminating)
     delete_key(&server.sessions, session.socket)
     
-    spsc_enqueue(server.outbound_queue, TerminateClientRequest { client=session.socket })
+    if origin == .Local {
+        spsc_enqueue(server.outbound_queue, TerminateClientRequest { client=session.socket })
+    }
     
     scratch_alloc := cast(^mem.Scratch) session.packet_scratch_alloc.data
     mem.scratch_destroy(scratch_alloc)
     free(scratch_alloc, os.heap_allocator())
-}
-
-@(private)
-_kick_client_no_session :: proc(server: ^Server, client: net.TCP_Socket, client_state: ClientState, reason: TextComponent) {
 }
 
 // Kicks a client with a message, enters a termination state.

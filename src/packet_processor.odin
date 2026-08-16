@@ -43,7 +43,7 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
         // only terminate session afterwards (which will remove it from the sessions, causing a use after free if
         // there would have been an accidental extra _enqueue_packet, this procedure will check if we are already terminating)
         // TODO: if we receive a packet afterwards, should we consider it being stale (inside the spsc queue)?
-        _terminate_session(server, session^)
+        _terminate_session(server, session^, .Local)
     }
     
     switch packet in packet {
@@ -304,15 +304,16 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
                 return
             }
             
-            enqueue_packet(session, ContainerSetSlotPacket {
-                window_id = 0, // inventory
-                slot = 36,
-                state_id = VarInt(digging_seq),
-                slot_data = Slot {
-                    item_count = 64,
-                    item_id = 1115, // dirt
-                },
-            })
+            it := _create_add_item_iterator(&session.inventory, ItemStack { count=16, item=&ITEM_DIRT })
+            for slot_nr, item in _add_item_iterator(&it) {
+                packet := ContainerSetSlotPacket {
+                    window_id = 0, // inventory
+                    slot = slot_nr,
+                    state_id = VarInt(digging_seq),
+                    slot_data = item,
+                }
+                enqueue_packet(session, packet)
+            }
         }
     case ChatCommandPacket:
         if packet.command == "reset" {

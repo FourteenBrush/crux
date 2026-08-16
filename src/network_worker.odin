@@ -245,6 +245,8 @@ _network_worker_process_inbound :: proc(state: ^NetworkWorkerState) {
             // may be a stale request
             client_conn := (&state.connections[message.client]) or_break s
             client_conn.terminating = true
+            // we will not necessarily receive new read/write completions
+            _try_finalize_client(state, client_conn)
         case PacketTransfer(ClientBoundPacket):
             client_conn := &state.connections[message.socket]
             if client_conn.terminating do break s
