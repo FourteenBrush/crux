@@ -27,6 +27,8 @@ SessionData :: struct {
         id: i64,
         awaiting_serverbound: bool,
     },
+
+    current_breaking_sequence: Maybe(i32),
     
     // TODO: move to global arena list based on epoch, backed by vmem allocator
     packet_scratch_alloc: mem.Allocator,

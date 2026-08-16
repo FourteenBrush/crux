@@ -175,6 +175,9 @@ _await_io_completions :: proc(ctx: ^PlatformIOContext, sink: ^CompletionSink, ti
             _, opt_err := linux.getsockopt_base(linux.Fd(socket), int(linux.SOL_SOCKET), .ERROR, &cause)
             if opt_err == .NONE {
                 _log_error(cause, "failed to poll client socket")
+                // FIXME: on errors such as ECONNRESET, we still retry sending data next iteration if we have an EPOLLOUT set,
+                // this immediately causes an EPIPE in sendmsg(), causing more error completions
+                // until the caller eventually unregisters this socket, should we avoid this?
             }
             continue
         }
@@ -244,7 +247,7 @@ _do_read :: proc(ctx: ^PlatformIOContext, socket: net.TCP_Socket) -> (comp: Comp
     case recv_err != .NONE:
         _log_error(recv_err, "recv() failed")
         comp.operation = .Error
-        delete(recv_buf, ctx.allocator)
+        _release_recv_buf(ctx, recv_buf)
     case nread == 0:
         comp.operation = .PeerHangup
         delete(recv_buf, ctx.allocator)

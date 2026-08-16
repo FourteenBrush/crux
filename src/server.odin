@@ -181,7 +181,8 @@ _handle_bridge_message :: proc(server: ^Server, message: InboundMessage) {
      	if session.socket == net.TCP_Socket(0) do break
 
       	session.terminating = true
-     	_terminate_session(server, session)
+        // TODO: _terminate_session sends TerminateClientRequest, even though we just received one from the io worker, no confirmation is needed
+      	_terminate_session(server, session)
 
         // TODO: actually remove connection from map, we still sent data allocated by this thread to the io thread
         // but this can be fixed by using a global epoch based allocator, whereas the session now doesnt
@@ -225,7 +226,7 @@ _create_session :: proc(
     // scratch_alloc := new(mem.Mutex_Allocator, os.heap_allocator())
     // mem.mutex_allocator_init(scratch_alloc, os.heap_allocator())
     scratch_alloc := new(mem.Scratch, os.heap_allocator())
-    mem.scratch_init(scratch_alloc, 256 * 1024, os.heap_allocator())
+    mem.scratch_init(scratch_alloc, 16 * mem.Megabyte, os.heap_allocator())
     
     return SessionData {
         socket=socket,

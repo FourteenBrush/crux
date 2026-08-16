@@ -24,8 +24,9 @@ WORKER_TARGET_MSPT :: 5
 
 // The capacity of the allocator that allocates per client packet specific data, if this allocator
 // fills up, old data will be overwritten.
+// TODO: replace with epoch allocator, this mem.Scratch allocator has bugs
 @(private="file")
-PACKET_SCRATCH_BUFFER_SIZE :: 256 * 1024
+PACKET_SCRATCH_BUFFER_SIZE :: 26 * mem.Megabyte
 
 NetworkWorkerSharedData :: struct {
     io_ctx: ^reactor.IOContext,
@@ -277,7 +278,7 @@ _network_worker_linger_shutdown :: proc(state: ^NetworkWorkerState, timeout: tim
 
     start := time.tick_now()
     for {
-        // NOTE: safe to call as we just supressed accepting new connections and reads
+        // NOTE: safe to call as we just suppressed accepting new connections and reads
         completions: [512]reactor.Completion
         nready, await_ok := reactor.await_io_completions(state.io_ctx, completions[:], timeout_ms=1000)
         assert(await_ok, "failed to await io completions") // FIXME: proper error handling
@@ -347,11 +348,6 @@ _enqueue_packet :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnecti
     descriptor := get_clientbound_packet_descriptor(packet)
     log.log(LOG_LEVEL_OUTBOUND, "Sending packet", packet)
 
-    // must run after the SetCompressionPacket has been sent
-    defer if compression, ok := packet.(SetCompressionPacket); ok {
-        client_conn.compression_threshold = i32(compression.threshold)
-    }
-    
     bufs := _serialize_clientbound(packet, descriptor, client_conn.compression_threshold, &state.temp_tx_buf, client_conn.packet_scratch_alloc) or_return
     buf_reset(&state.temp_tx_buf)
     assert(sa.len(bufs) >= 2, "expected at least length header and (id, payload) combination")
@@ -366,6 +362,11 @@ _enqueue_packet :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnecti
     state.outstanding_writes += sa.len(bufs)
     client_conn.outstanding_writes += cast(u32) sa.len(bufs)
     client_conn.terminating |= descriptor.is_terminal
+
+    // must run after the SetCompressionPacket has been sent
+    if compression, ok := packet.(SetCompressionPacket); ok {
+        client_conn.compression_threshold = i32(compression.threshold)
+    }
     return true
 }
 
@@ -383,21 +384,22 @@ _kick_client :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnection,
 
 @(private="file")
 _create_client_connection :: proc(socket: net.TCP_Socket) -> ClientConnection {
-    packet_scratch := new(mem.Mutex_Allocator, os.heap_allocator())
-    mem.mutex_allocator_init(packet_scratch, os.heap_allocator())
-    // packet_scratch := new(mem.Scratch, os.heap_allocator())
-    // mem.scratch_init(packet_scratch, PACKET_SCRATCH_BUFFER_SIZE, backup_allocator=os.heap_allocator())
-    
-    // NOTE: disallow out of band allocations larger than allocator cap, as they would be leaked either way
-    // packet_scratch.backup_allocator = mem.panic_allocator()
-    // packet_scratch.leaked_allocations.allocator = mem.panic_allocator()
+    packet_scratch := new(mem.Scratch, os.heap_allocator())
+    mem.scratch_init(packet_scratch, PACKET_SCRATCH_BUFFER_SIZE, backup_allocator=os.heap_allocator())
+
+    packet_scratch_alloc := mem.scratch_allocator(packet_scratch)
+    // when ODIN_DEBUG {
+    //     tracking_alloc := new(trace.Tracking_Allocator, os.heap_allocator())
+    //     trace.tracking_allocator_init(tracking_alloc, backing_allocator=packet_scratch_alloc, internals_allocator=os.heap_allocator())
+    //     tracking_alloc.bad_free_callback = trace.tracking_allocator_bad_free_callback_add_to_array
+    //     packet_scratch_alloc = trace.tracking_allocator(tracking_alloc)
+    // }
     
     return ClientConnection {
         socket = socket,
         state  = .Handshake,
         
-        // packet_scratch_alloc = mem.scratch_allocator(packet_scratch),
-        packet_scratch_alloc = mem.mutex_allocator(packet_scratch),
+        packet_scratch_alloc = packet_scratch_alloc,
         rx_buf = create_network_buf(160*mem.Megabyte, allocator=os.heap_allocator()),
     }
 }
@@ -438,11 +440,15 @@ _finalize_client :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnect
     _, client_conn := delete_key(&state.connections, client_conn.socket)
     destroy_network_buf(client_conn.rx_buf)
     
-    scratch_alloc := cast(^mem.Mutex_Allocator) client_conn.packet_scratch_alloc.data
-    // ensure right allocator is used to free buffer, instead of panic allocator
-    // scratch_alloc := cast(^mem.Scratch) client_conn.packet_scratch_alloc.data
-    // scratch_alloc.backup_allocator = os.heap_allocator()
-    // mem.scratch_destroy(scratch_alloc)
+    packet_scratch_alloc := client_conn.packet_scratch_alloc
+    // when ODIN_DEBUG {
+    //     tracking_alloc := cast(^trace.Tracking_Allocator) client_conn.packet_scratch_alloc.data
+    //     trace.tracking_allocator_print_results(tracking_alloc, context.temp_allocator)
+    //     packet_scratch_alloc = tracking_alloc.backing
+    //     free(tracking_alloc, os.heap_allocator())
+    // }
+    scratch_alloc := cast(^mem.Scratch) packet_scratch_alloc.data
+    mem.scratch_destroy(scratch_alloc)
     free(scratch_alloc, os.heap_allocator())
 
     client_conn.socket = net.TCP_Socket(0xdeadbeef)

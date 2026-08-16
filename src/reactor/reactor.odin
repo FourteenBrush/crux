@@ -232,6 +232,7 @@ release_recv_buf :: proc(ctx: ^IOContext, comp: Completion) {
 // The passed top level buffer must only outlive this procedure call, the inner buffers must stay valid till a write completion (or error)
 // has been received by polling this context.
 // Every inner buffer will produce a `.Write` completion (or an error with a buffer attached).
+// Must only be called with a client socket that came from a `.NewConnection` completion.
 @(require_results)
 submit_write_vectored :: proc(ctx: ^IOContext, client: net.TCP_Socket, bufs: [][]u8) -> bool {
     tracy.Zone()

@@ -38,6 +38,10 @@ _deserialize_serverbound :: proc(
 
     // expect compressed packet format
     packet_len, packet_len_nbytes := buf_peek_var_int(buf) or_return
+    if packet_len < 2 {
+        // we must at least have a Data Length and a Packet Id
+        return packet, .InvalidData
+    }
     buf_ensure_readable(buf^, packet_len_nbytes + int(packet_len)) or_return
     buf_advance_pos_unchecked(buf, packet_len_nbytes)
 
@@ -58,6 +62,8 @@ _deserialize_serverbound :: proc(
     }
     compressed_data_len := int(packet_len) - uncompressed_data_len_nbytes
     if buf_length(buf^) < int(compressed_data_len) || compressed_data_len < 0 {
+        log.debugf("length error: buf length=%d, compressed_data_len=%d, packet_len=%d, uncompressed_data_len_nbytes=%d", buf_length(buf^),
+            compressed_data_len, packet_len, uncompressed_data_len_nbytes)
         return packet, .InvalidData
     }
     
@@ -70,7 +76,7 @@ _deserialize_serverbound :: proc(
     )
     if decompression_err != nil {
         log.debug("decompression error:", decompression_err)
-        log.debugf("packet_len=%d, compressed_data_len=%d, compressed data dump: %2x", packet_len, compressed_data_len, compressed_id_and_payload)
+        // log.debugf("packet_len=%d, compressed_data_len=%d, compressed data dump: %2x", packet_len, compressed_data_len, compressed_id_and_payload)
         return packet, .InvalidData
     }
 
@@ -85,7 +91,7 @@ _deserialize_serverbound :: proc(
 
 @(private="file")
 _decompress_data :: proc(data: []u8, expected_output_size: int, buf_allocator: mem.Allocator) -> (decompressed: []u8, err: zlib.Error) {
-    // a reserve() is performed on this buffer based on the expected_output_size
+    // a reserve() is performed on this buffer with size max(expected_output_size, compress.COMPRESS_OUTPUT_ALLOCATE_MIN(standard=1MiB))
     out: bytes.Buffer
     context.allocator = buf_allocator
     err = zlib.inflate_from_byte_array(data, &out, expected_output_size=expected_output_size)
@@ -145,7 +151,7 @@ _deserialize_serverbound_id_and_payload :: proc(
         switch client_state {
         case .Handshake:
             return HandshakePacket {
-                protocol_version = read_protocol_version(buf) or_return,
+                protocol_version = _read_protocol_version(buf) or_return,
                 server_addr = buf_read_string(buf, 255, allocator) or_return,
                 server_port = buf_read_u16(buf) or_return,
                 intent = buf_read_var_int_enum(buf, HandshakeIntent) or_return,
@@ -263,8 +269,52 @@ _deserialize_serverbound_id_and_payload :: proc(
         return ChatCommandPacket { command=command }, .None
     case .ClientInformationPlay:
         return _read_client_information(buf, allocator)
+    case .ClickContainer:
+        packet = ClickContainerPacket {
+            window_id = buf_read_var_int(buf) or_return,
+            state_id = buf_read_var_int(buf) or_return,
+            slot = buf_read_i16(buf) or_return,
+            button = cast(i8)buf_read_byte(buf) or_return,
+            mode = buf_read_var_int(buf) or_return,
+            changed_slots = make([]ChangedSlot, buf_read_var_int(buf) or_return, allocator),
+        }
+        packet_ := &packet.(ClickContainerPacket)
+        for &changed_slot in packet_.changed_slots {
+            slot_nr := buf_read_i16(buf) or_return
+            slot_data := _read_hashed_slot(buf, allocator) or_return
+            changed_slot = ChangedSlot { slot_nr=slot_nr, slot_data=slot_data }
+        }
+        packet_.carried_item = _read_hashed_slot(buf, allocator) or_return
+        return packet, .None
+    case .UseItemOn:
+        hand := buf_read_var_int_enum(buf, Hand) or_return
+        loc := buf_read_position(buf) or_return
+        face := buf_read_var_int_enum(buf, BlockFace) or_return
+        cursor_pos := [3]f32 {
+            0 = buf_read_f32(buf) or_return,
+            1 = buf_read_f32(buf) or_return,
+            2 = buf_read_f32(buf) or_return,
+        }
+        inside_block := buf_read_bool(buf) or_return
+        world_border_hit := buf_read_bool(buf) or_return
+        sequence := buf_read_var_int(buf) or_return
+        return UseItemOnPacket {
+            hand=hand,
+            loc=loc,
+            face=face,
+            cursor_pos=cursor_pos,
+            inside_block=inside_block,
+            world_border_hit=world_border_hit,
+            sequence=sequence,
+        }, .None
+    case .UseItem:
+        hand := buf_read_var_int_enum(buf, Hand) or_return
+        sequence := buf_read_var_int(buf) or_return
+        yaw := buf_read_f32(buf) or_return
+        pitch := buf_read_f32(buf) or_return
+        return UseItemPacket { hand=hand, sequence=sequence, yaw=yaw, pitch=pitch }, .None
     case:
-        log.warnf("unhandled packet id: 0x%x for client state", id, client_state)
+        log.warnf("unhandled packet id: 0x%x for client state %v", id, client_state)
         return packet, .InvalidData
     }
 }
@@ -317,7 +367,32 @@ _read_legacy_server_list_ping :: proc(buf: ^NetworkBuffer, allocator: mem.Alloca
     return p, .None
 }
 
-read_protocol_version :: proc(buf: ^NetworkBuffer) -> (p: ProtocolVersion, err: ReadError) {
+@(private="file")
+_read_hashed_slot :: proc(buf: ^NetworkBuffer, allocator: mem.Allocator) -> (_slot: Maybe(HashedSlot), err: ReadError) {
+    if (buf_read_bool(buf) or_return) == false {
+        return nil, .None
+    }
+    slot := HashedSlot {
+        item_id = buf_read_var_int(buf) or_return,
+        item_count = buf_read_var_int(buf) or_return,
+    }
+
+    slot.components_to_add = make([]SlotComponentHash, buf_read_var_int(buf) or_return, allocator)
+    for &comp in slot.components_to_add {
+        comp.type = buf_read_var_int_enum(buf, DataComponentType) or_return
+        comp.data_hash = cast(i32)buf_read_int(buf) or_return
+    }
+
+    slot.components_to_remove = make([]DataComponentType, buf_read_var_int(buf) or_return, allocator)
+    for &comp in slot.components_to_remove {
+        comp = buf_read_var_int_enum(buf, DataComponentType) or_return
+    }
+    
+    return slot, .None
+}
+
+@(private="file")
+_read_protocol_version :: proc(buf: ^NetworkBuffer) -> (p: ProtocolVersion, err: ReadError) {
     val := buf_read_var_int(buf) or_return
     protocol_valid := true // TODO: use table in protcol_version.odin
     return ProtocolVersion(val), .None if protocol_valid else .InvalidData

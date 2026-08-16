@@ -50,15 +50,17 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
     case LegacyServerListPingPacket:
         if session != nil {
             session.terminating = true
-            _terminate_session(server, session^)
-            return
         } else {
             spsc_enqueue(server.outbound_queue, TerminateClientRequest { client=socket })
         }
     case HandshakePacket:
-        assert(packet.intent != .Transfer, "TODO: we do not initiate transfers")
-        if packet.intent == .Status || packet.intent == .Login {
-            // NOTE: session must be created again on .Login
+        switch packet.intent {
+        case .Transfer:
+            // TODO: kick instead of panic
+            assert(packet.intent != .Transfer, "TODO: we do not initiate transfers")
+            // _kick_client(server, session)
+        case .Status, .Login:
+            // NOTE: session must be created again on .Login if this was a .Status intent
             if packet.intent == .Login do assert(session == nil, "did not terminate session after handshake and status request")
             // client may have sent unsupported protocol version if the packet intent was .Login, but there is no way
             // to kick them with a custom message here (no disconnect packet for Handshake state exist),
@@ -291,12 +293,38 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
     case PlayerCommandPacket:
         // empty
     case PlayerActionPacket:
-        // empty
+        #partial switch packet.status {
+        case .StartDigging:
+            // TODO: if this is != nil, can we assume the client did not sent a CancelledDigging?
+            session.current_breaking_sequence = i32(packet.sequence)
+        case .FinishedDigging:
+            digging_seq, has_seq := session.current_breaking_sequence.?
+            if !has_seq {
+                _kick_client(server, session, text_component("Sent a finished digging packet without corresponding start digging", COLOR_RED))
+                return
+            }
+            
+            enqueue_packet(session, ContainerSetSlotPacket {
+                window_id = 0, // inventory
+                slot = 36,
+                state_id = VarInt(digging_seq),
+                slot_data = Slot {
+                    item_count = 64,
+                    item_id = 1115, // dirt
+                },
+            })
+        }
     case ChatCommandPacket:
         if packet.command == "reset" {
             // reset level chunks to initial layout
             _player_send_initial_chunks(session, VIEW_DISTANCE)
         }
+    case ClickContainerPacket:
+        // empty
+    case UseItemOnPacket:
+        // empty
+    case UseItemPacket:
+        // empty
     }
 }
 

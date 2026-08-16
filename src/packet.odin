@@ -50,7 +50,10 @@ ServerBoundPacketId :: enum VarInt {
     PlayerCommand             = 0x29,
     PlayerAction              = 0x28,
     ChatCommand               = 0x06,
-    ClientInformationPlay     = 0xd,
+    ClientInformationPlay     = 0x0d,
+    ClickContainer            = 0x11,
+    UseItemOn                 = 0x3f,
+    UseItem                   = 0x40,
 }
 
 ServerBoundPacket :: union #no_nil {
@@ -87,6 +90,9 @@ ServerBoundPacket :: union #no_nil {
     PlayerCommandPacket,
     PlayerActionPacket,
     ChatCommandPacket,
+    ClickContainerPacket,
+    UseItemOnPacket,
+    UseItemPacket,
 }
 
 ClientBoundPacketId :: enum VarInt {
@@ -121,6 +127,7 @@ ClientBoundPacketId :: enum VarInt {
     KeepAlivePlay             = 0x2b,
     SetCenterChunk            = 0x5c,
     ChunkData                 = 0x2c,
+    ContainerSetSlot          = 0x14,
 }
 
 ClientBoundPacket :: union #no_nil {
@@ -148,45 +155,7 @@ ClientBoundPacket :: union #no_nil {
     KeepAlivePlayPacket,
     SetCenterChunkPacket,
     ChunkDataPacket,
-}
-
-@(private)
-get_clientbound_packet_descriptor :: proc(packet: ClientBoundPacket) -> ClientBoundPacketDescriptor {
-    tag: i64 = reflect.get_union_variant_raw_tag(packet)
-    offset :: cast(i64) intrinsics.type_has_nil(type_of(packet))
-    #no_bounds_check return clientbound_packet_descriptors[tag + offset]
-}
-
-@(private="file")
-VARIANT_IDX_OF :: intrinsics.type_variant_index_of
-
-// mapping of ClientBoundPacket raw union tags to packet ids
-@(rodata, private="file")
-clientbound_packet_descriptors := [intrinsics.type_union_variant_count(ClientBoundPacket)]ClientBoundPacketDescriptor {
-    // sent in Status state
-    VARIANT_IDX_OF(ClientBoundPacket, StatusResponsePacket)            = { .StatusResponse,            false },
-    VARIANT_IDX_OF(ClientBoundPacket, PongResponsePacket)              = { .PongResponse,              true  },
-    // sent in Login state
-    VARIANT_IDX_OF(ClientBoundPacket, SetCompressionPacket)            = { .SetCompression,            false },
-    VARIANT_IDX_OF(ClientBoundPacket, LoginSuccessPacket)              = { .LoginSuccess,              false },
-    VARIANT_IDX_OF(ClientBoundPacket, DisconnectLoginPacket)           = { .DisconnectLogin,           true  },
-    // sent in Configuration state
-    VARIANT_IDX_OF(ClientBoundPacket, PluginMessagePacket)             = { .PluginMessage,             false },
-    VARIANT_IDX_OF(ClientBoundPacket, DisconnectConfigurationPacket)   = { .DisconnectConfiguration,   true  },
-    VARIANT_IDX_OF(ClientBoundPacket, KnownPacksPacket)                = { .KnownPacks,                false },
-    VARIANT_IDX_OF(ClientBoundPacket, RegistryDataPacket)              = { .RegistryData,              false },
-    VARIANT_IDX_OF(ClientBoundPacket, KeepAliveConfigurationPacket)    = { .KeepAliveConfiguration,    false },
-    VARIANT_IDX_OF(ClientBoundPacket, FinishConfigurationPacket)       = { .FinishConfiguration,       false },
-    // sent in Play state
-    VARIANT_IDX_OF(ClientBoundPacket, LoginPacket)                     = { .Login,                     false },
-    VARIANT_IDX_OF(ClientBoundPacket, DisconnectPlayPacket)            = { .DisconnectPlay,            true  },
-    VARIANT_IDX_OF(ClientBoundPacket, SynchronizePlayerPositionPacket) = { .SynchronizePlayerPosition, false },
-    VARIANT_IDX_OF(ClientBoundPacket, PlayerInfoUpdatePacket)          = { .PlayerInfoUpdate,          false },
-    VARIANT_IDX_OF(ClientBoundPacket, GameEventPacket)                 = { .GameEvent,                 false },
-    VARIANT_IDX_OF(ClientBoundPacket, PlayerAbilitiesPacket)           = { .PlayerAbilities,           false },
-    VARIANT_IDX_OF(ClientBoundPacket, KeepAlivePlayPacket)             = { .KeepAlivePlay,             false },
-    VARIANT_IDX_OF(ClientBoundPacket, SetCenterChunkPacket)            = { .SetCenterChunk,            false },
-    VARIANT_IDX_OF(ClientBoundPacket, ChunkDataPacket)                 = { .ChunkData,                 false },
+    ContainerSetSlotPacket,
 }
 
 @(private)
@@ -195,6 +164,9 @@ get_serverbound_packet_descriptor :: proc(packet: ServerBoundPacket) -> ServerBo
     offset :: cast(i64) intrinsics.type_has_nil(type_of(packet))
     #no_bounds_check return serverbound_packet_descriptors[tag + offset]
 }
+
+@(private="file")
+VARIANT_IDX_OF :: intrinsics.type_variant_index_of
 
 @(rodata, private="file")
 serverbound_packet_descriptors := [intrinsics.type_union_variant_count(ServerBoundPacket)]ServerBoundPacketDescriptor {
@@ -230,6 +202,52 @@ serverbound_packet_descriptors := [intrinsics.type_union_variant_count(ServerBou
     VARIANT_IDX_OF(ServerBoundPacket, PlayerCommandPacket)                  = { { .Play } },
     VARIANT_IDX_OF(ServerBoundPacket, PlayerActionPacket)                   = { { .Play } },
     VARIANT_IDX_OF(ServerBoundPacket, ChatCommandPacket)                    = { { .Play } },
+    VARIANT_IDX_OF(ServerBoundPacket, ClickContainerPacket)                 = { { .Play } },
+    VARIANT_IDX_OF(ServerBoundPacket, UseItemOnPacket)                      = { { .Play } },
+    VARIANT_IDX_OF(ServerBoundPacket, UseItemPacket)                        = { { .Play } },
+}
+
+@(private)
+get_clientbound_packet_descriptor :: proc(packet: ClientBoundPacket) -> ClientBoundPacketDescriptor {
+    tag: i64 = reflect.get_union_variant_raw_tag(packet)
+    offset :: cast(i64) intrinsics.type_has_nil(type_of(packet))
+    #no_bounds_check return clientbound_packet_descriptors[tag + offset]
+}
+
+// mapping of ClientBoundPacket raw union tags to packet ids
+@(rodata, private="file")
+clientbound_packet_descriptors := [intrinsics.type_union_variant_count(ClientBoundPacket)]ClientBoundPacketDescriptor {
+    // sent in Status state
+    VARIANT_IDX_OF(ClientBoundPacket, StatusResponsePacket)            = { .StatusResponse,            false },
+    VARIANT_IDX_OF(ClientBoundPacket, PongResponsePacket)              = { .PongResponse,              true  },
+    // sent in Login state
+    VARIANT_IDX_OF(ClientBoundPacket, SetCompressionPacket)            = { .SetCompression,            false },
+    VARIANT_IDX_OF(ClientBoundPacket, LoginSuccessPacket)              = { .LoginSuccess,              false },
+    VARIANT_IDX_OF(ClientBoundPacket, DisconnectLoginPacket)           = { .DisconnectLogin,           true  },
+    // sent in Configuration state
+    VARIANT_IDX_OF(ClientBoundPacket, PluginMessagePacket)             = { .PluginMessage,             false },
+    VARIANT_IDX_OF(ClientBoundPacket, DisconnectConfigurationPacket)   = { .DisconnectConfiguration,   true  },
+    VARIANT_IDX_OF(ClientBoundPacket, KnownPacksPacket)                = { .KnownPacks,                false },
+    VARIANT_IDX_OF(ClientBoundPacket, RegistryDataPacket)              = { .RegistryData,              false },
+    VARIANT_IDX_OF(ClientBoundPacket, KeepAliveConfigurationPacket)    = { .KeepAliveConfiguration,    false },
+    VARIANT_IDX_OF(ClientBoundPacket, FinishConfigurationPacket)       = { .FinishConfiguration,       false },
+    // sent in Play state
+    VARIANT_IDX_OF(ClientBoundPacket, LoginPacket)                     = { .Login,                     false },
+    VARIANT_IDX_OF(ClientBoundPacket, DisconnectPlayPacket)            = { .DisconnectPlay,            true  },
+    VARIANT_IDX_OF(ClientBoundPacket, SynchronizePlayerPositionPacket) = { .SynchronizePlayerPosition, false },
+    VARIANT_IDX_OF(ClientBoundPacket, PlayerInfoUpdatePacket)          = { .PlayerInfoUpdate,          false },
+    VARIANT_IDX_OF(ClientBoundPacket, GameEventPacket)                 = { .GameEvent,                 false },
+    VARIANT_IDX_OF(ClientBoundPacket, PlayerAbilitiesPacket)           = { .PlayerAbilities,           false },
+    VARIANT_IDX_OF(ClientBoundPacket, KeepAlivePlayPacket)             = { .KeepAlivePlay,             false },
+    VARIANT_IDX_OF(ClientBoundPacket, SetCenterChunkPacket)            = { .SetCenterChunk,            false },
+    VARIANT_IDX_OF(ClientBoundPacket, ChunkDataPacket)                 = { .ChunkData,                 false },
+    VARIANT_IDX_OF(ClientBoundPacket, ContainerSetSlotPacket)          = { .ContainerSetSlot,          false },
+}
+
+@(private)
+ServerBoundPacketDescriptor :: struct {
+    // Client state in which this packet should arrive.
+    expected_client_states: bit_set[ClientState],
 }
 
 @(private)
@@ -237,12 +255,6 @@ ClientBoundPacketDescriptor :: struct {
     packet_id: ClientBoundPacketId,
     // Whether the `ClientConnection` sending this packet will enter a terminating state.
     is_terminal: bool,
-}
-
-@(private)
-ServerBoundPacketDescriptor :: struct {
-    // Client state in which this packet should arrive.
-    expected_client_states: bit_set[ClientState],
 }
 
 @(private, require_results)
@@ -449,6 +461,112 @@ SetHeldItemPacket :: struct {
 
 CloseContainerPacket :: struct {
     window_id: VarInt,
+}
+
+PlayerCommandPacket :: struct {
+    entity_id: VarInt,
+    action: PlayerCommandAction,
+    // Only used when action is StartHorseJump.
+    jump_boost: VarInt,
+}
+
+PlayerCommandAction :: enum VarInt {
+    LeaveBed             = 0,
+    StartSprinting       = 1,
+    StopSprinting        = 2,
+    StartHorseJump       = 3,
+    StopHorseJump        = 4,
+    OpenVehicleInventory = 5,
+    StartElytraFlight    = 6,
+}
+
+PlayerActionPacket :: struct {
+    status: PlayerActionStatus,
+    location: Position,
+    face: BlockFace,
+    sequence: VarInt,
+}
+
+PlayerActionStatus :: enum VarInt {
+    StartDigging         = 0,
+    CancelledDigging     = 1,
+    FinishedDigging      = 2,
+    DropItemStack        = 3,
+    DropItem             = 4,
+    HeldItemFinishUpdate = 5,
+    SwapItemInHand       = 6,
+}
+
+BlockFace :: enum u8 {
+    Bottom = 0,
+    Top    = 1,
+    North  = 2,
+    South  = 3,
+    West   = 4,
+    East   = 5,
+}
+
+ChatCommandPacket :: struct {
+    // The command typed, excluding the leading slash.
+    command: string /*(32767)*/,
+}
+
+ClickContainerPacket :: struct {
+    window_id: VarInt,
+    state_id: VarInt,
+    slot: i16,
+    button: i8,
+    mode: VarInt,
+    changed_slots: []ChangedSlot,
+    // Item carried by the cursor.
+    carried_item: Maybe(HashedSlot),
+}
+ChangedSlot :: struct #all_or_none {
+    slot_nr: i16,
+    slot_data: Maybe(HashedSlot),
+}
+
+Slot :: struct {
+    item_count: VarInt,
+    // below items are zero initialized when item_count <= 0
+
+    item_id: VarInt,
+    components_to_add: []DataComponent,
+    components_to_remove: []DataComponentType,
+}
+
+HashedSlot :: struct {
+    item_id: VarInt,
+    item_count: VarInt,
+    components_to_add: []SlotComponentHash,
+    components_to_remove: []DataComponentType,
+}
+SlotComponentHash :: struct {
+    type: DataComponentType,
+    data_hash: i32,
+}
+
+DataComponent :: union {
+    // TODO: define all other data component types
+    MaxStackSizeDataComponent,
+}
+MaxStackSizeDataComponent :: distinct VarInt
+
+UseItemOnPacket :: struct {
+    hand: Hand,
+    loc: Position,
+    face: BlockFace,
+    cursor_pos: [3]f32,
+    inside_block: bool,
+    world_border_hit: bool,
+    sequence: VarInt,
+}
+
+UseItemPacket :: struct {
+    hand: Hand,
+    sequence: VarInt,
+    yaw: f32,
+    pitch: f32,
 }
 
 // ================================================================================
@@ -713,6 +831,121 @@ Biome :: struct {
     // spawners: 
 }
 
+// minecraft:data_component_type registry types
+DataComponentType :: enum VarInt {
+    CustomData,
+    MaxStackSize,
+    MaxDamage,
+    Damage,
+    Unbreakable,
+    CustomName,
+    ItemName,
+    ItemModel,
+    Lore,
+    Rarity,
+    Enchantments,
+    CanPlaceOn,
+    CanBreak,
+    AttributeModifiers,
+    CustomModelData,
+    TooltipDisplay,
+    RepairCost,
+    CreativeSlotLock,
+    EnchantmentGlintOverride,
+    IntangibleProjectile,
+    Food,
+    Consumable,
+    UseRemainder,
+    UseCooldown,
+    UseEffects,
+    MinimumAttackCharge,
+    DamageType,
+    DamageResistant,
+    AttackRange,
+    Tool,
+    Weapon,
+    Enchantable,
+    Equippable,
+    Repairable,
+    Glider,
+    TooltipStyle,
+    DeathProtection,
+    BlocksAttacks,
+    StoredEnchantments,
+    DyedColor,
+    MapColor,
+    MapId,
+    MapDecorations,
+    MapPostProcessing,
+    ChargedProjectiles,
+    BundleContents,
+    PotionContents,
+    PotionDurationScale,
+    SuspiciousStewEffects,
+    WritableBookContent,
+    WrittenBookContent,
+    Trim,
+    DebugStickState,
+    EntityData,
+    BucketEntityData,
+    BlockEntityData,
+    Instrument,
+    PiercingWeapon,
+    KineticWeapon,
+    SwingAnimation,
+    AdditionalTradeCost,
+    Dye,
+    ProvidesTrimMaterial,
+    OminousBottleAmplifier,
+    JukeboxPlayable,
+    ProvidesBannerPatterns,
+    Recipes,
+    LodestoneTracker,
+    FireworkExplosion,
+    Fireworks,
+    Profile,
+    NoteBlockSound,
+    BannerPatterns,
+    BaseColor,
+    PotDecorations,
+    Container,
+    BlockState,
+    Bees,
+    Lock,
+    ContainerLoot,
+    BreakSound,
+    SulfurCubeContent,
+    VillagerVariant,
+    WolfVariant,
+    WolfSoundVariant,
+    WolfCollar,
+    FoxVariant,
+    SalmonSize,
+    ParrotVariant,
+    TropicalFishPattern,
+    TropicalFishBaseColor,
+    TropicalFishPatternColor,
+    MooshroomVariant,
+    RabbitVariant,
+    PigVariant,
+    PigSoundVariant,
+    CowVariant,
+    CowSoundVariant,
+    ChickenVariant,
+    ChickenSoundVariant,
+    FrogVariant,
+    HorseVariant,
+    PaintingVariant,
+    LlamaVariant,
+    AxolotlVariant,
+    ZombieNautilusVariant,
+    CatVariant,
+    CatSoundVariant,
+    CatCollar,
+    SheepColor,
+    ShulkerColor,
+}
+
 FinishConfigurationPacket :: struct {}
 
 KeepAliveConfigurationPacket :: struct {
@@ -911,52 +1144,11 @@ ChunkDataPacket :: struct {
     light: LightData `fmt:"-"`,
 }
 
-PlayerCommandPacket :: struct {
-    entity_id: VarInt,
-    action: PlayerCommandAction,
-    // Only used when action is StartHorseJump.
-    jump_boost: VarInt,
-}
-
-PlayerCommandAction :: enum VarInt {
-    LeaveBed             = 0,
-    StartSprinting       = 1,
-    StopSprinting        = 2,
-    StartHorseJump       = 3,
-    StopHorseJump        = 4,
-    OpenVehicleInventory = 5,
-    StartElytraFlight    = 6,
-}
-
-PlayerActionPacket :: struct {
-    status: PlayerActionStatus,
-    location: Position,
-    face: BlockFace,
-    sequence: VarInt,
-}
-
-PlayerActionStatus :: enum VarInt {
-    StartDigging         = 0,
-    CancelledDigging     = 1,
-    FinishedDigging      = 2,
-    DropItemStack        = 3,
-    DropItem             = 4,
-    HeldItemFinishUpdate = 5,
-    SwapItemInHand       = 6,
-}
-
-BlockFace :: enum u8 {
-    Bottom = 0,
-    Top    = 1,
-    North  = 2,
-    South  = 3,
-    West   = 4,
-    East   = 5,
-}
-
-ChatCommandPacket :: struct {
-    // The command typed, excluding the leading slash.
-    command: string /*(32767)*/,
+ContainerSetSlotPacket :: struct {
+    window_id: VarInt,
+    state_id: VarInt,
+    slot: i16,
+    slot_data: Slot,
 }
 
 
