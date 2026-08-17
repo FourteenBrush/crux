@@ -287,7 +287,11 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
     case StoreCookiePlayPacket:
         // empty
     case SetHeldItemPacket:
-        // empty
+        if packet.slot < PLAYER_INV_MIN_SLOT || packet.slot > PLAYER_INV_MAX_SLOT {
+            _kick_client(server, session, text_component(fmt.tprint("Invalid inventory slot", packet.slot), COLOR_RED))
+            return
+        }
+        session.inventory.held_item_slot = packet.slot
     case CloseContainerPacket:
         // empty
     case PlayerCommandPacket:
@@ -298,22 +302,13 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
             // TODO: if this is != nil, can we assume the client did not sent a CancelledDigging?
             session.current_breaking_sequence = i32(packet.sequence)
         case .FinishedDigging:
-            digging_seq, has_seq := session.current_breaking_sequence.?
-            if !has_seq {
+            if session.current_breaking_sequence == nil {
                 _kick_client(server, session, text_component("Sent a finished digging packet without corresponding start digging", COLOR_RED))
                 return
             }
+            session.current_breaking_sequence = nil
             
-            it := _create_add_item_iterator(&session.inventory, ItemStack { count=16, item=&ITEM_DIRT })
-            for slot_nr, item in _add_item_iterator(&it) {
-                packet := ContainerSetSlotPacket {
-                    window_id = 0, // inventory
-                    slot = slot_nr,
-                    state_id = VarInt(digging_seq),
-                    slot_data = item,
-                }
-                enqueue_packet(session, packet)
-            }
+            player_inventory_add_item(session, ItemStack { count=64, item=&ITEM_DIRT })
         }
     case ChatCommandPacket:
         if packet.command == "reset" {
@@ -321,6 +316,26 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
             _player_send_initial_chunks(session, VIEW_DISTANCE)
         }
     case ClickContainerPacket:
+        if (packet.slot < PLAYER_INV_MIN_SLOT || packet.slot > PLAYER_INV_MAX_SLOT) && packet.slot != -999 {
+            kick_msg := fmt.aprintf("Invalid inventory slot", packet.slot, allocator=session.packet_scratch_alloc)
+            _kick_client(server, session, text_component(kick_msg, COLOR_RED))
+            return
+        }
+        
+        d := [2]i32{i32(packet.mode), i32(packet.button)}
+        switch d {
+        case {0, 0}: // lmb
+            if packet.slot == -999 {
+                // drop cursor stack
+            } else {
+                _player_handle_container_lmb_click(&session.inventory, packet.slot)
+            }
+        case {0, 1}: // rmb
+            if packet.slot == -999 {
+                // drop cursor single item
+            } else {
+            }
+        }
         // empty
     case UseItemOnPacket:
         // empty
@@ -343,6 +358,41 @@ _player_handle_keepalive :: proc(server: ^Server, session: ^SessionData, id: Lon
         return
     }
     last_keepalive.awaiting_serverbound = false
+}
+
+@(private="file")
+_player_handle_container_lmb_click :: proc(inv: ^Inventory, slot: i16) {
+    // normal click, if carrying item, place it in clicked slot, otherwise start carrying it
+    carrying_item, is_carrying_item := inv.carrying_item.?
+    item_in_slot := &inv.items[slot]
+
+    if !is_carrying_item {
+        // if clicking on non air, start carrying that itemstack
+        if item_in_slot.item != &ITEM_AIR {
+            inv.carrying_item = item_in_slot^
+            item_in_slot^ = ItemStack { item = &ITEM_AIR }
+        }
+        return
+    }
+
+    // try placing item in clicked slot
+    if item_in_slot.item == carrying_item.item {
+        // try merging itemstack
+        if item_in_slot.count < item_in_slot.item.max_stack_size {
+            to_add := min(item_in_slot.item.max_stack_size - item_in_slot.count, carrying_item.count, 0)
+            item_in_slot.count += to_add
+            carrying_item.count -= to_add
+            if carrying_item.count == 0 {
+                inv.carrying_item = nil
+            }
+        }
+    } else {
+        // swap carried itemstack with item in that slot
+        item_in_slot^, inv.carrying_item = carrying_item, item_in_slot^
+        if inv.carrying_item.?.item == &ITEM_AIR {
+            inv.carrying_item = nil
+        }
+    }
 }
 
 CENTER_OFFSET :: 4

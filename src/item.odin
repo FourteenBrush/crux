@@ -14,15 +14,18 @@ Pair :: struct($T, $U: typeid) {
 
 ItemDescriptor :: struct #all_or_none {
     protocol_id: i16,
+    max_stack_size: i32,
 }
 
 @(rodata)
 ITEM_AIR := ItemDescriptor {
     protocol_id = 0,
+    max_stack_size = 64,
 }
 @(rodata)
 ITEM_DIRT := ItemDescriptor {
     protocol_id = 28,
+    max_stack_size = 64,
 }
 
 @(private)
@@ -42,9 +45,7 @@ _create_add_item_iterator :: proc(target: ^Inventory, to_add: ItemStack) -> (it:
 
 @(private)
 _add_item_iterator :: proc(it: ^AddItemIterator) -> (slot_nr: i16, item: ItemStack, ok: bool) {
-    if it.to_add.count == 0 || it.last_slot_idx_tried == len(INVENTORY_INSERT_ORDER) - 1 {
-        return
-    }
+    if it.to_add.count == 0 do return
     
     for i in it.last_slot_idx_tried..<len(INVENTORY_INSERT_ORDER) {
         defer it.last_slot_idx_tried += 1
@@ -61,7 +62,7 @@ _add_item_iterator :: proc(it: ^AddItemIterator) -> (slot_nr: i16, item: ItemSta
             item.item = it.to_add.item
         }
 
-        max_stack_size :: 64 // TODO: hardcoded for now
+        max_stack_size := item.item.max_stack_size
         if item.count < max_stack_size {
             to_add := min(max_stack_size - item.count, it.to_add.count)
             item.count += to_add

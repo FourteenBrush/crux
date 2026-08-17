@@ -55,6 +55,9 @@ PendingTeleport :: struct {
 
 Inventory :: struct {
     items: []ItemStack,
+    // Item that we clicked on in the inventory, no the main/offhand held item.
+    carrying_item: Maybe(ItemStack),
+    held_item_slot: i16,
 }
 
 player_crosses_chunk_borders :: proc(session: ^SessionData, new_pos: Pos) -> bool {
@@ -88,7 +91,23 @@ player_send_keepalive :: proc(session: ^SessionData, id: i64, now: time.Tick) {
     session.clientbound_keepalive.awaiting_serverbound = true
 }
 
-PLAYER_INV_SLOT_COUNT :: 46
+player_inventory_add_item :: proc(session: ^SessionData, item: ItemStack) {
+    it := _create_add_item_iterator(&session.inventory, item)
+    for slot_nr, item in _add_item_iterator(&it) {
+        packet := ContainerSetSlotPacket {
+            window_id = 0, // inventory
+            state_id = 0,
+            slot = slot_nr,
+            slot_data = item,
+        }
+        enqueue_packet(session, packet)
+    }
+}
+
+PLAYER_INV_MIN_SLOT :: 0
+PLAYER_INV_MAX_SLOT :: 45
+PLAYER_INV_SLOT_COUNT :: (PLAYER_INV_MAX_SLOT - PLAYER_INV_MIN_SLOT) + 1
+#assert(PLAYER_INV_SLOT_COUNT == 46)
 
 @(rodata, private)
 INVENTORY_INSERT_ORDER := [36]i16 {

@@ -272,12 +272,12 @@ _kick_client :: proc(server: ^Server, session: ^SessionData, reason: TextCompone
 }
 
 @(private)
-enqueue_packet :: proc(session: ^SessionData, packet: ClientBoundPacket) {
-    assert(session != nil)
+enqueue_packet :: proc(session: ^SessionData, packet: ClientBoundPacket, loc := #caller_location) {
+    assert(session != nil, loc=loc)
     if session.terminating do return
     
     descriptor := get_clientbound_packet_descriptor(packet)
-    assert(descriptor.expected_client_state == session.state, "attempted to send clientbound packet in wrong state, this is a bug")
+    assert(descriptor.expected_client_state == session.state, "attempted to send clientbound packet in wrong state, this is a bug", loc=loc)
     
     spsc_enqueue(server.outbound_queue, PacketTransfer(ClientBoundPacket) {
         socket=session.socket,
