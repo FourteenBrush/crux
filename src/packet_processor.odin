@@ -312,7 +312,6 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
             session.current_breaking_sequence = nil
             
             player_inventory_add_item(session, items.ItemStack { count=1, type=&items.DIRT })
-            _dump_inv(&session.inventory)
         }
     case ChatCommandPacket:
         if packet.command == "reset" {
@@ -320,7 +319,6 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
             _player_send_initial_chunks(session, VIEW_DISTANCE)
         }
     case ClickContainerPacket:
-        defer _dump_inv(&session.inventory)
         if (packet.slot < PLAYER_INV_MIN_SLOT || packet.slot > PLAYER_INV_MAX_SLOT) && packet.slot != -999 {
             kick_msg := fmt.aprintf("Invalid inventory slot", packet.slot, allocator=session.packet_scratch_alloc)
             _kick_client(server, session, text_component(kick_msg, COLOR_RED))
