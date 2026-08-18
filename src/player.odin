@@ -58,7 +58,7 @@ PendingTeleport :: struct {
 Inventory :: struct {
     contents: []items.ItemStack,
     // Item that we clicked on in the inventory, no the main/offhand held item.
-    carrying_item: Maybe(items.ItemStack),
+    carried_item: Maybe(items.ItemStack),
     held_item_slot: i16,
 }
 

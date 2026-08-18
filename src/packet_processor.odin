@@ -28,7 +28,8 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
         SetPlayerPositionRotationPacket,
         SetPlayerMovementPacket,
         PlayerInputPacket,
-        PlayerCommandPacket:
+        PlayerCommandPacket,
+        SwingArmPacket:
         // do not log, spams console
     case:
         log.log(LOG_LEVEL_INBOUND, "Received Packet", packet)
@@ -310,7 +311,8 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
             }
             session.current_breaking_sequence = nil
             
-            player_inventory_add_item(session, items.ItemStack { count=64, type=&items.DIRT })
+            player_inventory_add_item(session, items.ItemStack { count=1, type=&items.DIRT })
+            _dump_inv(&session.inventory)
         }
     case ChatCommandPacket:
         if packet.command == "reset" {
@@ -318,6 +320,7 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
             _player_send_initial_chunks(session, VIEW_DISTANCE)
         }
     case ClickContainerPacket:
+        defer _dump_inv(&session.inventory)
         if (packet.slot < PLAYER_INV_MIN_SLOT || packet.slot > PLAYER_INV_MAX_SLOT) && packet.slot != -999 {
             kick_msg := fmt.aprintf("Invalid inventory slot", packet.slot, allocator=session.packet_scratch_alloc)
             _kick_client(server, session, text_component(kick_msg, COLOR_RED))
@@ -336,6 +339,7 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
             if packet.slot == -999 {
                 // drop cursor single item
             } else {
+                _player_handle_container_rmb_click(&session.inventory, packet.slot)
             }
         }
     case UseItemOnPacket:
@@ -364,37 +368,83 @@ _player_handle_keepalive :: proc(server: ^Server, session: ^SessionData, id: Lon
 @(private="file")
 _player_handle_container_lmb_click :: proc(inv: ^Inventory, slot: i16) {
     // normal click, if carrying item, place it in clicked slot, otherwise start carrying it
-    carrying_item, is_carrying_item := inv.carrying_item.?
-    item_in_slot := &inv.contents[slot]
+    clicked_item := &inv.contents[slot]
+    carried_item, is_carrying_item := &inv.carried_item.?
 
     if !is_carrying_item {
         // if clicking on non air, start carrying that itemstack
-        if item_in_slot.type != &items.AIR {
-            inv.carrying_item = item_in_slot^
-            item_in_slot^ = items.ItemStack { type = &items.AIR }
+        if clicked_item.type != &items.AIR {
+            inv.carried_item = clicked_item^
+            clicked_item^ = items.ItemStack { type = &items.AIR }
         }
         return
     }
 
     // try placing item in clicked slot
-    if item_in_slot.type == carrying_item.type {
+    if clicked_item.type == carried_item.type {
         // try merging itemstack
-        if item_in_slot.count < item_in_slot.type.max_stack_size {
-            // FIXME: probably clamp in case itemstack with count > max stack size was obtained
-            to_add := min(item_in_slot.type.max_stack_size - item_in_slot.count, carrying_item.count)
-            item_in_slot.count += to_add
-            carrying_item.count -= to_add
-            if carrying_item.count == 0 {
-                inv.carrying_item = nil
+        if clicked_item.count < clicked_item.type.max_stack_size {
+            // clamp to [0..item_count] to account for item stacks bigger than the max stack size that were somehow obtained
+            to_add := clamp(clicked_item.type.max_stack_size - clicked_item.count, 0, carried_item.count)
+            clicked_item.count += to_add
+            carried_item.count -= to_add
+            if carried_item.count == 0 {
+                inv.carried_item = nil
             }
         }
     } else {
         // swap carried itemstack with item in that slot
-        item_in_slot^, inv.carrying_item = carrying_item, item_in_slot^
-        if inv.carrying_item.?.type == &items.AIR {
-            inv.carrying_item = nil
+        clicked_item^, inv.carried_item = carried_item^, clicked_item^
+        if inv.carried_item.?.type == &items.AIR {
+            inv.carried_item = nil
         }
     }
+}
+
+// Right mouse button click with a carried item attempts to add one to the clicked slot (if the same materials),
+// if not the same material, it simply swaps the carried item with the contents of that clicked slot.
+// When no item is carried, we start carrying half the amount of items from that slot (ceiled), and leave the rest in there.
+@(private="file")
+_player_handle_container_rmb_click :: proc(inv: ^Inventory, slot: i16) {
+    clicked_item := &inv.contents[slot]
+    carried_item, is_carrying_item := &inv.carried_item.?
+    
+    if !is_carrying_item {
+        if clicked_item.type != &items.AIR {
+            remaining_count := clicked_item.count / 2 // floored by int div, also handles item count of 1
+            inv.carried_item = items.ItemStack { count=clicked_item.count - remaining_count, type=clicked_item.type }
+            clicked_item.count = remaining_count
+            if clicked_item.count == 0 {
+                clicked_item.type = &items.AIR
+            }
+        }
+        return
+    }
+    
+    // clicked same material, add one or do nothing
+    if clicked_item.type == carried_item.type {
+        if clicked_item.count >= clicked_item.type.max_stack_size do return
+        
+        clicked_item.count += 1
+        carried_item.count -= 1
+        if carried_item.count == 0 {
+            inv.carried_item = nil
+        }
+        return
+    }
+    
+    // clicking air, add one to clicked slot
+    if clicked_item.type == &items.AIR {
+        clicked_item^ = items.ItemStack { count=1, type=carried_item.type }
+        carried_item.count -= 1
+        if carried_item.count == 0 {
+            inv.carried_item = nil
+        }
+        return
+    }
+    
+    // swap
+    inv.carried_item, clicked_item^ = clicked_item^, carried_item^
 }
 
 CENTER_OFFSET :: 4
