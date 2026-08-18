@@ -7,6 +7,8 @@ import "core:bytes"
 import "core:slice"
 import "core:compress/zlib"
 
+import "src:items"
+
 @(private="file")
 MAX_COMPRESSED_DATA_LEN :: 8388608 // 2 ^ 23
 
@@ -379,13 +381,13 @@ _read_hashed_slot :: proc(buf: ^NetworkBuffer, allocator: mem.Allocator) -> (_sl
 
     slot.components_to_add = make([]SlotComponentHash, buf_read_var_int(buf) or_return, allocator)
     for &comp in slot.components_to_add {
-        comp.type = buf_read_var_int_enum(buf, DataComponentType) or_return
+        comp.type = buf_read_var_int_enum(buf, items.DataComponentType) or_return
         comp.data_hash = cast(i32)buf_read_int(buf) or_return
     }
 
-    slot.components_to_remove = make([]DataComponentType, buf_read_var_int(buf) or_return, allocator)
+    slot.components_to_remove = make([]items.DataComponentType, buf_read_var_int(buf) or_return, allocator)
     for &comp in slot.components_to_remove {
-        comp = buf_read_var_int_enum(buf, DataComponentType) or_return
+        comp = buf_read_var_int_enum(buf, items.DataComponentType) or_return
     }
     
     return slot, .None

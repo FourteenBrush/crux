@@ -11,6 +11,8 @@ import "base:intrinsics"
 
 import "vendor:zlib"
 
+import "src:items"
+
 @(private="file")
 LOG2 :: intrinsics.constant_log2
 
@@ -680,10 +682,10 @@ _serialize_biome_registry_entry :: proc(writer: ^NBTWriter, entry: Biome) -> Wri
 }
 
 @(private="file", require_results)
-_serialize_item_stack :: proc(outb: ^NetworkBuffer, item: ItemStack) -> WriteError {
+_serialize_item_stack :: proc(outb: ^NetworkBuffer, item: items.ItemStack) -> WriteError {
     buf_write_var_int(outb, VarInt(item.count))
     if item.count > 0 {
-        buf_write_var_int(outb, VarInt(item.item.protocol_id))
+        buf_write_var_int(outb, VarInt(item.type.protocol_id))
 
         components_to_add, components_to_remove := 0, 0
         for patch in item.patches {
@@ -710,10 +712,10 @@ _serialize_item_stack :: proc(outb: ^NetworkBuffer, item: ItemStack) -> WriteErr
 }
 
 @(private="file")
-_serialize_data_component :: proc(outb: ^NetworkBuffer, comp: DataComponent) -> WriteError {
+_serialize_data_component :: proc(outb: ^NetworkBuffer, comp: items.DataComponent) -> WriteError {
     switch comp in comp {
-    case MaxStackSizeDataComponent:
-        buf_write_var_int(outb, VarInt(DataComponentType.MaxStackSize))
+    case items.MaxStackSizeDataComponent:
+        buf_write_var_int(outb, VarInt(items.DataComponentType.MaxStackSize))
         buf_write_var_int(outb, VarInt(comp))
     }
     return .None

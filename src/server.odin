@@ -15,6 +15,7 @@ import "core:container/queue"
 import "core:encoding/base64"
 
 import "src:reactor"
+import "src:items"
 
 import "lib:tracy"
 
@@ -226,8 +227,8 @@ _create_session :: proc(
     scratch_alloc := new(mem.Scratch, os.heap_allocator())
     mem.scratch_init(scratch_alloc, 16 * mem.Megabyte, os.heap_allocator())
 
-    inv_items := make([]ItemStack, PLAYER_INV_SLOT_COUNT, os.heap_allocator() /*gpa*/)
-    slice.fill(inv_items, ItemStack { item=&ITEM_AIR, count=0 })
+    inv_items := make([]items.ItemStack, PLAYER_INV_SLOT_COUNT, os.heap_allocator() /*gpa*/)
+    slice.fill(inv_items, items.ItemStack { type=&items.AIR, count=0 })
     
     // TODO: optimize to reduce allocation count
     return SessionData {
@@ -236,7 +237,7 @@ _create_session :: proc(
         protocol_version=protocol_version,
         // packet_scratch_alloc=mem.mutex_allocator(scratch_alloc),
         packet_scratch_alloc=mem.scratch_allocator(scratch_alloc),
-        inventory=Inventory { items=inv_items },
+        inventory=Inventory { contents=inv_items },
     }
 }
 

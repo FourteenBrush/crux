@@ -4,6 +4,8 @@ import "core:reflect"
 import "base:intrinsics"
 import "core:encoding/uuid"
 
+import "src:items"
+
 @(private="file")
 LOG2 :: intrinsics.constant_log2
 
@@ -532,18 +534,12 @@ HashedSlot :: struct {
     item_id: VarInt,
     item_count: VarInt,
     components_to_add: []SlotComponentHash,
-    components_to_remove: []DataComponentType,
+    components_to_remove: []items.DataComponentType,
 }
 SlotComponentHash :: struct {
-    type: DataComponentType,
+    type: items.DataComponentType,
     data_hash: i32,
 }
-
-DataComponent :: union {
-    // TODO: define all other data component types
-    MaxStackSizeDataComponent,
-}
-MaxStackSizeDataComponent :: distinct VarInt
 
 UseItemOnPacket :: struct {
     hand: Hand,
@@ -1026,7 +1022,7 @@ ContainerSetSlotPacket :: struct {
     window_id: VarInt,
     state_id: VarInt,
     slot: i16,
-    slot_data: ItemStack,
+    slot_data: items.ItemStack,
 }
 
 

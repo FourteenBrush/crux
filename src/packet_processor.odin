@@ -7,6 +7,8 @@ import "core:log"
 import "core:math"
 import "core:slice"
 
+import "src:items"
+
 Pos :: [3]f64
 
 pos_to_chunk :: proc "contextless" (pos: Pos) -> ChunkPos {
@@ -308,7 +310,7 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
             }
             session.current_breaking_sequence = nil
             
-            player_inventory_add_item(session, ItemStack { count=64, item=&ITEM_DIRT })
+            player_inventory_add_item(session, items.ItemStack { count=64, type=&items.DIRT })
         }
     case ChatCommandPacket:
         if packet.command == "reset" {
@@ -336,7 +338,6 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
             } else {
             }
         }
-        // empty
     case UseItemOnPacket:
         // empty
     case UseItemPacket:
@@ -364,22 +365,23 @@ _player_handle_keepalive :: proc(server: ^Server, session: ^SessionData, id: Lon
 _player_handle_container_lmb_click :: proc(inv: ^Inventory, slot: i16) {
     // normal click, if carrying item, place it in clicked slot, otherwise start carrying it
     carrying_item, is_carrying_item := inv.carrying_item.?
-    item_in_slot := &inv.items[slot]
+    item_in_slot := &inv.contents[slot]
 
     if !is_carrying_item {
         // if clicking on non air, start carrying that itemstack
-        if item_in_slot.item != &ITEM_AIR {
+        if item_in_slot.type != &items.AIR {
             inv.carrying_item = item_in_slot^
-            item_in_slot^ = ItemStack { item = &ITEM_AIR }
+            item_in_slot^ = items.ItemStack { type = &items.AIR }
         }
         return
     }
 
     // try placing item in clicked slot
-    if item_in_slot.item == carrying_item.item {
+    if item_in_slot.type == carrying_item.type {
         // try merging itemstack
-        if item_in_slot.count < item_in_slot.item.max_stack_size {
-            to_add := min(item_in_slot.item.max_stack_size - item_in_slot.count, carrying_item.count, 0)
+        if item_in_slot.count < item_in_slot.type.max_stack_size {
+            // FIXME: probably clamp in case itemstack with count > max stack size was obtained
+            to_add := min(item_in_slot.type.max_stack_size - item_in_slot.count, carrying_item.count)
             item_in_slot.count += to_add
             carrying_item.count -= to_add
             if carrying_item.count == 0 {
@@ -389,7 +391,7 @@ _player_handle_container_lmb_click :: proc(inv: ^Inventory, slot: i16) {
     } else {
         // swap carried itemstack with item in that slot
         item_in_slot^, inv.carrying_item = carrying_item, item_in_slot^
-        if inv.carrying_item.?.item == &ITEM_AIR {
+        if inv.carrying_item.?.type == &items.AIR {
             inv.carrying_item = nil
         }
     }

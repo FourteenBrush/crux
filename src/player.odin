@@ -4,6 +4,8 @@ import "core:mem"
 import "core:net"
 import "core:time"
 
+import "src:items"
+
 @(private)
 SessionData :: struct {
     socket: net.TCP_Socket,
@@ -54,9 +56,9 @@ PendingTeleport :: struct {
 }
 
 Inventory :: struct {
-    items: []ItemStack,
+    contents: []items.ItemStack,
     // Item that we clicked on in the inventory, no the main/offhand held item.
-    carrying_item: Maybe(ItemStack),
+    carrying_item: Maybe(items.ItemStack),
     held_item_slot: i16,
 }
 
@@ -91,7 +93,7 @@ player_send_keepalive :: proc(session: ^SessionData, id: i64, now: time.Tick) {
     session.clientbound_keepalive.awaiting_serverbound = true
 }
 
-player_inventory_add_item :: proc(session: ^SessionData, item: ItemStack) {
+player_inventory_add_item :: proc(session: ^SessionData, item: items.ItemStack) {
     it := _create_add_item_iterator(&session.inventory, item)
     for slot_nr, item in _add_item_iterator(&it) {
         packet := ContainerSetSlotPacket {
@@ -116,4 +118,49 @@ INVENTORY_INSERT_ORDER := [36]i16 {
      9, 10, 11, 12, 13, 14, 15, 16, 17,
     18, 19, 20, 21, 22, 23, 24, 25, 26,
     27, 28, 29, 30, 31, 32, 33, 34, 35,
+}
+
+@(private)
+AddItemIterator :: struct {
+    inv: ^Inventory,
+    to_add: items.ItemStack,
+    // Slot index into inventory grid, _not_ slot number.
+    last_slot_idx_tried: i16,
+}
+
+@(private, require_results)
+_create_add_item_iterator :: proc(target: ^Inventory, to_add: items.ItemStack) -> (it: AddItemIterator) {
+    it.inv = target
+    it.to_add = to_add
+    return it
+}
+
+@(private)
+_add_item_iterator :: proc(it: ^AddItemIterator) -> (slot_nr: i16, item: items.ItemStack, ok: bool) {
+    if it.to_add.count == 0 do return
+    
+    for i in it.last_slot_idx_tried..<len(INVENTORY_INSERT_ORDER) {
+        defer it.last_slot_idx_tried += 1
+
+        #no_bounds_check slot_nr := INVENTORY_INSERT_ORDER[i]
+        item := &it.inv.contents[slot_nr]
+
+        if item.type != it.to_add.type && item.type != &items.AIR {
+            continue
+        }
+
+        if item.type == &items.AIR {
+            // update material so we are not increasing the count of an air itemstack
+            item.type = it.to_add.type
+        }
+
+        max_stack_size := item.type.max_stack_size
+        if item.count < max_stack_size {
+            to_add := min(max_stack_size - item.count, it.to_add.count)
+            item.count += to_add
+            it.to_add.count -= to_add
+            return slot_nr, item^, true
+        }
+    }
+    return -1, item, false
 }
