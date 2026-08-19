@@ -893,6 +893,7 @@ TeleportFlag :: enum {
 
 PlayerInfoUpdatePacket :: struct {
     // TODO: replace with []ServerPlayer source of truth and place bitset back in
+    // All player entries must carry the same set of actions.
     players: []PlayerInfoUpdateEntry,
 }
 

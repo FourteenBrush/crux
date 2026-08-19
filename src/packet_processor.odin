@@ -180,7 +180,7 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
         })
         
         // if we do not send a position sync, the client keeps sending set player position packets
-        // with an incrementally decreasing height field.
+        // with an decreasing height field.
         // Will be confirmed with a ConfirmTeleportationPacket
         player_teleport(session, {1, 65, 1})
     case ClientTickEndPacket:
@@ -243,39 +243,25 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
         
         if !session.spawned {
             // initial play state position sync got acknowledged, prepare for player spawning
+            _player_initiate_spawning(session)
             session.spawned = true
             
-            // TODO: this only has to be sent to other players, vanilla client ignores it though
-            add_player_action := PlayerInfoUpdateActionAddPlayer {
-                username = session.game_profile.username,
-                properties = {},
+            // send add player packet to other players
+            for _, &player in server.sessions {
+                if player.state != .Play || &player == session do continue
+                
+                add_player_action := PlayerInfoUpdateActionAddPlayer {
+                    username = session.game_profile.username,
+                    properties = {},
+                }
+                add_player_packet_entry := PlayerInfoUpdateEntry {
+                    uuid = session.game_profile.uuid,
+                    actions = slice.clone([]PlayerInfoUpdateAction { add_player_action }),
+                }
+                enqueue_packet(&player, PlayerInfoUpdatePacket {
+                    players = slice.clone([]PlayerInfoUpdateEntry { add_player_packet_entry }),
+                })
             }
-            gamemode_change := PlayerInfoUpdateActionUpdateGameMode {
-                new_mode = .Survival,
-            }
-            add_to_tablist := PlayerInfoUpdateActionUpdateListed { listed=true }
-            enqueue_packet(session, PlayerInfoUpdatePacket {
-                players = slice.clone([]PlayerInfoUpdateEntry{
-                    { 
-                        uuid = session.game_profile.uuid,
-                        actions = slice.clone([]PlayerInfoUpdateAction{
-                            add_player_action,
-                            gamemode_change,
-                            add_to_tablist,
-                        }, session.packet_scratch_alloc),
-                    },
-                }, session.packet_scratch_alloc),
-            })
-            
-            enqueue_packet(session, PlayerAbilitiesPacket {
-                flags = {.AllowFlying, .Flying},
-                flying_speed = 0.05,
-                fov_modifier = 0.1,
-            })
-            enqueue_packet(session, StartWaitingForChunks {})
-            enqueue_packet(session, SetCenterChunkPacket { chunk_pos={0, 0} })
-
-            _player_send_initial_chunks(session, view_distance=VIEW_DISTANCE)
         }
     case PlayerLoadedPacket:
         // empty
@@ -444,86 +430,6 @@ _player_handle_container_rmb_click :: proc(inv: ^Inventory, slot: i16) {
     // swap
     inv.carried_item, clicked_item^ = clicked_item^, carried_item^
 }
-
-CENTER_OFFSET :: 4
-
-// Send all chunks for the clients chunk loading area (2 * server view distance + 7 square).
-// Seems like the vanilla client displays the outside chunks of the loading area as transparant.
-@(private="file")
-_player_send_initial_chunks :: proc(session: ^SessionData, view_distance: int) {
-    // center_offset := 2 * view_distance + 3
-    center_offset := CENTER_OFFSET
-
-    sections := make([]ChunkSection, OVERWORLD_HEIGHT / CHUNK_SECTION_HEIGHT, session.packet_scratch_alloc)
-    for &section, i in sections {
-        block_id := i < 8 ? BlockId.Dirt : .Air
-        section = create_chunk_section(block_id)
-    }
-    
-    gold_sections := make([]ChunkSection, OVERWORLD_HEIGHT / CHUNK_SECTION_HEIGHT, session.packet_scratch_alloc)
-    for &section, i in gold_sections {
-        block_id := i < 8 ? BlockId.GoldBlock : .Air
-        section = create_chunk_section(block_id)
-    }
-    
-    count := 0
-    for x in -center_offset..=center_offset {
-        for z in -center_offset..=center_offset {
-            chunk_pos := ChunkPos { i32(x), i32(z) }
-            sections := sections
-            if abs(x) > 2 || abs(z) > 2 {
-                _player_send_chunk(session, chunk_pos, .Air)
-                continue
-            } else if x == 0 && z == 0 {
-                sections = gold_sections
-            }
-            _player_send_chunk_data(session, chunk_pos, sections)
-            
-            count += 1
-        }
-    }
-    log.warnf("Sent %d initial chunks", count)
-}
-
-@(private="file")
-_player_send_chunk :: proc(session: ^SessionData, pos: ChunkPos, block_id: BlockId) {
-    // only permit sending new chunks, or replacing existing air chunks
-    _, existing_block_id, inserted, _ := map_entry(&get_server().loaded_chunks, pos)
-    if !inserted && existing_block_id^ != .Air do return
-
-    existing_block_id^ = block_id
-    
-    sections := make([]ChunkSection, OVERWORLD_HEIGHT / CHUNK_SECTION_HEIGHT, session.packet_scratch_alloc)
-    for &section, i in sections {
-        section = create_chunk_section(i < 8 ? block_id : .Air)
-    }
-    
-    enqueue_packet(session, ChunkDataPacket {
-        chunk_pos = pos,
-        height_maps = nil,
-        sections = sections,
-        light = {},
-    })
-}
-
-@(private="file")
-_player_send_chunk_data :: proc(session: ^SessionData, pos: ChunkPos, sections: []ChunkSection) {
-    assert(len(sections) == OVERWORLD_HEIGHT / CHUNK_SECTION_HEIGHT)
-    
-    // only permit sending new chunks, or replacing existing air chunks
-    _, existing_block_id, inserted, _ := map_entry(&get_server().loaded_chunks, pos)
-    if !inserted && existing_block_id^ != .Air do return
-
-    existing_block_id^ = .Grass // just something
-
-    enqueue_packet(session, ChunkDataPacket {
-        chunk_pos = pos,
-        height_maps = nil,
-        sections = sections,
-        light = {},
-    })
-}
-
 @(private="file")
 _send_registry_data :: proc(session: ^SessionData) {
     assert(session.state == .Configuration)
