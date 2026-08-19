@@ -1,3 +1,4 @@
+#+vet explicit-allocators
 package crux
 
 import "core:time"
@@ -243,12 +244,11 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
         
         if !session.spawned {
             // initial play state position sync got acknowledged, prepare for player spawning
-            _player_initiate_spawning(session)
-            session.spawned = true
             
             // send add player packet to other players
             for _, &player in server.sessions {
-                if player.state != .Play || &player == session do continue
+                // looks like we need to include the joining player as well, or we wont be shown on the tab list
+                if player.state != .Play do continue
                 
                 add_player_action := PlayerInfoUpdateActionAddPlayer {
                     username = session.game_profile.username,
@@ -256,12 +256,14 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
                 }
                 add_player_packet_entry := PlayerInfoUpdateEntry {
                     uuid = session.game_profile.uuid,
-                    actions = slice.clone([]PlayerInfoUpdateAction { add_player_action }),
+                    actions = slice.clone([]PlayerInfoUpdateAction { add_player_action }, session.packet_scratch_alloc),
                 }
                 enqueue_packet(&player, PlayerInfoUpdatePacket {
-                    players = slice.clone([]PlayerInfoUpdateEntry { add_player_packet_entry }),
+                    players = slice.clone([]PlayerInfoUpdateEntry { add_player_packet_entry }, session.packet_scratch_alloc),
                 })
             }
+            _player_initiate_spawning(session)
+            session.spawned = true
         }
     case PlayerLoadedPacket:
         // empty
