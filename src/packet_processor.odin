@@ -312,22 +312,7 @@ _handle_serverbound_packet :: proc(server: ^Server, packet: ServerBoundPacket, s
             _kick_client(server, session, text_component(kick_msg, COLOR_RED))
             return
         }
-        
-        d := [2]i32{i32(packet.mode), i32(packet.button)}
-        switch d {
-        case {0, 0}: // lmb
-            if packet.slot == -999 {
-                // drop cursor stack
-            } else {
-                _player_handle_container_lmb_click(&session.inventory, packet.slot)
-            }
-        case {0, 1}: // rmb
-            if packet.slot == -999 {
-                // drop cursor single item
-            } else {
-                _player_handle_container_rmb_click(&session.inventory, packet.slot)
-            }
-        }
+        _player_dispatch_container_click(session, mode=i32(packet.mode), button=i32(packet.button), slot=packet.slot)
     case UseItemOnPacket:
         // empty
     case UseItemPacket:
@@ -351,87 +336,6 @@ _player_handle_keepalive :: proc(server: ^Server, session: ^SessionData, id: Lon
     last_keepalive.awaiting_serverbound = false
 }
 
-@(private="file")
-_player_handle_container_lmb_click :: proc(inv: ^Inventory, slot: i16) {
-    // normal click, if carrying item, place it in clicked slot, otherwise start carrying it
-    clicked_item := &inv.contents[slot]
-    carried_item, is_carrying_item := &inv.carried_item.?
-
-    if !is_carrying_item {
-        // if clicking on non air, start carrying that itemstack
-        if clicked_item.type != &items.AIR {
-            inv.carried_item = clicked_item^
-            clicked_item^ = items.ItemStack { type = &items.AIR }
-        }
-        return
-    }
-
-    // try placing item in clicked slot
-    if clicked_item.type == carried_item.type {
-        // try merging itemstack
-        if clicked_item.count < clicked_item.type.max_stack_size {
-            // clamp to [0..item_count] to account for item stacks bigger than the max stack size that were somehow obtained
-            to_add := clamp(clicked_item.type.max_stack_size - clicked_item.count, 0, carried_item.count)
-            clicked_item.count += to_add
-            carried_item.count -= to_add
-            if carried_item.count == 0 {
-                inv.carried_item = nil
-            }
-        }
-    } else {
-        // swap carried itemstack with item in that slot
-        clicked_item^, inv.carried_item = carried_item^, clicked_item^
-        if inv.carried_item.?.type == &items.AIR {
-            inv.carried_item = nil
-        }
-    }
-}
-
-// Right mouse button click with a carried item attempts to add one to the clicked slot (if the same materials),
-// if not the same material, it simply swaps the carried item with the contents of that clicked slot.
-// When no item is carried, we start carrying half the amount of items from that slot (ceiled), and leave the rest in there.
-@(private="file")
-_player_handle_container_rmb_click :: proc(inv: ^Inventory, slot: i16) {
-    clicked_item := &inv.contents[slot]
-    carried_item, is_carrying_item := &inv.carried_item.?
-    
-    if !is_carrying_item {
-        if clicked_item.type != &items.AIR {
-            remaining_count := clicked_item.count / 2 // floored by int div, also handles item count of 1
-            inv.carried_item = items.ItemStack { count=clicked_item.count - remaining_count, type=clicked_item.type }
-            clicked_item.count = remaining_count
-            if clicked_item.count == 0 {
-                clicked_item.type = &items.AIR
-            }
-        }
-        return
-    }
-    
-    // clicked same material, add one or do nothing
-    if clicked_item.type == carried_item.type {
-        if clicked_item.count >= clicked_item.type.max_stack_size do return
-        
-        clicked_item.count += 1
-        carried_item.count -= 1
-        if carried_item.count == 0 {
-            inv.carried_item = nil
-        }
-        return
-    }
-    
-    // clicking air, add one to clicked slot
-    if clicked_item.type == &items.AIR {
-        clicked_item^ = items.ItemStack { count=1, type=carried_item.type }
-        carried_item.count -= 1
-        if carried_item.count == 0 {
-            inv.carried_item = nil
-        }
-        return
-    }
-    
-    // swap
-    inv.carried_item, clicked_item^ = clicked_item^, carried_item^
-}
 @(private="file")
 _send_registry_data :: proc(session: ^SessionData) {
     assert(session.state == .Configuration)

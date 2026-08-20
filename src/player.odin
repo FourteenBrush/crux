@@ -125,6 +125,16 @@ _player_initiate_spawning :: proc(session: ^SessionData) {
     enqueue_packet(session, SetCenterChunkPacket { chunk_pos={0, 0} })
 
     _player_send_initial_chunks(session, view_distance=VIEW_DISTANCE)
+    
+    for slot in i16(36)..=44 {
+        enqueue_packet(session, ContainerSetSlotPacket {
+            window_id = 0,
+            state_id = 0,
+            slot = slot,
+            slot_data = items.ItemStack { count = 64, type = &items.DIRT },
+        })
+        session.inventory.contents[slot] = items.ItemStack { count = 64, type = &items.DIRT }
+    }
 }
 
 CENTER_OFFSET :: 4
@@ -206,16 +216,140 @@ _player_send_chunk_data :: proc(session: ^SessionData, pos: ChunkPos, sections: 
 }
 
 player_inventory_add_item :: proc(session: ^SessionData, item: items.ItemStack) {
-    it := _create_add_item_iterator(&session.inventory, item)
-    for slot_nr, item in _add_item_iterator(&it) {
+    it := _create_add_item_iterator(&session.inventory, item, .HotbarFirst)
+    for slot_nr, new_item in _add_item_iterator(&it) {
         packet := ContainerSetSlotPacket {
             window_id = 0, // inventory
             state_id = 0,
             slot = slot_nr,
-            slot_data = item,
+            slot_data = new_item,
         }
         enqueue_packet(session, packet)
     }
+}
+
+@(private)
+_player_dispatch_container_click :: proc(session: ^SessionData, mode, button: i32, slot: i16) {
+    switch ([2]i32{mode, button}) {
+    case {0, 0}: // lmb
+        if slot == -999 {
+            // drop cursor stack
+        } else {
+            _player_handle_container_lmb_click(&session.inventory, slot)
+        }
+    case {1, 0}: // shift lmb
+        _player_handle_container_shift_lmb_click(session, slot)
+    case {0, 1}: // rmb
+        if slot == -999 {
+            // drop cursor single item
+        } else {
+            _player_handle_container_rmb_click(&session.inventory, slot)
+        }
+    }
+}
+
+@(private="file")
+_player_handle_container_lmb_click :: proc(inv: ^Inventory, slot: i16) {
+    // normal click, if carrying item, place it in clicked slot, otherwise start carrying it
+    clicked_item := &inv.contents[slot]
+    carried_item, is_carrying_item := &inv.carried_item.?
+
+    if !is_carrying_item {
+        // if clicking on non air, start carrying that itemstack
+        if clicked_item.type != &items.AIR {
+            inv.carried_item = clicked_item^
+            clicked_item^ = items.ItemStack { type = &items.AIR }
+        }
+        return
+    }
+
+    // try placing item in clicked slot
+    if clicked_item.type == carried_item.type {
+        // try merging itemstack
+        if clicked_item.count < clicked_item.type.max_stack_size {
+            // clamp to [0..item_count] to account for item stacks bigger than the max stack size that were somehow obtained
+            to_add := clamp(clicked_item.type.max_stack_size - clicked_item.count, 0, carried_item.count)
+            clicked_item.count += to_add
+            carried_item.count -= to_add
+            if carried_item.count == 0 {
+                inv.carried_item = nil
+            }
+        }
+    } else {
+        // swap carried itemstack with item in that slot
+        clicked_item^, inv.carried_item = carried_item^, clicked_item^
+        if inv.carried_item.?.type == &items.AIR {
+            inv.carried_item = nil
+        }
+    }
+}
+
+// Moves the clicked itemstack (if any) to the first available slot in the inventory, starting from the top left slot downwards.
+@(private="file")
+_player_handle_container_shift_lmb_click :: proc(session: ^SessionData, slot: i16) {
+    inv := &session.inventory
+    clicked_item := &inv.contents[slot]
+    if clicked_item.type == &items.AIR do return
+    
+    it := _create_add_item_iterator(inv, clicked_item^, .NoHotbar)
+    
+    for slot_nr, new_item in _add_item_iterator(&it) {
+        enqueue_packet(session, ContainerSetSlotPacket {
+            window_id = 0,
+            state_id = 0,
+            slot = slot_nr,
+            slot_data = new_item,
+        })
+    }
+    
+    remaining, has_remaining := _add_item_iterator_remaining(it)
+    clicked_item^ = has_remaining ? remaining : items.ItemStack { count=0, type=&items.AIR }
+}
+
+// Right mouse button click with a carried item attempts to add one to the clicked slot (if the same materials),
+// if not the same material, it simply swaps the carried item with the contents of that clicked slot.
+// When no item is carried, we start carrying half the amount of items from that slot (ceiled), and leave the rest in there.
+@(private="file")
+_player_handle_container_rmb_click :: proc(inv: ^Inventory, slot: i16) {
+    clicked_item := &inv.contents[slot]
+    carried_item, is_carrying_item := &inv.carried_item.?
+    
+    if !is_carrying_item {
+        if clicked_item.type != &items.AIR {
+            remaining_count := clicked_item.count / 2 // floored by int div, also handles item count of 1
+            inv.carried_item = items.ItemStack { count=clicked_item.count - remaining_count, type=clicked_item.type }
+            clicked_item.count = remaining_count
+            if clicked_item.count == 0 {
+                clicked_item.type = &items.AIR
+            }
+        }
+        return
+    }
+    
+    // clicked same material, add one or do nothing
+    if clicked_item.type == carried_item.type {
+        if clicked_item.count >= clicked_item.type.max_stack_size do return
+        
+        clicked_item.count += 1
+        carried_item.count -= 1
+        if carried_item.count == 0 {
+            inv.carried_item = nil
+        }
+        return
+    }
+    
+    // clicking air, add one to clicked slot
+    if clicked_item.type == &items.AIR {
+        clicked_item^ = items.ItemStack { count=1, type=carried_item.type }
+        carried_item.count -= 1
+        if carried_item.count == 0 {
+            inv.carried_item = nil
+        }
+        return
+    }
+    
+    // swap
+    inv.carried_item, clicked_item^ = clicked_item^, carried_item^
 }
 
 PLAYER_INV_MIN_SLOT :: 0
@@ -223,11 +357,17 @@ PLAYER_INV_MAX_SLOT :: 45
 PLAYER_INV_SLOT_COUNT :: (PLAYER_INV_MAX_SLOT - PLAYER_INV_MIN_SLOT) + 1
 #assert(PLAYER_INV_SLOT_COUNT == 46)
 
-@(rodata, private)
-INVENTORY_INSERT_ORDER := [36]i16 {
-    // try hotbar first
+@(rodata, private="file")
+INVENTORY_INSERT_ORDER_HOTBAR_FIRST := []i16 {
+    // hotbar
     36, 37, 38, 39, 40, 41, 42, 43, 44,
      9, 10, 11, 12, 13, 14, 15, 16, 17,
+    18, 19, 20, 21, 22, 23, 24, 25, 26,
+    27, 28, 29, 30, 31, 32, 33, 34, 35,
+}
+@(rodata, private="file")
+INVENTORY_INSERT_ORDER_NO_HOTBAR := []i16 {
+    9, 10, 11, 12, 13, 14, 15, 16, 17,
     18, 19, 20, 21, 22, 23, 24, 25, 26,
     27, 28, 29, 30, 31, 32, 33, 34, 35,
 }
@@ -236,43 +376,61 @@ INVENTORY_INSERT_ORDER := [36]i16 {
 AddItemIterator :: struct {
     inv: ^Inventory,
     to_add: items.ItemStack,
-    // Slot index into inventory grid, _not_ slot number.
-    last_slot_idx_tried: i16,
+    insert_order: []i16,
+    // Slot index into insert order, _not_ slot number.
+    last_slot_idx_tried: int,
+}
+
+@(private="file")
+AddItemIteratorInsertOrder :: enum {
+    // Consider adding items to the hotbar slots first, then move to the actual inventory.
+    HotbarFirst,
+    NoHotbar,
 }
 
 @(private, require_results)
-_create_add_item_iterator :: proc(target: ^Inventory, to_add: items.ItemStack) -> (it: AddItemIterator) {
+_create_add_item_iterator :: proc(target: ^Inventory, to_add: items.ItemStack, insert_order: AddItemIteratorInsertOrder) -> (it: AddItemIterator) {
     it.inv = target
     it.to_add = to_add
+    switch insert_order {
+    case .HotbarFirst:
+        it.insert_order = INVENTORY_INSERT_ORDER_HOTBAR_FIRST
+    case .NoHotbar:
+        it.insert_order = INVENTORY_INSERT_ORDER_NO_HOTBAR
+    case:
+        panic("unknown insert order")
+    }
     return it
 }
 
 @(private="file")
-_add_item_iterator :: proc(it: ^AddItemIterator) -> (slot_nr: i16, item: items.ItemStack, ok: bool) {
+_add_item_iterator :: proc(it: ^AddItemIterator) -> (slot_nr: i16, new_item: items.ItemStack, ok: bool) {
     if it.to_add.count == 0 do return
     
-    for i in it.last_slot_idx_tried..<len(INVENTORY_INSERT_ORDER) {
-        defer it.last_slot_idx_tried += 1
+    for ; it.last_slot_idx_tried < len(it.insert_order); it.last_slot_idx_tried += 1 {
+        slot_nr = it.insert_order[it.last_slot_idx_tried]
+        inv_item := &it.inv.contents[slot_nr]
 
-        #no_bounds_check slot_nr := INVENTORY_INSERT_ORDER[i]
-        item := &it.inv.contents[slot_nr]
+        if !items.can_merge_into(it.to_add, inv_item^) do continue
 
-        if item.type != it.to_add.type && item.type != &items.AIR {
-            continue
-        }
-
-        if item.type == &items.AIR {
+        if inv_item.type == &items.AIR {
             // update material so we are not increasing the count of an air itemstack
-            item.type = it.to_add.type
+            inv_item.type = it.to_add.type
         }
 
-        max_stack_size := item.type.max_stack_size
-        if item.count < max_stack_size {
-            to_add := min(max_stack_size - item.count, it.to_add.count)
-            item.count += to_add
+        max_stack_size := inv_item.type.max_stack_size
+        if inv_item.count < max_stack_size {
+            to_add := min(max_stack_size - inv_item.count, it.to_add.count)
+            inv_item.count += to_add
             it.to_add.count -= to_add
-            return slot_nr, item^, true
+            return slot_nr, inv_item^, true
         }
     }
-    return -1, item, false
+    return -1, {}, false
+}
+
+@(private="file", require_results)
+_add_item_iterator_remaining :: proc(it: AddItemIterator) -> (remaining: items.ItemStack, has_remaining: bool) {
+    if it.to_add.count == 0 do return
+    return it.to_add, true
 }

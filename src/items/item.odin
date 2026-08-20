@@ -21,6 +21,28 @@ ItemDescriptor :: struct #all_or_none {
     max_stack_size: i32,
 }
 
+// Returns true when the number of items in `item` can be added to `into`, considering the item type
+// and attributes such as max stack size, custom data, etc.
+can_merge_into :: proc(item: ItemStack, into: ItemStack) -> bool {
+    if into.type == &AIR {
+        // can always put an item into an empty slot
+        return true
+    }
+    if item.type != into.type {
+        return false
+    }
+
+    max_stack_size := into.type.max_stack_size
+    if into.count + item.count > max_stack_size {
+        return false
+    }
+    // TODO: compare actual patches against eachother
+    if item.patches != nil || into.patches != nil {
+        return false
+    }
+    return true
+}
+
 DataComponent :: union {
     // TODO: define all other data component types
     MaxStackSizeDataComponent,
