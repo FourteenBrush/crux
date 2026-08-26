@@ -1,16 +1,39 @@
 PROG = crux
 ifeq ($(OS),Windows_NT)
 	PROG := $(addsuffix .exe,$(PROG))
+else
+	UNAME_S := $(shell uname -s)
+	ifeq ($(UNAME_S),Linux)
+		OS_LINUX = true
+	endif
 endif
 
 SRC = src
 TESTS = tests
+BUILD_DIR = build
 COLLECTIONS = -collection:src=$(SRC) -collection:lib=lib
 
-CC = odin
-BUILD_DIR = build
-CFLAGS = -out:$(BUILD_DIR)/$(PROG) -strict-style -vet-semicolon -vet-cast $(COLLECTIONS) -define:CRUX_USE_IO_URING=true -vet-using-param
+is_true = $(filter 1 true TRUE yes YES on ON,$($(1)))
 
+USE_URING = false
+ifneq ($(call is_true,DUSE_URING),)
+ifeq ($(OS_LINUX),)
+$(error DUSE_URING can only be used on linux)
+endif
+$(info DUSE_URING is enabled)
+USE_URING = true
+endif
+
+CC = odin
+CFLAGS += \
+	-out:$(BUILD_DIR)/$(PROG) \
+	-strict-style \
+	-vet-semicolon \
+	-vet-cast $(COLLECTIONS) \
+	-define:CRUX_USE_IO_URING=$(USE_URING) \
+	-vet-using-param
+
+	
 all: release
 
 release: CFLAGS += -vet-unused -o:speed -microarch:native
@@ -24,9 +47,16 @@ test:
 	@mkdir -p $(BUILD_DIR)
 	$(CC) test $(TESTS) $(CFLAGS)
 
-$(PROG):
+$(PROG): codegen
 	@mkdir -p $(BUILD_DIR)
 	$(CC) build $(SRC) $(CFLAGS)
+
+# we can assume CWD is the root of the project
+GENERATED_CODE = src/items/generated.odin
+codegen: $(GENERATED_CODE)
+
+$(GENERATED_CODE):
+	$(CC) run misc/codegen.odin -file -- --output-file $(GENERATED_CODE) --delete-conflicting-outputs=false
 
 run: debug
 	./$(BUILD_DIR)/$(PROG) $(ARGS)
@@ -43,4 +73,4 @@ check:
 clean:
 	-@rm -r $(BUILD_DIR)
 
-.PHONY: release debug run test profile check clean
+.PHONY: release debug run test profile check clean codegen

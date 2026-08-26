@@ -7,7 +7,8 @@ ItemStack :: struct {
     patches: []Pair(DataComponentType, Maybe(DataComponent)),
 }
 
-create :: #force_inline proc(count: i32, type: ^ItemDescriptor) -> ItemStack {
+create :: #force_inline proc(count: i32, type: ^ItemDescriptor, loc := #caller_location) -> ItemStack {
+    assert(count <= type.max_stack_size, "cannot create item with count > max stack size", loc=loc)
     return ItemStack { count=count, type=type }
 }
 
@@ -21,9 +22,9 @@ ItemDescriptor :: struct #all_or_none {
     max_stack_size: i32,
 }
 
-// Returns true when the number of items in `item` can be added to `into`, considering the item type
+// Returns true when at least one item can be added to `into`, considering the item type
 // and attributes such as max stack size, custom data, etc.
-can_merge_into :: proc(item: ItemStack, into: ItemStack) -> bool {
+can_merge_into_partial :: proc(item: ItemStack, into: ItemStack) -> bool {
     if into.type == &AIR {
         // can always put an item into an empty slot
         return true
@@ -33,7 +34,7 @@ can_merge_into :: proc(item: ItemStack, into: ItemStack) -> bool {
     }
 
     max_stack_size := into.type.max_stack_size
-    if into.count + item.count > max_stack_size {
+    if into.count + 1 > max_stack_size {
         return false
     }
     // TODO: compare actual patches against eachother

@@ -17,3 +17,6 @@ Session.vim
 Sessionx.vim
 
 lib/tracy/tracy.so
+
+# codegen
+*generated.odin
