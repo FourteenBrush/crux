@@ -55,8 +55,12 @@ $(PROG): codegen
 GENERATED_CODE = src/items/generated.odin
 codegen: $(GENERATED_CODE)
 
-$(GENERATED_CODE):
-	$(CC) run misc/codegen.odin -file -- --output-file $(GENERATED_CODE) --delete-conflicting-outputs=false
+DELETE_CONFLICTING_OUTPUTS ?= false
+
+$(GENERATED_CODE): misc/codegen.odin
+	$(CC) run misc/codegen.odin -file -out:$(BUILD_DIR)/codegen -- \
+		--output-file $(GENERATED_CODE) \
+		--delete-conflicting-outputs=$(DELETE_CONFLICTING_OUTPUTS)
 
 run: debug
 	./$(BUILD_DIR)/$(PROG) $(ARGS)

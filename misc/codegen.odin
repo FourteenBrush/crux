@@ -1,12 +1,12 @@
 #+vet explicit-allocators
 package codegen
 
-import "core:path/filepath"
 import "core:os"
 import "core:fmt"
 import "core:mem"
 import "core:flags"
 import "core:strings"
+import "core:path/filepath"
 import "core:encoding/json"
 import vmem "core:mem/virtual"
 
@@ -48,7 +48,10 @@ main :: proc() {
     }
     output_file, output_err := os.open(cli_args.output_file, open_flags)
     if output_err == .Exist && !cli_args.delete_conflicting_outputs {
-        fmt.eprintln("Could not output generated code, file exists, consider passing --delete-conflicting-outputs to overwrite this existing file")
+        fmt.eprintln(
+            "Could not output generated code, file exists, consider passing --delete-conflicting-outputs to this script to overwrite this existing file" +
+            ", or execute `make codegen DELETE_CONFLICTING_OUTPUTS=true`",
+        )
         os.exit(1)
     }
     if output_err != nil {
@@ -85,12 +88,13 @@ generate_code :: proc(items: ItemsJsonModel, registries: RegistriesJsonModel, sb
         return false
     }
 
-    fmt.sbprintf(sb,
-`/* 
-    GENERATED CODE, DO NOT EDIT MANUALLY
- */
-package %s
-`, PKG_NAME)
+    fmt.sbprintfln(sb, """
+    /*
+        GENERATED CODE, DO NOT EDIT MANUALLY
+    */
+    package %s
+
+    """, PKG_NAME)
 
     for item_id, spec in item_registry.entries {
         prefix :: "minecraft:"
@@ -125,14 +129,22 @@ package %s
         odin_item_name := strings.to_upper_snake_case(item_id, context.allocator) or_else panic("ALLOC ERR")
 
         
-        fmt.sbprintf(sb,
-`
-@(rodata)
-%s := ItemDescriptor {{
-    protocol_id = %d,
-    max_stack_size = %d,
-}}
-`, odin_item_name, spec.protocol_id, max_stack_size)
+        fmt.sbprintfln(sb, ```
+        @(rodata)
+        %s := ItemDescriptor {{
+            protocol_id = %d,
+            max_stack_size = %d,
+        }}
+
+        ```, odin_item_name, spec.protocol_id, max_stack_size)
+//         fmt.sbprintf(sb,
+// `
+// @(rodata)
+// %s := ItemDescriptor {{
+//     protocol_id = %d,
+//     max_stack_size = %d,
+// }}
+// `, odin_item_name, spec.protocol_id, max_stack_size)
     }
 
     return true
