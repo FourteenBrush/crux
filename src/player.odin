@@ -121,7 +121,7 @@ _player_initiate_spawning :: proc(session: ^SessionData) {
         flying_speed = 0.05,
         fov_modifier = 0.1,
     })
-    enqueue_packet(session, StartWaitingForChunks {})
+    enqueue_packet(session, GameEventPacket(StartWaitingForChunks {}))
     enqueue_packet(session, SetCenterChunkPacket { chunk_pos={0, 0} })
 
     _player_send_initial_chunks(session, view_distance=VIEW_DISTANCE)
@@ -284,16 +284,18 @@ _player_handle_container_lmb_click :: proc(inv: ^Inventory, slot: i16) {
     }
 }
 
-// Moves the clicked itemstack (if any) to the first available slot in the inventory, starting from the top left slot downwards.
+// Quick-move operation, moves items between the hotbar and the main part of the inventory, and vice versa.
+// Will try to fill slots with the same material first, then resorts to filling empty slots in the destination area.
 @(private="file")
 _player_handle_container_shift_lmb_click :: proc(session: ^SessionData, slot: i16) {
     inv := &session.inventory
     clicked_item := &inv.contents[slot]
     if clicked_item.type == &items.AIR do return
     
-    it := _create_add_item_iterator(inv, clicked_item^, .NoHotbar)
+    insert_order := AddItemIteratorInsertOrder.NoHotbar if slot_is_hotbar(slot) else .HotbarOnly
+    it := _create_add_item_iterator(inv, to_add=clicked_item^, insert_order=insert_order)
     
-    for slot_nr, new_item in _add_item_iterator(&it) {
+    for slot_nr, new_item in _add_item_iterator_merge_first(&it) {
         enqueue_packet(session, ContainerSetSlotPacket {
             window_id = 0,
             state_id = 0,
@@ -303,7 +305,7 @@ _player_handle_container_shift_lmb_click :: proc(session: ^SessionData, slot: i1
     }
     
     remaining, has_remaining := _add_item_iterator_remaining(it)
-    clicked_item^ = has_remaining ? remaining : items.ItemStack { count=0, type=&items.AIR }
+    clicked_item^ = has_remaining ? remaining : items.ItemStack { type=&items.AIR }
 }
 
 // Right mouse button click with a carried item attempts to add one to the clicked slot (if the same materials),
@@ -371,6 +373,14 @@ INVENTORY_INSERT_ORDER_NO_HOTBAR := []i16 {
     18, 19, 20, 21, 22, 23, 24, 25, 26,
     27, 28, 29, 30, 31, 32, 33, 34, 35,
 }
+@(rodata, private="file")
+INVENTORY_INSERT_ORDER_ONLY_HOTBAR := []i16 {
+    36, 37, 38, 39, 40, 41, 42, 43, 44,
+}
+
+slot_is_hotbar :: #force_inline proc "contextless" (slot: i16) -> bool {
+    return slot >= 36 && slot <= 44
+}
 
 @(private="file")
 AddItemIterator :: struct {
@@ -379,6 +389,11 @@ AddItemIterator :: struct {
     insert_order: []i16,
     // Slot index into insert order, _not_ slot number.
     last_slot_idx_tried: int,
+
+    // Only used by a merge-first iterator, -1 on creation.
+    first_empty_slot_idx: i16,
+    // Only used by a merge-first iterator, set to true after running out of slots of the same type to merge into.
+    using_empty_slots: bool,
 }
 
 @(private="file")
@@ -386,47 +401,112 @@ AddItemIteratorInsertOrder :: enum {
     // Consider adding items to the hotbar slots first, then move to the actual inventory.
     HotbarFirst,
     NoHotbar,
+    HotbarOnly,
 }
 
-@(private, require_results)
+@(private="file", require_results)
 _create_add_item_iterator :: proc(target: ^Inventory, to_add: items.ItemStack, insert_order: AddItemIteratorInsertOrder) -> (it: AddItemIterator) {
     it.inv = target
     it.to_add = to_add
+    it.first_empty_slot_idx = -1
+
     switch insert_order {
     case .HotbarFirst:
         it.insert_order = INVENTORY_INSERT_ORDER_HOTBAR_FIRST
     case .NoHotbar:
         it.insert_order = INVENTORY_INSERT_ORDER_NO_HOTBAR
+    case .HotbarOnly:
+        it.insert_order = INVENTORY_INSERT_ORDER_ONLY_HOTBAR
     case:
         panic("unknown insert order")
     }
     return it
 }
 
+// Advances to the next slot that is able to store some or all of the items from the item stack that has to be added.
+// Returns the new contents of the slot that changed due to some items being added.
+// Returns false the moment we added the whole item stack to the destination inventory, or when we ran out of suitable slots,
+// after which the remainder of that item stack can be retrieved with `_add_item_iterator_remaining()`.
 @(private="file")
 _add_item_iterator :: proc(it: ^AddItemIterator) -> (slot_nr: i16, new_item: items.ItemStack, ok: bool) {
+    assert(it.inv != nil, "unitialized iterator")
     if it.to_add.count == 0 do return
     
     for ; it.last_slot_idx_tried < len(it.insert_order); it.last_slot_idx_tried += 1 {
         slot_nr = it.insert_order[it.last_slot_idx_tried]
         inv_item := &it.inv.contents[slot_nr]
 
-        if !items.can_merge_into(it.to_add, inv_item^) do continue
+        if !items.can_merge_into_partial(it.to_add, into=inv_item^) do continue
 
         if inv_item.type == &items.AIR {
             // update material so we are not increasing the count of an air itemstack
             inv_item.type = it.to_add.type
         }
 
-        max_stack_size := inv_item.type.max_stack_size
-        if inv_item.count < max_stack_size {
-            to_add := min(max_stack_size - inv_item.count, it.to_add.count)
-            inv_item.count += to_add
-            it.to_add.count -= to_add
+        if grown_by := items.try_grow_stack(inv_item, it.to_add.count); grown_by > 0 {
+            it.to_add.count -= grown_by
             return slot_nr, inv_item^, true
         }
     }
     return -1, {}, false
+}
+
+// An iterator that first considers slots with the same item type and properties, before moving on to empty slots.
+// See `_add_item_iterator()`.
+@(private="file", require_results)
+_add_item_iterator_merge_first :: proc(it: ^AddItemIterator) -> (slot_nr: i16, new_item: items.ItemStack, ok: bool) {
+    assert(it.inv != nil, "unitialized iterator")
+    if it.to_add.count == 0 do return
+
+    if !it.using_empty_slots && it.last_slot_idx_tried == len(it.insert_order) - 1 {
+        if it.first_empty_slot_idx == -1 {
+            // no empty slot found while iterating over slots with compatible item type
+            return
+        }
+        
+        // ran out of slots to merge our item into
+        it.using_empty_slots = true
+        assert(it.first_empty_slot_idx >= 0)
+        it.last_slot_idx_tried = int(it.first_empty_slot_idx)
+    }
+    
+    if it.using_empty_slots {
+        // find any empty slot and attempt to place our item inside it
+        for ; it.last_slot_idx_tried < len(it.insert_order); it.last_slot_idx_tried += 1 {
+            slot_nr := it.insert_order[it.last_slot_idx_tried]
+            inv_item := &it.inv.contents[slot_nr]
+
+            if inv_item.type != &items.AIR do continue
+
+            if grown_by := items.try_grow_stack(inv_item, it.to_add.count); grown_by > 0 {
+                it.to_add.count -= grown_by
+                return slot_nr, inv_item^, true
+            }
+        }
+
+        return // ran out of empty slots
+    }
+
+    // find slots with a compatible item type
+    for ; it.last_slot_idx_tried < len(it.insert_order); it.last_slot_idx_tried += 1 {
+        slot_nr := it.insert_order[it.last_slot_idx_tried]
+        inv_item := &it.inv.contents[slot_nr]
+        
+        if it.first_empty_slot_idx == -1 && inv_item.type == &items.AIR {
+            it.first_empty_slot_idx = slot_nr
+        }
+        
+        if is_compatible := items.can_merge_into_partial(it.to_add, into=inv_item^) && inv_item.type != &items.AIR; !is_compatible {
+            continue
+        }
+
+        if grown_by := items.try_grow_stack(inv_item, it.to_add.count); grown_by > 0 {
+            it.to_add.count -= grown_by
+            return slot_nr, inv_item^, true
+        }
+    }
+
+    return // ran out of compatible slot types
 }
 
 @(private="file", require_results)

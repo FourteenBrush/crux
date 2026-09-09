@@ -340,12 +340,12 @@ _player_handle_keepalive :: proc(server: ^Server, session: ^SessionData, id: Lon
 _send_registry_data :: proc(session: ^SessionData) {
     assert(session.state == .Configuration)
     
-    enqueue_packet(session, DimensionTypeRegistry {
+    enqueue_packet(session, RegistryDataPacket(DimensionTypeRegistry {
         entries = slice.clone([]RegistryEntry(DimensionType){
             0 = { id = Identifier("minecraft:overworld"), data = nil },
         }, session.packet_scratch_alloc),
-    })
-    enqueue_packet(session, CatVariantRegistry {
+    }))
+    enqueue_packet(session, RegistryDataPacket(CatVariantRegistry {
         entries = slice.clone([]RegistryEntry(CatVariant){
             { id = Identifier("minecraft:tabby"), data = nil },
             { id = Identifier("minecraft:black"), data = nil },
@@ -358,36 +358,36 @@ _send_registry_data :: proc(session: ^SessionData) {
             { id = Identifier("minecraft:white"), data = nil },
             { id = Identifier("minecraft:jellie"), data = nil },
         }, session.packet_scratch_alloc),
-    })
-    enqueue_packet(session, ChickenVariantRegistry {
+    }))
+    enqueue_packet(session, RegistryDataPacket(ChickenVariantRegistry {
         entries = slice.clone([]RegistryEntry(ChickenVariant){
             { id = Identifier("minecraft:cold"), data = nil },
             { id = Identifier("minecraft:temperate"), data = nil },
             { id = Identifier("minecraft:warm"), data = nil },
         }, session.packet_scratch_alloc),
-    })
-    enqueue_packet(session, CowVariantRegistry {
+    }))
+    enqueue_packet(session, RegistryDataPacket(CowVariantRegistry {
         entries = slice.clone([]RegistryEntry(CowVariant){
             { id = Identifier("minecraft:cold"), data = nil },
             { id = Identifier("minecraft:temperate"), data = nil },
             { id = Identifier("minecraft:warm"), data = nil },
         }, session.packet_scratch_alloc),
-    })
-    enqueue_packet(session, FrogVariantRegistry {
+    }))
+    enqueue_packet(session, RegistryDataPacket(FrogVariantRegistry {
         entries = slice.clone([]RegistryEntry(FrogVariant){
             { id = Identifier("minecraft:cold"), data = nil },
             { id = Identifier("minecraft:temperate"), data = nil },
             { id = Identifier("minecraft:warm"), data = nil },
         }, session.packet_scratch_alloc),
-    })
-    enqueue_packet(session, PigVariantRegistry {
+    }))
+    enqueue_packet(session, RegistryDataPacket(PigVariantRegistry {
         entries = slice.clone([]RegistryEntry(PigVariant){
             { id = Identifier("minecraft:cold"), data = nil },
             { id = Identifier("minecraft:temperate"), data = nil },
             { id = Identifier("minecraft:warm"), data = nil },
         }, session.packet_scratch_alloc),
-    })
-    enqueue_packet(session, WolfVariantRegistry {
+    }))
+    enqueue_packet(session, RegistryDataPacket(WolfVariantRegistry {
         entries = slice.clone([]RegistryEntry(WolfVariant){
             { id = Identifier("minecraft:ashen"), data = nil },
             { id = Identifier("minecraft:black"), data = nil },
@@ -399,8 +399,8 @@ _send_registry_data :: proc(session: ^SessionData) {
             { id = Identifier("minecraft:striped"), data = nil },
             { id = Identifier("minecraft:woods"), data = nil },
         }, session.packet_scratch_alloc),
-    })
-    enqueue_packet(session, WolfSoundVariantRegistry {
+    }))
+    enqueue_packet(session, RegistryDataPacket(WolfSoundVariantRegistry {
         entries = slice.clone([]RegistryEntry(WolfSoundVariant){
             { id = Identifier("minecraft:angry"), data = nil },
             { id = Identifier("minecraft:big"), data = nil },
@@ -410,8 +410,8 @@ _send_registry_data :: proc(session: ^SessionData) {
             { id = Identifier("minecraft:puglin"), data = nil },
             { id = Identifier("minecraft:sad"), data = nil },
         }, session.packet_scratch_alloc),
-    })
-    enqueue_packet(session, PaintingVariantRegistry {
+    }))
+    enqueue_packet(session, RegistryDataPacket(PaintingVariantRegistry {
         entries = slice.clone([]RegistryEntry(PaintingVariant){
             { id = Identifier("minecraft:alban"), data = nil },
             { id = Identifier("minecraft:aztec"), data = nil },
@@ -464,8 +464,8 @@ _send_registry_data :: proc(session: ^SessionData) {
             { id = Identifier("minecraft:wind"), data = nil },
             { id = Identifier("minecraft:wither"), data = nil },
         }, session.packet_scratch_alloc),
-    })
-    enqueue_packet(session, DamageTypeRegistry {
+    }))
+    enqueue_packet(session, RegistryDataPacket(DamageTypeRegistry {
         entries = slice.clone([]RegistryEntry(DamageType){
             { id = Identifier("minecraft:arrow"), data = nil },
             { id = Identifier("minecraft:bad_respawn_point"), data = nil },
@@ -517,11 +517,11 @@ _send_registry_data :: proc(session: ^SessionData) {
             { id = Identifier("minecraft:wither"), data = nil },
             { id = Identifier("minecraft:wither_skull"), data = nil },
         }, session.packet_scratch_alloc),
-    })
+    }))
     // a minecraft:plains biome is required as default biome before a login packet will be accepted
-    enqueue_packet(session, BiomeRegistry {
+    enqueue_packet(session, RegistryDataPacket(BiomeRegistry {
         entries = slice.clone([]RegistryEntry(Biome){
             BiomeId.Plains = { id = Identifier("minecraft:plains"), data = nil },
         }, session.packet_scratch_alloc),
-    })
+    }))
 }
