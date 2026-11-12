@@ -3,9 +3,8 @@ package crux
 
 import "core:log"
 import "core:mem"
-import "core:bytes"
 import "core:slice"
-import "core:compress/zlib"
+import "core:compress/deflate"
 
 import "src:items"
 
@@ -92,12 +91,12 @@ _deserialize_serverbound :: proc(
 }
 
 @(private="file")
-_decompress_data :: proc(data: []u8, expected_output_size: int, buf_allocator: mem.Allocator) -> (decompressed: []u8, err: zlib.Error) {
-    // a reserve() is performed on this buffer with size max(expected_output_size, compress.COMPRESS_OUTPUT_ALLOCATE_MIN(standard=1MiB))
-    out: bytes.Buffer
-    context.allocator = buf_allocator
-    err = zlib.inflate_from_byte_array(data, &out, expected_output_size=expected_output_size)
-    return out.buf[:], err
+_decompress_data :: proc(data: []u8, expected_output_size: int, buf_allocator: mem.Allocator) -> (decompressed: []u8, err: deflate.Error) {
+    // a reserve() is performed on this buffer 
+    out: [dynamic]u8
+    out.allocator = buf_allocator
+    err = deflate.inflate_zlib_from_bytes(&out, data, expected_output_size=expected_output_size, allocator=buf_allocator)
+    return out[:], err
 }
 
 // Attempts to parse a serverbound packet from a buffer containing the length, packet id and payload
