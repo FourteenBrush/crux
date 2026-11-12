@@ -61,15 +61,15 @@ run :: proc(endpoint: net.Endpoint, server_sock: net.TCP_Socket) -> bool {
     io_ctx := _setup_io_context(server_sock, os.heap_allocator()) or_return
     defer reactor.destroy_io_context(&io_ctx, os.heap_allocator())
 
-    inbound_queue: SPSC(BridgeMessage(ServerBoundPacket))
-    queue.init(&inbound_queue.data, 128)
-    defer queue.destroy(&inbound_queue.data)
-    server.inbound_queue = &inbound_queue
+    server.inbound_queue = &SPSC(BridgeMessage(ServerBoundPacket)) {}
+    queue.init(&server.inbound_queue.data, 128)
+    defer queue.destroy(&server.inbound_queue.data)
+    defer server.inbound_queue = nil // get rid of use after free warning
     
-    outbound_queue: SPSC(BridgeMessage(ClientBoundPacket))
-    queue.init(&outbound_queue.data, 128)
-    defer queue.destroy(&outbound_queue.data)
-    server.outbound_queue = &outbound_queue
+    server.outbound_queue = &SPSC(BridgeMessage(ClientBoundPacket)) {}
+    queue.init(&server.outbound_queue.data, 128)
+    defer queue.destroy(&server.outbound_queue.data)
+    defer server.outbound_queue = nil
     
     server.sessions = make(map[net.TCP_Socket]SessionData, 16, os.heap_allocator())
     defer delete(server.sessions)
@@ -225,7 +225,7 @@ _create_session :: proc(
     protocol_version: ProtocolVersion,
 ) -> SessionData {
     scratch_alloc := new(mem.Scratch, os.heap_allocator())
-    mem.scratch_init(scratch_alloc, 16 * mem.Megabyte, os.heap_allocator())
+    mem.scratch_init(scratch_alloc, 64 * mem.Megabyte, os.heap_allocator())
 
     inv_items := make([]items.ItemStack, PLAYER_INV_SLOT_COUNT, os.heap_allocator() /*gpa*/)
     slice.fill(inv_items, items.ItemStack { type=&items.AIR, count=0 })
