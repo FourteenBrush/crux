@@ -44,6 +44,14 @@ can_merge_into_partial :: proc(item: ItemStack, into: ItemStack) -> bool {
     return true
 }
 
+// Tries to add `amount` to the itemstack specified by `item`, returns the number of items
+// actually added, considering the max stack size.
+try_grow_stack :: proc(item: ^ItemStack, amount: i32) -> (grown_by: i32) {
+    to_add := clamp(item.type.max_stack_size - item.count, 0, amount)
+    item.count += to_add
+    return to_add
+}
+
 DataComponent :: union {
     // TODO: define all other data component types
     MaxStackSizeDataComponent,
