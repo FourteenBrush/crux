@@ -11,7 +11,6 @@ import "core:net"
 import "core:sync"
 import "base:runtime"
 import "core:container/queue"
-import sa "core:container/small_array"
 
 import "src:epoch"
 import "src:reactor"
@@ -352,17 +351,17 @@ _enqueue_packet :: proc(state: ^NetworkWorkerState, client_conn: ^ClientConnecti
 
     bufs := _serialize_clientbound(packet, descriptor, client_conn.compression_threshold, &state.temp_tx_buf, client_conn.packet_scratch_alloc) or_return
     buf_reset(&state.temp_tx_buf)
-    assert(sa.len(bufs) >= 2, "expected at least length header and (id, payload) combination")
+    assert(len(bufs) >= 2, "expected at least length header and (id, payload) combination")
 
-    submission_ok := reactor.submit_write_vectored(state.io_ctx, client_conn.socket, sa.slice(&bufs))
+    submission_ok := reactor.submit_write_vectored(state.io_ctx, client_conn.socket, bufs[:])
     if !submission_ok {
-        for buf in sa.slice(&bufs) do delete(buf, client_conn.packet_scratch_alloc)
+        for buf in bufs do delete(buf, client_conn.packet_scratch_alloc)
         log.debug("io submission not ok")
         return false
     }
     
-    state.outstanding_writes += sa.len(bufs)
-    client_conn.outstanding_writes += cast(u32) sa.len(bufs)
+    state.outstanding_writes += len(bufs)
+    client_conn.outstanding_writes += cast(u32) len(bufs)
     client_conn.terminating |= descriptor.is_terminal
 
     // must run after the SetCompressionPacket has been sent

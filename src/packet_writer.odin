@@ -4,7 +4,6 @@ package crux
 import "core:log"
 import "core:mem"
 import "core:encoding/json"
-import sa "core:container/small_array"
 
 import "base:runtime"
 import "base:intrinsics"
@@ -34,10 +33,10 @@ _serialize_clientbound :: proc(
     tx_buf: ^NetworkBuffer,
     allocator: mem.Allocator,
 ) -> (
-    bufs: sa.Small_Array(3, []u8),
+    bufs: [dynamic; 3][]u8,
     ok: bool,
 ) {
-    assert(buf_length(tx_buf^) == 0, "tx buf is only used for temporary construction")
+    assert(buf_length(tx_buf^) == 0, "tx buf is only used for temporary construction and should be empty")
     compression_threshold, uses_compressed_format := compression_threshold.?
     
     uncompressed_data_len, werr := _serialize_clientbound_uncompressed(tx_buf, packet, packet_desc)
@@ -64,7 +63,7 @@ _serialize_clientbound :: proc(
     read_err := buf_copy_into(tx_buf^, id_and_payload)
     assert(read_err == .None, "invariant, copied full length")
 
-    sa.append(&bufs, data_len_buf, id_and_payload)
+    append(&bufs, data_len_buf, id_and_payload)
     
     if !uses_compressed_format || compression_threshold < 0 {
         return bufs, true
@@ -76,16 +75,17 @@ _serialize_clientbound :: proc(
         compressed_id_and_payload := _compress_data(id_and_payload, allocator) or_return
         
         // replace uncompressed buffer with compressed one
+        bufs[1] = compressed_id_and_payload
         // FIXME: some arena like allocators only support freeing last allocation
         delete(id_and_payload, allocator)
         id_and_payload = compressed_id_and_payload
-        sa.set(&bufs, 1, compressed_id_and_payload)
     }
 
     packet_length := len(data_len_buf) + len(id_and_payload)
     packet_len_buf := _serialize_var_int(VarInt(packet_length), allocator)
     defer if !ok do delete(packet_len_buf, allocator)
-    sa.push_front(&bufs, packet_len_buf)
+
+    inject_at(&bufs, 0, packet_len_buf)
     
     return bufs, true
 }
