@@ -58,7 +58,7 @@ codegen: $(GENERATED_CODE)
 DELETE_CONFLICTING_OUTPUTS ?= false
 
 $(GENERATED_CODE): misc/codegen.odin
-	$(CC) run misc/codegen.odin -file -out:$(BUILD_DIR)/codegen -- \
+	$(CC) run misc/codegen.odin -file -out:$(BUILD_DIR)/codegen -keep-executable -- \
 		--output-file $(GENERATED_CODE) \
 		--delete-conflicting-outputs=$(DELETE_CONFLICTING_OUTPUTS)
 
