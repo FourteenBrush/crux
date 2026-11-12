@@ -63,13 +63,17 @@ run :: proc(endpoint: net.Endpoint, server_sock: net.TCP_Socket) -> bool {
 
     server.inbound_queue = &SPSC(BridgeMessage(ServerBoundPacket)) {}
     queue.init(&server.inbound_queue.data, 128)
-    defer queue.destroy(&server.inbound_queue.data)
-    defer server.inbound_queue = nil // get rid of use after free warning
+    defer {
+        queue.destroy(&server.inbound_queue.data)
+        server.inbound_queue = nil // get rid of use after free warning
+    }
     
     server.outbound_queue = &SPSC(BridgeMessage(ClientBoundPacket)) {}
     queue.init(&server.outbound_queue.data, 128)
-    defer queue.destroy(&server.outbound_queue.data)
-    defer server.outbound_queue = nil
+    defer {
+        queue.destroy(&server.outbound_queue.data)
+        server.outbound_queue = nil
+    }
     
     server.sessions = make(map[net.TCP_Socket]SessionData, 16, os.heap_allocator())
     defer delete(server.sessions)
