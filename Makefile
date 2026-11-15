@@ -60,7 +60,7 @@ DELETE_CONFLICTING_OUTPUTS ?= false
 
 $(GENERATED_CODE): misc/codegen.odin
 	@mkdir -p $(BUILD_DIR)
-	$(CC) run misc/codegen.odin -file -out:$(BUILD_DIR)/codegen$(SUFFIX) -- \
+	$(CC) run misc/codegen.odin -file -out:$(BUILD_DIR)/codegen$(EXT) -- \
 		--output-file $(GENERATED_CODE) \
 		--delete-conflicting-outputs=$(DELETE_CONFLICTING_OUTPUTS)
 
