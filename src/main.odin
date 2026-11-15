@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:time"
+import "core:c/libc"
 import "base:runtime"
 import "core:strings"
 import "core:terminal"
@@ -15,7 +16,6 @@ import "core:terminal/ansi"
 
 import "src:reactor"
 
-import "lib:back"
 import "lib:tracy"
 
 _ :: mem
@@ -47,9 +47,22 @@ main :: proc() {
             backing_allocator = context.allocator,
         )
     }
+    
+    libc.signal(libc.SIGINT, proc "c" (_: i32) {
+        context = runtime.default_context()
+        lines, err := trace.resolve(trace.capture(skip=1), context.temp_allocator, context.temp_allocator)
+      		if err != nil {
+			runtime.print_string("could not get backtrace for assertion failure: ")
+			runtime.print_string(trace.resolve_err_string(err))
+			runtime.print_string("\n")
+		} else {
+			runtime.print_string("[back trace]\n")
+			trace.print(lines)
+			trace.locations_destroy(lines, context.temp_allocator)
+		}
 
-    // TODO: get rid of back dependency here, replace with cross platform handler which invokes trace.capture()
-    back.register_segfault_handler()
+    })
+    
     context.assertion_failure_proc = proc(prefix, message: string, loc: runtime.Source_Code_Location) -> ! {
         // ensure we do not enter recursive panic by calling into callsite mem.panic_allocator()
         context.allocator = runtime.default_allocator()
