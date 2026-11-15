@@ -1,12 +1,13 @@
-PROG = crux
+EXT =
 ifeq ($(OS),Windows_NT)
-	PROG := $(addsuffix .exe,$(PROG))
+	EXT = .exe
 else
-	UNAME_S := $(shell uname -s)
-	ifeq ($(UNAME_S),Linux)
+	ifeq ($(shell uname -s),Linux)
 		OS_LINUX = true
 	endif
 endif
+
+PROG = crux$(EXT)
 
 SRC = src
 TESTS = tests
@@ -58,7 +59,8 @@ codegen: $(GENERATED_CODE)
 DELETE_CONFLICTING_OUTPUTS ?= false
 
 $(GENERATED_CODE): misc/codegen.odin
-	$(CC) run misc/codegen.odin -file -out:$(BUILD_DIR)/codegen -keep-executable -- \
+	@mkdir -p $(BUILD_DIR)
+	$(CC) run misc/codegen.odin -file -out:$(BUILD_DIR)/codegen$(SUFFIX) -- \
 		--output-file $(GENERATED_CODE) \
 		--delete-conflicting-outputs=$(DELETE_CONFLICTING_OUTPUTS)
 
