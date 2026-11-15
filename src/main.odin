@@ -51,8 +51,8 @@ main :: proc() {
     libc.signal(libc.SIGINT, proc "c" (_: i32) {
         context = runtime.default_context()
         lines, err := trace.resolve(trace.capture(skip=1), context.temp_allocator, context.temp_allocator)
-      		if err != nil {
-			runtime.print_string("could not get backtrace for assertion failure: ")
+  		if err != nil {
+			runtime.print_string("could not get backtrace for segfault: ")
 			runtime.print_string(trace.resolve_err_string(err))
 			runtime.print_string("\n")
 		} else {
